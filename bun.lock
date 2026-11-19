@@ -57,6 +57,9 @@
     "packages/testing": {
       "name": "@zeta-agent/testing",
       "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/cordis": "workspace:*",
+      },
     },
   },
   "packages": {
