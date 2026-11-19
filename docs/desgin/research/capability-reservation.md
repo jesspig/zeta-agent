@@ -88,7 +88,7 @@ flowchart TB
 | --- | --- | --- |
 | 唯一变更入口 / 撤销 | `ctx.effect` + exact disposer + LIFO | [framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect) |
 | 依赖声明 / 隔离 / 拦截 | `CoeffectKey` + `ctx.get/set/isolate/intercept` | [framework §6](../framework/core-semantics.md#6-依赖注入与隔离) |
-| 事件 | 5 种派发模式 + `@mode` 校验 | [10 CORE-1](./dsh-optimizations.md#3-核心运行时优化core) |
+| 事件 | 5 种派发模式 + 声明合并静态约束 | [10 CORE-1](./dsh-optimizations.md#3-核心运行时优化core) |
 | 生命周期 / 热替换 | fiber 状态机 + guard + HMR | [framework §7/§8](../framework/overview.md) |
 | 服务登记 | seam 三段式 + 注册表 contribution | [10 CORE-13](./dsh-optimizations.md#3-核心运行时优化core) |
 | 配置与分发 | profile/bundle/patch + `--dump-config` | [framework §8](../framework/components.md#8-组件加载器与-hmr) |

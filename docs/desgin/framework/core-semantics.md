@@ -42,9 +42,11 @@ export interface Component<P = unknown, D extends CoeffectKey<any>[] = any, R ex
   accepts?: Record<string, (value: unknown) => unknown>; // 版本映射，借鉴 chord
 }
 
+// 已按 cordis 官方源码校正为 6 态（原草案 5 态）
 export type LifecycleState =
-  | { kind: "INACTIVE" }
-  | { kind: "FAILED"; error: unknown }                 // §4.4 failure 扩展
+  | { kind: "PENDING" }                                 // 依赖未齐备或已卸载；官方 FiberState.PENDING
+  | { kind: "DISPOSED" }                                // 独立终态；官方 FiberState.DISPOSED
+  | { kind: "FAILED"; error: unknown }                  // §4.4 failure 扩展
   | { kind: "LOADING"; iter: EffectIterator; dispose: Disposer; committed: View }
   | { kind: "ACTIVE"; dispose: Disposer; committed: View }
   | { kind: "UNLOADING"; dispose: Disposer; committed: View };
@@ -61,7 +63,19 @@ export interface Fiber<P = unknown> {
 }
 ```
 
-`View = Map<CoeffectKey<any>, FiberId>`：记录每个声明键由哪个 fiber 提供——**存 uid 不存值**（[03 P4](../architecture/framework-model.md#2-从论文推导出的十条工程原则)）。
+`View = Map<CoeffectKey<any>, Impl>`：记录每个声明键由哪个服务实现提供。早期草案是 `Map<key, FiberId>`（只存 uid），按 [cordis 源码验证](../research/cordis-source-verification.md) 校正为 `Impl`，因为官方 `committed: Dict<Impl>` 带三层信息：
+
+```ts
+interface Impl {
+  uid: FiberId;            // provider uid（保留"存 uid 不存值"的语义，P4）
+  value: unknown;          // 绑定的值（官方含 value）
+  check?(): boolean;       // 动态能力判定（读取时调用，impl.check()）
+  dependents: Set<FiberId>;// 依赖此服务的 fiber（guard 撤回机制的载体）
+  isolate: symbol;         // 所属 realm
+}
+```
+
+`check()` 让能力可动态失效（权限撤销时 provider 可让 check 返回 false）；`dependents` 是 provider 撤回延迟到消费者去活的真实机制（[framework-model §6.1b 运行状态写入权表](../architecture/framework-model.md) 的运行时载体）。这两层是纯 uid 模型丢失的。
 
 ### 3.3 Context
 
@@ -92,11 +106,19 @@ export interface Context {
 ### 4.1 类型
 
 ```ts
-export type EffectIterator = AsyncGenerator<Disposer | void, void, void>;
-export type EffectCallback = (ctx: FiberContext) => EffectIterator | Disposer;
-export type Disposer = () => void | Promise<void>;
-export const composeDispose = (...ds: Disposer[]): Disposer;  // 前插组合 ⇒ LIFO
+export type Disposer<T = void> = () => T | Promise<T>;
+export type EffectIterator = AsyncIterable<Disposer>;   // 旧名保留，等价 AsyncIterable<Disposer>
+// 已按 cordis 官方源码扩展为 4 种形态（原草案只支持 AsyncGenerator | Disposer）
+export type Effect =
+  | Disposer                                      // 同步 disposer
+  | Iterable<Disposer>                            // 同步 iterable
+  | Promise<Disposer>                             // Promise<disposer>
+  | AsyncIterable<Disposer>;                      // 异步 iterable（我们主要用 AsyncGenerator）
+export type EffectCallback = (ctx: FiberContext) => Effect;
+export const composeDispose = (...ds: Disposer[]): Disposer;  // effect 内前插组合 ⇒ LIFO
 ```
+
+> **来源校正（[cordis 源码验证 §3](../research/cordis-source-verification.md#3-我们设计中错误或过简的部分)）**：官方 `Effect` 接受这 4 种形态。撤销有**两层语义**——单个 effect 内严格 LIFO 串行；fiber 卸载多个顶层 effect 时是 `Promise.all(disposables.reverse())`，**逆序启动、并发执行**，一个 teardown 不等待另一个。有依赖顺序的清理交给 effect iterator 或 service（`Impl.dependents`）。我们的 `composeDispose` 只保证 effect 内 LIFO，fiber 级并发语义需另述。
 
 采用 async generator 是论文的 `Maybe(ℑ)` 续延在 TS 中的自然对应（[cordis-paper §4.3](../research/cordis-paper-theory.md)）：`yield dispose` = 一个 effect 步骤；`return` = 终止；`for await` 的每次迭代之间就是可中断边界。
 

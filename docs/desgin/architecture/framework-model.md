@@ -99,7 +99,7 @@ flowchart TB
 
 **内部组件**（对外不可见，见 [04](../framework/overview.md)）：
 - `cordis/`：`ctx.effect` / `get/set/isolate/intercept` / fiber 状态机（论文 §5.1 的复刻）
-- `events/`：五种派发模式 + `@mode` 校验
+- `events/`：五种派发模式 + `interface Events` 声明合并做静态约束（非 @mode 装饰器）
 - `scope/`、`seam/`、`registry/`：能力登记与范围路由
 - `loader/`、`patch/`、`hmr/`：配置分层、entry 对账、运行时热替换（论文 §5.2 的复刻）
 - `store/`、`links/`、`objects/`：可选数据/跨进程组件
@@ -173,7 +173,7 @@ flowchart TB
 | 包 | 职责 | 依赖的其他组件 |
 | --- | --- | --- |
 | `@zeta-agent/cordis` | effect/coeffect/fiber、context、target/committed、guard（论文复刻） | 无（最底层） |
-| `@zeta-agent/events` | emit/parallel/serial/bail/waterfall、`@mode` 校验 | cordis（listener 注册=effect） |
+| `@zeta-agent/events` | emit/parallel/serial/bail/waterfall、声明合并静态约束 | cordis（listener 注册=effect） |
 | `@zeta-agent/scope` | `ScopeKey`/`Scoped<T>`、范围路由、双路径 teardown | cordis |
 | `@zeta-agent/seam` | Seam 三段式登记、能力图、单一写入者断言 | cordis、scope |
 | `@zeta-agent/registry` | `defineRegistry`/compose/accepts、contribution | cordis、seam |

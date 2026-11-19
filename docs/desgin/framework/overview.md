@@ -42,7 +42,7 @@ packages/
     src/index.ts        # createContext / defineKey / defineComponent / use / on / loader.load ...
   components/           # 分组目录（无 package.json），每个子目录是独立 workspace 包
     cordis/             # @zeta-agent/cordis —— effect/coeffect/fiber/context（论文复刻组件）
-    events/             # @zeta-agent/events —— 五模式派发 + @mode 校验
+    events/             # @zeta-agent/events —— 五模式派发 + Events 声明合并约束
     scope/              # @zeta-agent/scope —— Scoped<T> 与范围路由
     seam/               # @zeta-agent/seam —— Service Definition / Provider / Consumer
     registry/           # @zeta-agent/registry —— defineRegistry / compose / accepts

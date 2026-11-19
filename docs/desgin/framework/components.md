@@ -66,12 +66,18 @@ chord 的插件机制已经非常成熟：发现→esbuild 冷构建→`vm.Scrip
 - stashed（内容已变文件）与 externals（不可热替换）作种子，取不动点：import 了 accepted 模块 → accepted；所有 import 都 declined → declined；循环未决 → declined（论文算法 8）。
 - 对每个 entry 求依赖树（declined 为边界），与 accepted 相交即为 stale（论文算法 9）。
 
-**阶段 3：事务式重载**
-- `backup = invalidateCaches(accepted)`；逐个 `entry.fiber.dispose()` → `ctx.use(import(url), config)` 换新 fiber。
-- 任一失败：恢复缓存，从 backup 重建所有 stale entry，**绝不半重载**（论文算法 10）。
-- **不依赖 Bun 模块缓存驱逐**：采用"构建产物独立 URL + digest + 每次全新求值"的方式（chord 的 `vm` 思路），因为 Bun/ESM 没有稳定的公开 eviction API（论文脚注 6 对 Node 的说明）。在需要隔离的场景用 `vm` 或 worker；这是推断，需实测（见 §13）。
+**阶段 3：按 unit 部分提交的重载（已按 cordis 官方源码修正）**
 
-**与 chord 的差异**：chord 按 host kind 逐 host 滚动并保留"旧工作跑旧代码"；我们的最小版只在单进程内换 fiber，跨进程/滚动发布留到 [§9](#9-对象运行时与跨进程边界可选子路径) 的升级路径。
+> **来源校正（[cordis 源码验证 §4.2](../research/cordis-source-verification.md#42-hmr-的真实语义最重要纠正)）**：官方 HMR 与我们早期草案有三处根本不同——① 组件替换是 `ctx.registry.replace()` **原地复用同一 fiber**（`_revision++`），不是 dispose + 换 fiber；② 事务是**按共享驱逐模块的连通单元部分提交**，不是"绝不半重载"；③ Stage 3 apply 失败**留 FAILED 等下次文件变更重试**，不回滚。
+
+- `backup = caches.evict(evicted)` 只备份缓存（ESM loadCache + CJS require.cache），**只改缓存，不动 fiber**；
+- 新模块 import + 校验 exports 成功 → `ctx.registry.replace(component, replacement)` 原地替换、复用 fiber（保留 parent/config、`_revision++`）；
+- 按连通单元分组：`Result { settled, aborted, skipped }`。失败/跳过的单元（SkipReason: host-module | native-addon | ambiguous-import | ambiguous-export）执行 `backup.restore(restored)` 只恢复该单元的缓存与 resolutions，其他单元正常提交；
+- apply 失败的 fiber 留 `FAILED`，下次文件变更时重试（resume 语义）；事务用单队列 + AsyncLocalStorage 防嵌套。
+
+**Bun 偏离（显式标注）**：官方强依赖 Node ≥22 内部 API（`--expose-internals` 的 ESM loader + patch `Module._load`/manifest/ResolveCache），Bun 无这些能力。我们保留"构建产物独立 URL + digest + 模块驱逐"的自研路径，**这是相对官方的显式偏离，不是官方方案**。backup 语义（按 unit 部分恢复）仍可借鉴。
+
+**与 chord 的差异**：chord 按 host kind 逐 host 滚动并保留"旧工作跑旧代码"；我们的最小版只在单进程内换组件，跨进程/滚动发布留到 [§9](#9-对象运行时与跨进程边界可选子路径) 的升级路径。
 
 
 ## 9 对象运行时与跨进程边界（可选子路径）
@@ -188,22 +194,27 @@ classDiagram
 ```mermaid
 sequenceDiagram
     participant W as watcher
-    participant Q as runExclusive 队列
-    participant B as builder
+    participant Q as runExclusive 队列（防嵌套）
     participant L as loader
-    participant F as fiber
-    W->>Q: 标记 dirty (inode/size/mtime)
-    Q->>Q: 等待 appReady barrier
-    Q->>B: 构建 + digest 分类 (accepted/declined)
-    Q->>L: 定位 stale entries
-    L->>F: dispose 旧 fiber (逆序)
-    L->>L: invalidate_caches + backup
-    L->>F: ctx.use(import(url), config) 新 fiber
-    alt 导入失败
-        L->>L: restore_caches + 从 backup 重建
-        L-->>Q: failed (保持 inactive)
+    participant C as caches（ESM/CJS）
+    participant R as registry
+    participant F as fiber（复用）
+    W->>Q: 标记 dirty（stashed/retained）
+    Q->>Q: 等待 appReady + debounce 100ms
+    Q->>L: _analyze 分类 accepted/declined + 连通单元
+    L->>C: backup = evict(evicted)（只改缓存）
+    alt 导入/exports 校验失败
+        C->>C: backup.restore(该单元模块)
+        L-->>Q: skipped/aborted（其他单元照常提交）
     else 成功
-        L-->>Q: committed
+        L->>R: registry.replace(component, replacement)
+        R->>F: 原地替换（保留 parent/config，_revision++）
+        F->>F: await 本单元 fibers
+        alt apply 失败
+            F->>F: 留 FAILED（下次变更重试，不回滚）
+        else 成功
+            F-->>Q: settled
+        end
     end
 ```
 

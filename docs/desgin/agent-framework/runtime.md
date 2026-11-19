@@ -29,7 +29,9 @@ export type AgentEvent =
   | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError: boolean; durationMs?: number };
 ```
 
-> **P0 修订（[10 CORE-1](../research/dsh-optimizations.md#3-核心运行时优化core)）**：事件**派发模式是一等契约**，不再默认全部按序 await。定义 `DispatchMode = 'emit'|'parallel'|'serial'|'bail'|'waterfall'`，每个事件声明带 `@mode`，由构建期脚本校验声明与派发点一致。建议映射：`message_end`/`tool_execution_end`→`emit`（快速通知）、`beforeToolCall`/`afterToolCall`/`prepareRequest`→`waterfall`（around + `next()`，缺 next 短路）、`agent_end` 屏障→`serial`（依次 await）。
+> **P0 修订（[10 CORE-1](../research/dsh-optimizations.md#3-核心运行时优化core)）**：事件**派发模式是一等契约**，不再默认全部按序 await。定义 `DispatchMode = 'emit'|'parallel'|'serial'|'bail'|'waterfall'`。建议映射：`message_end`/`tool_execution_end`→`emit`（快速通知）、`beforeToolCall`/`afterToolCall`/`prepareRequest`→`waterfall`（around + `next()`，缺 next 短路）、`agent_end` 屏障→`serial`（依次 await）。
+>
+> **来源校正（[cordis 源码验证](../research/cordis-source-verification.md)）**：五模式本身是 cordis 官方事实（`packages/core/src/events.ts`）；但**`@mode` 装饰器是 deepseek-harness 变体的做法，官方不存在**。官方静态约束来自 `interface Events` 的 TypeScript 声明合并 + `@ts-expect-error` 类型测试。我们采用声明合并方案，`@mode` 仅作变体参考。`parallel` 模式须用 `Promise.allSettled` 聚合成 `AggregateError`（官方行为），不要简单 `Promise.all`。
 
 保持两条铁律（[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单)）：
 
