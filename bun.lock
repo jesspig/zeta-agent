@@ -96,6 +96,14 @@
         "@zeta-agent/cordis": "workspace:*",
       },
     },
+    "packages/tui": {
+      "name": "@zeta-agent/tui",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
   },
   "packages": {
     "@turbo/darwin-64": ["@turbo/darwin-64@2.11.13", "", { "os": "darwin", "cpu": "x64" }, "sha512-5IT29i4j55E5O66+la7L8Y46ut7dFaNZqrgUIYYNtcpMt9Ql7aYnSQb/6tZ+prE2AfX1RBCAtRJE41txS2rG3w=="],
@@ -139,6 +147,8 @@
     "@zeta-agent/security": ["@zeta-agent/security@workspace:packages/components/security"],
 
     "@zeta-agent/testing": ["@zeta-agent/testing@workspace:packages/testing"],
+
+    "@zeta-agent/tui": ["@zeta-agent/tui@workspace:packages/tui"],
 
     "bun-types": ["bun-types@1.4.4", "", { "dependencies": { "@types/node": "*", "undici-types": "*" } }, "sha512-yjrJh5oGX7mMPKGd19YXyIjmEuj4G4zNC30bs7PM9Az7NQ3ndF3j6hbeRdvJTRQEhJ/FYQwW0a2moweEi2hMxQ=="],
 
