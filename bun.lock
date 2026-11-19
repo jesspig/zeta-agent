@@ -36,6 +36,13 @@
         "@zeta-agent/framework": "workspace:*",
       },
     },
+    "packages/components/events": {
+      "name": "@zeta-agent/events",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
     "packages/framework": {
       "name": "@zeta-agent/framework",
       "version": "0.0.0",
@@ -71,6 +78,8 @@
     "@zeta-agent/components": ["@zeta-agent/components@workspace:packages/components"],
 
     "@zeta-agent/cordis": ["@zeta-agent/cordis@workspace:packages/components/cordis"],
+
+    "@zeta-agent/events": ["@zeta-agent/events@workspace:packages/components/events"],
 
     "@zeta-agent/framework": ["@zeta-agent/framework@workspace:packages/framework"],
 
