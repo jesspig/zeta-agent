@@ -12,7 +12,6 @@
 - [4 三项目调研结论](#4-三项目调研结论)
 - [5 优化建议总表](#5-优化建议总表)
 - [6 落地批次与验收](#6-落地批次与验收)
-- [6 落地批次与验收](#6-落地批次与验收)
 - [7 交叉引用与验证](#7-交叉引用与验证)
 
 ## 1 设计哲学：薄 harness，厚框架
@@ -46,7 +45,7 @@ flowchart TB
 
 **框架负责"能拼装什么"，harness 负责"实际拼了什么"。**
 
-> 概念对齐：本文的 L1 = 通用框架 `@zeta-agent/framework`，L2 = Agent 框架 `@zeta-agent/agent-framework`。**两个框架各自内部都由许多组件拼装而成**（Cordis 只是通用框架内部的一个组件），框架对应用只暴露 facade API。因此"能力预留"指的是**框架内部组件与 facade 上的契约预留**，而不是让应用去接触组件。详见 [03 §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)。
+> 概念对齐：本文的 L1 = 通用框架 `@zeta-agent/framework`，L2 = Agent 框架 `@zeta-agent/agent-framework`。**两个框架各自内部都由许多组件拼装而成**（Cordis 只是通用框架内部的一个组件），框架对应用只暴露 facade API。因此"能力预留"指的是**框架内部组件与 facade 上的契约预留**，而不是让应用去接触组件。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)。
 
 ### 1.2 与 YAGNI 的关系
 
@@ -64,7 +63,7 @@ flowchart TB
 
 - 与 [03 P1-P10](../architecture/framework-model.md#2-从论文推导出的十条工程原则) 一致：P9（core 不依赖 provider/持久化/UI）正是能力预留的基础设施。
 - 与 [10](./dsh-optimizations.md) 的 seam 三段式（CORE-13）一致：能力预留以 seam 为单位登记，而非零散 hook。
-- 与 [01 §6.1](./cordis-paper-theory.md) 一致：`Σ` 可编码任何共享可变状态，所以 store/memory/checkpoint 等都是 coeffect key，不需要新增机制。
+- 与 [cordis-paper §6.1](./cordis-paper-theory.md) 一致：`Σ` 可编码任何共享可变状态，所以 store/memory/checkpoint 等都是 coeffect key，不需要新增机制。
 
 
 ## 2 能力预留的判定标准
@@ -87,15 +86,15 @@ flowchart TB
 
 | 能力 | 现有机制 | 文档 |
 | --- | --- | --- |
-| 唯一变更入口 / 撤销 | `ctx.effect` + exact disposer + LIFO | [04 §4](../framework/core-semantics.md#4-核心原语-ctxeffect) |
-| 依赖声明 / 隔离 / 拦截 | `CoeffectKey` + `ctx.get/set/isolate/intercept` | [04 §6](../framework/core-semantics.md#6-依赖注入与隔离) |
+| 唯一变更入口 / 撤销 | `ctx.effect` + exact disposer + LIFO | [framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect) |
+| 依赖声明 / 隔离 / 拦截 | `CoeffectKey` + `ctx.get/set/isolate/intercept` | [framework §6](../framework/core-semantics.md#6-依赖注入与隔离) |
 | 事件 | 5 种派发模式 + `@mode` 校验 | [10 CORE-1](./dsh-optimizations.md#3-核心运行时优化core) |
-| 生命周期 / 热替换 | fiber 状态机 + guard + HMR | [04 §7/§8](../framework/overview.md) |
+| 生命周期 / 热替换 | fiber 状态机 + guard + HMR | [framework §7/§8](../framework/overview.md) |
 | 服务登记 | seam 三段式 + 注册表 contribution | [10 CORE-13](./dsh-optimizations.md#3-核心运行时优化core) |
-| 配置与分发 | profile/bundle/patch + `--dump-config` | [04 §8](../framework/components.md#8-组件加载器与-hmr) |
+| 配置与分发 | profile/bundle/patch + `--dump-config` | [framework §8](../framework/components.md#8-组件加载器与-hmr) |
 | 范围路由 | `Scoped<T>` + scope-filtered 事件 | [10 CORE-4](./dsh-optimizations.md#3-核心运行时优化core) |
 | 可观测 | effect label + getEffects + HealthBoard | [10 CORE-16](./dsh-optimizations.md#3-核心运行时优化core) |
-| 跨进程 | object / store / link 可选子路径 | [04 §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径) |
+| 跨进程 | object / store / link 可选子路径 | [framework §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径) |
 
 ### 3.2 L2 Agent 框架已预留
 
@@ -106,8 +105,8 @@ flowchart TB
 | 所有权 | Agent vs AgentHandle + whenIdle | [10 CORE-9](./dsh-optimizations.md#3-核心运行时优化core) |
 | 工具 | schemas allowlist + 强制 output + 条件并行 | [10 CORE-7/10](./dsh-optimizations.md#3-核心运行时优化core) |
 | 会话 | surface append/replace + message projection | [10 CORE-11](./dsh-optimizations.md#3-核心运行时优化core) |
-| 流式 | `agent/assistant-stream` start/chunk/end | [02 §4](./pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) |
-| 扩展安装 | `AgentPlugin` 管线 + legacy 兼容 | [05 §4](../agent-framework/runtime.md#4-agentplugin-管线替代-monkey-patch) |
+| 流式 | `agent/assistant-stream` start/chunk/end | [pi-baseline §4](./pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) |
+| 扩展安装 | `AgentPlugin` 管线 + legacy 兼容 | [agent-framework §4](../agent-framework/runtime.md#4-agentplugin-管线替代-monkey-patch) |
 
 ### 3.3 尚未预留（本次调研要回答）
 
@@ -241,17 +240,12 @@ flowchart TB
 **核心验收原则**：框架层的任何新增能力都不得让当前极简 harness 变复杂——以"框架单测可独立运行、harness 装配清单不增长"为硬性判据。每条建议将标注：融入层次（L1/L2/L3/仅参考）、目标文档节、API 草案、来源路径、未来拼装场景。
 
 
-## 6 落地批次与验收
-
-> 待调研报告到达后补齐。
-
-
 ## 7 交叉引用与验证
 
 | 本文结论 | 依据 | 验证 |
 | --- | --- | --- |
 | 薄 harness 厚框架 | 用户目标 + [03 P9](../architecture/framework-model.md#2-从论文推导出的十条工程原则) | 框架单测不依赖具体 harness |
-| 能力预留判定标准 | [01 §6.1](./cordis-paper-theory.md)、[10 CORE-13](./dsh-optimizations.md#3-核心运行时优化core) | seam catalog 校验 |
+| 能力预留判定标准 | [cordis-paper §6.1](./cordis-paper-theory.md)、[10 CORE-13](./dsh-optimizations.md#3-核心运行时优化core) | seam catalog 校验 |
 | 现有扩展点盘点 | [04](../framework/overview.md)、[05](../agent-framework/overview.md)、[10](./dsh-optimizations.md) | 各文档交叉引用表 |
 | AgentScope 调研（S14） | `agentscope/src/agentscope/` 一手源码 | AS-1..14 的 API 草案与来源 |
 | CrewAI 调研（S15） | `crewAI/lib/crewai/src/crewai/` 一手源码 | CR-1..17 的 API 草案与来源 |

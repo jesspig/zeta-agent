@@ -213,7 +213,7 @@ export * from "./types.ts";
 - `AgentTurnDecision {action:"continue"}|{action:"end"}`；`FinishTurn`、`PrepareRequest`、`AgentLoopConfig`（全部 hook 字段）。
 - `AgentState`（382-421）：`systemPrompt`, `model`, `thinkingLevel`, `tools`, `messages`（赋值时 `slice()` 拷贝）, `isStreaming`, `streamingMessage`, `pendingToolCalls: ReadonlySet<string>`, `errorMessage?`。
 - `AgentTool<TParameters,TDetails>`（478）：`label`, `prepareArguments?`, `outputSchema?`, `execute(toolCallId, params, signal?, onUpdate?)`, `replay?: "never"|"safe"`, `executionMode?`；继承 pi-ai `Tool` 的 `name/description/parameters`。
-- `AgentEvent`（528-551）9 种：`agent_start`, `agent_end{messages}`, `turn_start`, `turn_end{message,toolResults}`, `message_start`, `message_update{message,assistantMessageEvent}`, `message_end`, `tool_execution_start/update/end`。
+- `AgentEvent`（528-551）10 个 union 变体：`agent_start`, `agent_end{messages}`, `turn_start`, `turn_end{message,toolResults}`, `message_start`, `message_update{message,assistantMessageEvent}`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`（三个 tool_execution 是独立事件，合计 10；源码行 528-551）。
 - `CustomAgentMessages` 空接口供 declaration merging。
 
 ### 4.3 runLoop 状态机（[agent-loop.ts:172-330](https://github.com/earendil-works/pi/blob/main/agent-loop.ts#L172-L330)）
@@ -384,7 +384,7 @@ interface TUI extends Component {
 
 ## 9 重构必须保留的不变量清单
 
-以下清单来自 agent-core 测试与实现，是 [03 §12](../architecture/engineering.md#12-验收标准) 验收项 5 的具体内容；插件化后必须逐条等价验证：
+以下清单来自 agent-core 测试与实现，是 [framework-model/engineering §12](../architecture/engineering.md#12-验收标准) 验收项 5 的具体内容；插件化后必须逐条等价验证：
 
 1. assistant `message_end` 是工具 preflight 前的屏障。
 2. 事件完成顺序与 transcript 顺序解耦。
@@ -408,7 +408,7 @@ interface TUI extends Component {
 | 任务编排 | 手写串行 build 链 | Turborepo + turbo.json | 新增 |
 | 运行时 | Node ≥22.19；bun 仅构建二进制 | Bun 为主运行时 | 替换 |
 | TUI | 自研 `@earendil-works/pi-tui`（命令式 + 差分渲染） | OpenTUI + SolidJS（Zig native + 响应式） | 替换 |
-| 插件加载 | jiti（源码/编译/二进制三态）+ alias + virtual modules | 需重新设计（建议 esbuild/vm + digest，见 [04 §8](../framework/components.md#8-组件加载器与-hmr)） | 重新设计 |
+| 插件加载 | jiti（源码/编译/二进制三态）+ alias + virtual modules | 需重新设计（建议 esbuild/vm + digest，见 [framework §8](../framework/components.md#8-组件加载器与-hmr)） | 重新设计 |
 | 扩展系统 | 两套：coding-agent ExtensionAPI + durable Extension/Registry | 统一为 fiber 插件（[05](../agent-framework/overview.md)） | 统一 |
 | 持久化 | coding-agent JSONL SessionManager + durable 多后端 | session 作为 coeffect provider（[06](../agent/plugin-system.md)） | 重新定位 |
 
@@ -417,12 +417,12 @@ interface TUI extends Component {
 
 | 本文事实 | 下游文档 | 验证点 |
 | --- | --- | --- |
-| chord facet / registry / 无缓存求值 / rollout | [04 §4/§8/§10](../framework/overview.md) | ctx.effect 归一、HMR 三阶段、注册表 contribution |
+| chord facet / registry / 无缓存求值 / rollout | [framework §4/§8/§10](../framework/overview.md) | ctx.effect 归一、HMR 三阶段、注册表 contribution |
 | agent-core 事件/顺序/不变量 | [05 全篇](../agent-framework/overview.md) | 插件版等价测试 |
 | coding-agent 扩展 API 与启动链 | [06 全篇](../agent/plugin-system.md) | 工具/技能/会话/权限插件 |
 | pi-tui Component/TUI 与差分渲染 | [07 TUI 设计](../agent/tui.md) | OpenTUI Solid 替代后的对应关系 |
 | 两套扩展系统分裂 | [08 路线图](../delivery/roadmap.md) | 统一策略的阶段性验收 |
-| 工程栈差异 | [03 §3](../architecture/framework-model.md) | lockfile/turbo.json/依赖方向 |
+| 工程栈差异 | [framework-model/engineering §3](../architecture/framework-model.md) | lockfile/turbo.json/依赖方向 |
 | 全部事实的等级与来源 | [09 事实登记](../architecture/fact-registry.md) | 逐条溯源 |
 
 **返回索引**：[00 索引与交叉验证](../README.md)

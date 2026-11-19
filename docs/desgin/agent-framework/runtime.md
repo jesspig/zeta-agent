@@ -13,7 +13,7 @@
 
 ## 3 公开 API 草案
 
-### 3.1 事件协议（保持 9 种事件，原样语义）
+### 3.1 事件协议（保持 10 种事件，原样语义）
 
 ```ts
 export type AgentEvent =
@@ -31,7 +31,7 @@ export type AgentEvent =
 
 > **P0 修订（[10 CORE-1](../research/dsh-optimizations.md#3-核心运行时优化core)）**：事件**派发模式是一等契约**，不再默认全部按序 await。定义 `DispatchMode = 'emit'|'parallel'|'serial'|'bail'|'waterfall'`，每个事件声明带 `@mode`，由构建期脚本校验声明与派发点一致。建议映射：`message_end`/`tool_execution_end`→`emit`（快速通知）、`beforeToolCall`/`afterToolCall`/`prepareRequest`→`waterfall`（around + `next()`，缺 next 短路）、`agent_end` 屏障→`serial`（依次 await）。
 
-保持两条铁律（[02 §9](../research/pi-baseline.md#9-重构必须保留的不变量清单)）：
+保持两条铁律（[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单)）：
 
 - `tool_execution_end` 按**完成顺序** emit；toolResult 消息与 `turn_end.toolResults` 按 **assistant 源码顺序**落盘。
 - assistant `message_end` 是工具 preflight 前的屏障。
@@ -113,7 +113,7 @@ export interface AgentPluginApi {
 }
 ```
 
-**每个注册都返回 disposer**——这是论文 revertible effect 的直接落地（[01 §4](../research/cordis-paper-theory.md#4-可撤销效应revertible-effects)）：插件卸载时，逆按 LIFO 撤销它的全部注册。若上层注入了 `ctx`，插件也可用 `ctx.effect` 把这些注册纳入 fiber 生命周期，实现 agent 插件的热重载。
+**每个注册都返回 disposer**——这是论文 revertible effect 的直接落地（[cordis-paper §4](../research/cordis-paper-theory.md#4-可撤销效应revertible-effects)）：插件卸载时，逆按 LIFO 撤销它的全部注册。若上层注入了 `ctx`，插件也可用 `ctx.effect` 把这些注册纳入 fiber 生命周期，实现 agent 插件的热重载。
 
 
 ## 4 AgentPlugin 管线：替代 monkey-patch
@@ -144,7 +144,7 @@ type HookChain<T> = {
 
 1. **顺序确定**：`priority` 数值升序，同值按注册顺序；组合结果可打印为插件名列表，便于调试"谁在改我的上下文"。
 2. **await 屏障**：每个 hook 都 `await`；与 pi 的 listener 屏障语义一致。
-3. **no-throw 契约**：hook 必须返回安全回退值而非抛错（沿用 pi 的约定，[02 §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) 第 6 条）；抛错被归一化并产生 `isError` 事件。
+3. **no-throw 契约**：hook 必须返回安全回退值而非抛错（沿用 pi 的约定，[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) 第 6 条）；抛错被归一化并产生 `isError` 事件。
 4. **可逆**：每个 `add` 返回 disposer，按 LIFO 撤销。
 5. **兼容层**：保留 `agent.prepareRequest = fn` 等字段赋值形式，内部转换为一个名为 `legacy:<field>` 的插件（优先级最低），老调用方零改动。
 
@@ -157,14 +157,14 @@ const fiber = ctx.use(agentPluginComponent, { plugin: myPlugin, agent });
 // fiber.apply 中：api.registerTool(...) → yield 逆；ctx.effect 自动跟踪
 ```
 
-于是"热重载一个工具/权限/提示词插件"与"热重载一个普通组件"是同一套机制（[04 §7](../framework/core-semantics.md#7-生命周期状态机)）。这是 pi 两套扩展系统（coding-agent `ExtensionAPI` 与 durable `Extension/Registry`）的统一答案：两者都变成 `AgentPlugin` + fiber。
+于是"热重载一个工具/权限/提示词插件"与"热重载一个普通组件"是同一套机制（[framework §7](../framework/core-semantics.md#7-生命周期状态机)）。这是 pi 两套扩展系统（coding-agent `ExtensionAPI` 与 durable `Extension/Registry`）的统一答案：两者都变成 `AgentPlugin` + fiber。
 
 
 ## 5 Agent loop 作为 effect iterator
 
 ### 5.1 映射
 
-论文的 effect iterator（[01 §4.3](../research/cordis-paper-theory.md)）`ℑΓ = Γ → Γ × (Γ→Γ) × Maybe(ℑ)` 在 agent 里对应：
+论文的 effect iterator（[cordis-paper §4.3](../research/cordis-paper-theory.md)）`ℑΓ = Γ → Γ × (Γ→Γ) × Maybe(ℑ)` 在 agent 里对应：
 
 | 论文概念 | agent 对应 |
 | --- | --- |
@@ -175,7 +175,7 @@ const fiber = ctx.use(agentPluginComponent, { plugin: myPlugin, agent });
 | `Nothing` | `{action:"end"}` 或硬退出 |
 | guard / 迭代边界 | `AbortSignal` 与"target 稳定性检查" |
 
-**关键限制**：transcript 与工具副作用不可物理回滚（论文的 observation equivalence，[01 §6.2](../research/cordis-paper-theory.md)）。因此 agent 的逆只撤销**框架内部状态**（pendingToolCalls、streamingMessage、临时 tool loadout），不撤销已发射的 AssistantMessage 或工具外部副作用。 external 副作用按 [06 §6](../agent/plugin-system.md#6-工具副作用的边界分类) 处理。
+**关键限制**：transcript 与工具副作用不可物理回滚（论文的 observation equivalence，[cordis-paper §6.2](../research/cordis-paper-theory.md)）。因此 agent 的逆只撤销**框架内部状态**（pendingToolCalls、streamingMessage、临时 tool loadout），不撤销已发射的 AssistantMessage 或工具外部副作用。 external 副作用按 [plugin-system §6](../agent/plugin-system.md#6-工具副作用的边界分类) 处理。
 
 ### 5.2 runLoop 伪代码（保持 pi 顺序）
 
@@ -200,7 +200,7 @@ async function* agentIterator(input: AgentInput, api: AgentPluginApi): EffectIte
       pending = [];
       const request = await api.prepareRequest(buildRequest(), signal); // 不轮询队列
       const assistant = await streamAssistantResponse(request, signal); // 映射事件
-      if (assistant.stopReason === "error" || "aborted") {              // 硬退出
+      if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {              // 硬退出
         const decision = await api.finishTurn(turn, signal);
         emit({ type: "turn_end", ... }); emit({ type: "agent_end", messages }); return;
       }
@@ -226,7 +226,7 @@ async function* agentIterator(input: AgentInput, api: AgentPluginApi): EffectIte
 }
 ```
 
-**注意**：上述顺序必须与 [02 §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) 的 11 步逐字对应；任何改动都需要 §13 的等价测试。
+**注意**：上述顺序必须与 [pi-baseline §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) 的 11 步逐字对应；任何改动都需要 §13 的等价测试。
 
 
 ## 6 取消与中断
@@ -234,7 +234,7 @@ async function* agentIterator(input: AgentInput, api: AgentPluginApi): EffectIte
 - `signal` 贯穿 `prompt/continue/stream/executeToolCalls/hooks/subscribe`；abort 时 `streamFn` 产出 `stopReason:"aborted"`，工具在 `prepare` 与执行前各检查一次（pi 的 `agent-loop.ts:716-724, 623-631`）。
 - `AgentPlugin` 的 hook 收到 signal；长时间 hook 必须配合。
 - abort 与 `error` 都是**硬退出**，不能被 `finishTurn` 的 continue 推翻。
-- 若上层注入了 ctx，`ctx.effect` 的 `armed` 门控可同时停止在途迭代（[04 §4](../framework/core-semantics.md#4-核心原语-ctxeffect)）；这是"取消一个 agent turn"的统一路径。
+- 若上层注入了 ctx，`ctx.effect` 的 `armed` 门控可同时停止在途迭代（[framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect)）；这是"取消一个 agent turn"的统一路径。
 
 
 ## UML 视图

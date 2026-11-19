@@ -17,7 +17,7 @@
 
 - `subscribe(listener)` 按注册顺序 `await`；listener 收到当前 run 的 signal。
 - `processEvents` 先归约 state，再 await listener——`pendingToolCalls` 等状态在事件发出时已经一致（pi e2e 测试 63-101）。
-- `agent_end` ≠ idle；`prompt()`/`waitForIdle()` 等所有 listener 完成。持久化插件挂在这里做提交屏障（[02 §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时)）。
+- `agent_end` ≠ idle；`prompt()`/`waitForIdle()` 等所有 listener 完成。持久化插件挂在这里做提交屏障（[pi-baseline §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时)）。
 - 无 active run 时 listener 被调用应抛错（pi 的 `"Agent listener invoked outside active run"`），保留。
 - 低层 API `runAgentLoop(emit)` / `AgentEventSink` 保留：只保序、不等待异步处理；需要屏障时用 `Agent` 类。
 
@@ -27,12 +27,12 @@
 - `state.tools/messages` 赋值时 `slice()` 拷贝；直接 push 到返回数组会改变当前 state（pi 语义，保留）。
 - `systemPrompt` 由 transcript 回放得到；工具声明通过 `declareToolChanges` 以 delta 对齐（pi 测试 164/212/247/282）——**保持 system 消息是单一事实源**。
 - 状态 mutator **不产生事件**（pi 测试 309-329）。
-- `AgentTool.replay?: "never"|"safe"` 原样保留：这是论文"durable intent exists but outcome unknown"的语义钩子，交给持久化插件解释（[06 §5](../agent/plugin-system.md#5-会话与持久化插件)）。
+- `AgentTool.replay?: "never"|"safe"` 原样保留：这是论文"durable intent exists but outcome unknown"的语义钩子，交给持久化插件解释（[plugin-system §5](../agent/plugin-system.md#5-会话与持久化插件)）。
 
 
 ## 12 模型服务作为 broker
 
-论文的 service broker（[01 §12.2](../research/cordis-paper-theory.md)）对应：
+论文的 service broker（[cordis-paper-system §12.2](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）对应：
 
 - `StreamFn` 是唯一模型入口；provider 插件向 broker 注册实现；broker 对 agent 呈现稳定接口。
 - 切换后端（如从 OpenAI 换到 Anthropic）只换 broker 内部 routing，**不触发工具/agent 重载**——与排他绑定形成对比。
@@ -42,7 +42,7 @@
 
 ## 13 测试策略与不变量等价清单
 
-**先于实现**：为 [02 §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) 的 12 条每条写两个测试——`legacy` 版（字段赋值）与 `plugin` 版（管线），断言事件序列与状态一致。
+**先于实现**：为 [pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) 的 12 条每条写两个测试——`legacy` 版（字段赋值）与 `plugin` 版（管线），断言事件序列与状态一致。
 
 | # | 不变量 | 测试要点 |
 | --- | --- | --- |
@@ -86,12 +86,12 @@
 
 | 本文设计 | 上游依据 | 下游验证 |
 | --- | --- | --- |
-| 9 事件 / 状态 / 工具类型 | [02 §4.2](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) | §13 等价测试 |
-| runLoop 顺序 | [02 §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) | 逐条对照 |
-| 插件逆注册 | [01 §4](../research/cordis-paper-theory.md#4-可撤销效应revertible-effects)、[04 §4](../framework/core-semantics.md#4-核心原语-ctxeffect) | LIFO 断言 |
-| 顺序敏感声明 | [01 §7.2](../research/cordis-paper-theory.md) | 环检测测试 |
-| 模型 broker | [01 §12.2](../research/cordis-paper-theory.md) | 后端切换不 reload |
-| 权限/intercept | [01 §12.3](../research/cordis-paper-theory.md) | 策略热更新测试 |
+| 10 事件 / 状态 / 工具类型 | [pi-baseline §4.2](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) | §13 等价测试 |
+| runLoop 顺序 | [pi-baseline §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) | 逐条对照 |
+| 插件逆注册 | [cordis-paper §4](../research/cordis-paper-theory.md#4-可撤销效应revertible-effects)、[framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect) | LIFO 断言 |
+| 顺序敏感声明 | [cordis-paper §7.2](../research/cordis-paper-theory.md) | 环检测测试 |
+| 模型 broker | [cordis-paper-system §12.2](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | 后端切换不 reload |
+| 权限/intercept | [cordis-paper-system §12.3](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | 策略热更新测试 |
 | 会话插件落地 | [06](../agent/plugin-system.md) | 集成测试 |
 | UI 事件消费 | [07](../agent/tui.md) | 帧快照 |
 | 迁移阶段 | [08](../delivery/roadmap.md) | 阶段验收 |

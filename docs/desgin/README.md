@@ -25,11 +25,12 @@ flowchart TB
         R2 --- R3["pi-baseline.md<br/>pi 源码事实基线"]
         R3 --- R4["dsh-optimizations.md<br/>DSH + superagent 优化建议"]
         R4 --- R5["capability-reservation.md<br/>AgentScope/CrewAI/LangGraph 预留建议"]
+        R5 --- R6["recursive-self-evolution.md<br/>DREAM-RSI/Harness² 递归自演化"]
     end
     subgraph A["architecture/"]
         A0["README.md"] --- A1["framework-model.md<br/>两个框架 + 组件拼装模型"]
         A1 --- A2["engineering.md<br/>技术栈/构建/运行形态/验收"]
-        A2 --- A3["fact-registry.md<br/>来源 S1-S16/双源验证/矛盾与缺口"]
+        A2 --- A3["fact-registry.md<br/>来源 S1-S18/双源验证/矛盾与缺口"]
     end
     subgraph F["framework/"]
         F0["README.md"] --- F1["overview.md<br/>定位与 facade"]
@@ -62,6 +63,7 @@ flowchart TB
         R2["pi-baseline"]
         R3["dsh-optimizations"]
         R4["capability-reservation"]
+        R5["recursive-self-evolution（新）"]
     end
     subgraph A["architecture（决策）"]
         A1["framework-model"]
@@ -101,6 +103,7 @@ flowchart TB
 | 汇合性 Thm 80 | 最终状态只取决于最终配置 | [cordis-paper-system.md](./research/cordis-paper-system.md#9-元理论五条承重保证) |
 | 万物皆插件 | provision/instantiation/coeffect 操作全部归约为 `ctx.effect` | [core-semantics.md](./framework/core-semantics.md#4-核心原语-ctxeffect) |
 | 能力预留 | 薄 harness、厚框架；预留契约不预留实现 | [capability-reservation.md](./research/capability-reservation.md#1-设计哲学薄-harness厚框架) |
+| 递归自演化 | 改什么/如何评估/如何晋升；约束可变面 + 无退化晋升（研究轨预留） | [recursive-self-evolution.md](./research/recursive-self-evolution.md#1-为什么这两个项目重要) |
 
 ## 依赖边界（重要）
 
@@ -130,5 +133,5 @@ flowchart TB
 
 - ✅ 文档集已按 6 目录重构；每目录带 README 索引；文档无数字前缀。
 - ✅ 434+ 条交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。
-- ✅ 事实来源 S1-S16 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
+- ✅ 事实来源 S1-S18 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ⏳ 代码尚未开工，按 [delivery/roadmap.md](./delivery/roadmap.md) 阶段 0-5 执行。

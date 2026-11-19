@@ -12,7 +12,7 @@
 
 ## 7 顺序敏感部分：中间件与提示词
 
-论文 §7.2（[01 §7.2](../research/cordis-paper-theory.md)）指出：不同键上的操作天然可交换，同键操作需要可交换见证；**有序链不可交换**。
+论文 §7.2（[cordis-paper §7.2](../research/cordis-paper-theory.md)）指出：不同键上的操作天然可交换，同键操作需要可交换见证；**有序链不可交换**。
 
 | 机制 | 是否可交换 | 处理方式 |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ emit tool_execution_end（完成顺序）+ 按源码顺序落 toolResult
 - `executionMode` 与全局 `toolExecution` 决定串行/并行；并行时 preflight 串行、执行 `Promise.all`、结果按源码顺序落盘。
 - `terminate`：**仅当整批所有 finalized result 都为 true** 才停止后续 LLM 调用（pi 测试 1964/2022/2135）。
 - `runToolCall` 公开 API：复用同一流水线，但**不发事件、不加消息**（codemode 示例依赖）。
-- 工具执行以 fiber 插件形式存在时，`execute()` 内的资源获取通过 `ctx.effect` 跟踪；发射操作不跟踪（[01 §12.1](../research/cordis-paper-theory.md)）。
+- 工具执行以 fiber 插件形式存在时，`execute()` 内的资源获取通过 `ctx.effect` 跟踪；发射操作不跟踪（[cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）。
 
 
 ## 9 权限与沙箱 hook
@@ -58,7 +58,7 @@ agent-core 本身**不做权限判断**，只提供插件钩子：
 - `beforeToolCall` 链是权限 gate：可 `block`（reason 反馈给模型，可 terminate）。
 - **P0 修订（[10 CORE-6](../research/dsh-optimizations.md#3-核心运行时优化core)）**：权限否决必须是**单调 guard**——`ToolGuard = (exec) => string | ToolGuardDenial | undefined`；`undefined` 保留 waterfall 决定，返回 reason **只能收紧权限**。类型上不提供 allow 结果，避免链式 hook 中后执行的 listener 把先前的 deny 翻回 allow（权限提升漏洞）。`beforeToolCall` 的 block 属可协商 waterfall，guard 是不可翻回的否决。补测试："任意 listener 顺序下 deny 不会变回 allow"。
 - `afterToolCall` 链做审计与结果改写（decision union：只能替换 content **或** value 之一，见 [10 CORE-5/12](../research/dsh-optimizations.md#3-核心运行时优化core)）。
-- 具体策略（路径白名单、只读数据库、命令审批）由上层插件通过 `ctx.intercept` 的元数据实现（[01 §12.3](../research/cordis-paper-theory.md)）；拦截可在运行时增删而**不触发工具 reload**。
+- 具体策略（路径白名单、只读数据库、命令审批）由上层插件通过 `ctx.intercept` 的元数据实现（[cordis-paper-system §12.3](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）；拦截可在运行时增删而**不触发工具 reload**。
 - 真正的不可信代码隔离需要外部沙箱（QuickJS/WASM、进程、容器），agent-core 只提供 `execute` 的边界，不承诺安全。
 
 

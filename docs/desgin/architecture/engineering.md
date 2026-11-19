@@ -137,7 +137,7 @@
 | `@earendil-works/pi-agent-core` | `@zeta-agent/agent-framework` | 保留事件协议/loop 顺序/工具流水线；把 hook 字段升级为插件管线 |
 | `@earendil-works/pi-coding-agent` | `@zeta-agent/agent` + `apps/zeta-cli` | 拆开：业务逻辑做插件，CLI 只装配 |
 | `@earendil-works/pi-tui` | `@zeta-agent/tui` | 用 OpenTUI Solid 替代自研差分渲染；保留"插件贡献 UI"思想 |
-| `@earendil-works/pi-ai` | `@zeta-agent/agent-framework` 的 `StreamFn` 注入 + 可选 `@zeta-agent/providers` 插件 | 模型层外置为 broker 插件（[01 §12.2](../research/cordis-paper-theory.md)） |
+| `@earendil-works/pi-ai` | `@zeta-agent/agent-framework` 的 `StreamFn` 注入 + 可选 `@zeta-agent/providers` 插件 | 模型层外置为 broker 插件（[cordis-paper-system §12.2](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)） |
 | `@earendil-works/pi-durable` | `@zeta-agent/framework/store` + session 插件 | 持久化作为 coeffect provider，而非 core 依赖 |
 | `@earendil-works/pi-schema` | 用 TS 类型 + `defineKey`/JSON Schema 生成 | 直接依赖 typebox 或原生 schema 生成器，保持类型推导 |
 
@@ -152,12 +152,12 @@
 | OpenTUI native 依赖在 CI 不可用 | 平台/架构不匹配 | 用 `testRender` 做无终端测试；CLI 提供 `--print` 绕开 TUI | 官方文档 |
 | Bun 与 Node 生态兼容 | 某些 provider SDK 只测 Node | 运行时通过 `StreamFn` 抽象隔离；必要时在 worker 里跑 Node 兼容层 | 推断 |
 | 过度设计 | 过早抽象通用工具层 | 严格四包，公共代码就地导出 | KISS |
-| 恢复承诺过头 | 把"发射"当成可撤销 | 明确 withhold/compensation 策略（[01 §12.1](../research/cordis-paper-theory.md)） | 论文 |
+| 恢复承诺过头 | 把"发射"当成可撤销 | 明确 withhold/compensation 策略（[cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)） | 论文 |
 | 版本漂移 | solid-js <1.9.16 的 Seroval 公告 | 锁 `^1.9.16` | 官方文档 |
 
 **开放问题**：
-- O-1：`@zeta-agent/agent-framework` 是否允许运行时依赖 `@zeta-agent/framework`？建议仅类型导入，待 [05 §2](../agent-framework/overview.md#2-包边界与依赖) 论证后定案。
-- O-2：chord 风格 object runtime 放在 L1 全量实现，还是先只做 ctx/fiber + store 的最小集？建议后者（YAGNI），[04 §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径) 给出可选升级路径。
+- O-1：`@zeta-agent/agent-framework` 是否允许运行时依赖 `@zeta-agent/framework`？建议仅类型导入，待 [agent-framework §2](../agent-framework/overview.md#2-包边界与依赖) 论证后定案。
+- O-2：chord 风格 object runtime 放在 L1 全量实现，还是先只做 ctx/fiber + store 的最小集？建议后者（YAGNI），[framework §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径) 给出可选升级路径。
 - O-3：观察等价 `≃` 在我们的 ctx 中如何定义？建议以"键上的公开操作测试结果"为准，见 [09](./fact-registry.md)。
 
 

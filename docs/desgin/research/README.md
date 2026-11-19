@@ -12,6 +12,7 @@
 | [pi-baseline.md](./pi-baseline.md) | pi 仓库一手源码基线：chord / agent-core / coding-agent / tui / 生态包 | 现状事实 |
 | [dsh-optimizations.md](./dsh-optimizations.md) | deepseek-harness + superagent 调研，47 条优化建议（CORE/ENG/SUP） | 优化建议 |
 | [capability-reservation.md](./capability-reservation.md) | AgentScope / CrewAI / LangGraph 调研，47 条预留建议（AS/CR/LG） | 预留建议 |
+| [recursive-self-evolution.md](./recursive-self-evolution.md) | DREAM-RSI / Harness² 递归自演化调研，SE-D/SE-H 共 28 条建议 | 自演化研究轨 |
 
 ## UML 概览：本目录如何喂养架构
 
@@ -21,12 +22,15 @@ flowchart LR
     PI["pi-baseline.md<br/>（pi 现状）"]
     D["dsh-optimizations.md<br/>（生产级参考）"]
     C["capability-reservation.md<br/>（能力预留参考）"]
+    RSE["recursive-self-evolution.md<br/>（递归自演化研究轨）"]
     A["architecture/<br/>框架模型与工程决策"]
     F["framework/ · agent-framework/<br/>具体设计"]
     P --> A
     PI --> A
     D --> A
     C --> A
+    RSE --> A
+    RSE -.->|"扩展 §8"| F
     A --> F
     F -.->|"验证"| A
 ```

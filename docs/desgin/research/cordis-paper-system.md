@@ -361,7 +361,7 @@ coeffect 对应 OSGi 的 service [52]：键背后的接口 = service，provider 
 
 | 论文概念 | 在本项目中的落点 | 详文档 |
 | --- | --- | --- |
-| Cordis 三层（core / loader / app framework） | **复刻为通用框架的内部组件**：(1)+(2) → `components/cordis` + `components/loader` + `components/hmr` 等；(3) 的 agent 特化 → Agent 框架。两个框架对应用只暴露 facade | [03 §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)、[04](../framework/overview.md) |
+| Cordis 三层（core / loader / app framework） | **复刻为通用框架的内部组件**：(1)+(2) → `components/cordis` + `components/loader` + `components/hmr` 等；(3) 的 agent 特化 → Agent 框架。两个框架对应用只暴露 facade | [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)、[04](../framework/overview.md) |
 | component `(d,p,e)` + revertible effect | ② agent 框架的 tool/provider/hook 统一为 fiber | [05](../agent-framework/overview.md) |
 | reactive coeffect + target/committed view | agent 的依赖解析、模型 provider 热切换、能力门禁 | [05](../agent-framework/state-and-events.md#12-模型服务作为-broker) |
 | effect iterator + guard + inertia | agent loop 的可取消/可回滚执行 | [05](../agent-framework/runtime.md#5-agent-loop-作为-effect-iterator) |

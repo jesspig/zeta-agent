@@ -23,12 +23,12 @@
 
 ## 1 定位：agent = 一组插件的装配
 
-pi 的 `coding-agent` 把 agent-core + ai + tui + 扩展系统 + 内置工具 + 会话 + 模式编译成一个 CLI（[02 §5.3](../research/pi-baseline.md#5-earendil-workspi-coding-agent完整-cli-与扩展系统)）。我们把它拆成：
+pi 的 `coding-agent` 把 agent-core + ai + tui + 扩展系统 + 内置工具 + 会话 + 模式编译成一个 CLI（[pi-baseline §5.3](../research/pi-baseline.md#5-earendil-workspi-coding-agent完整-cli-与扩展系统)）。我们把它拆成：
 
 - `@zeta-agent/agent`：**只提供插件集合与装配函数** `createAgent(options)`；
-- `apps/zeta-cli`：只做参数解析、登录、加载配置、启动；不含业务逻辑（[03 §4.4](../architecture/framework-model.md)）。
+- `apps/zeta-cli`：只做参数解析、登录、加载配置、启动；不含业务逻辑（[framework-model/engineering §4.4](../architecture/framework-model.md)）。
 
-**核心命题**：pi 中已经插件化的东西（工具、provider、MCP、命令、渲染、事件、资源路径）继续是插件；pi 中**硬编码**的东西（内置工具、模式、CLI 子命令、压缩策略、会话存储、资源解析器）也改造为插件（[02 §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。
+**核心命题**：pi 中已经插件化的东西（工具、provider、MCP、命令、渲染、事件、资源路径）继续是插件；pi 中**硬编码**的东西（内置工具、模式、CLI 子命令、压缩策略、会话存储、资源解析器）也改造为插件（[pi-baseline §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。
 
 
 ## 2 插件清单与分类
@@ -43,12 +43,12 @@ pi 的 `coding-agent` 把 agent-core + ai + tui + 扩展系统 + 内置工具 + 
 | **模式插件** | `mode:interactive`, `mode:print`, `mode:json`, `mode:rpc` | `AppMode` 联合类型 + if/else | ❌ 互斥，运行时选一 |
 | **UI 插件** | TUI 组件/widget/footer/header 贡献 | `ExtensionUIContext` / `setWidget` | ✅ 槽位 |
 
-每个插件都是一个 `AgentPlugin`（[05 §3.4](../agent-framework/overview.md)）+ 可选的 fiber component（需要热重载/生命周期时）。
+每个插件都是一个 `AgentPlugin`（[agent-framework §3.4](../agent-framework/overview.md)）+ 可选的 fiber component（需要热重载/生命周期时）。
 
 
 ## 3 工具插件：内置工具也走插件
 
-pi 的内置工具 `read/bash/edit/write` 是编译期 import + 字符串名数组（`core/tools/index.ts`、[sdk.ts:28-40](https://github.com/deepseek-ai/deepseek-harness/blob/master/sdk.ts#L28-L40)、[agent-session.ts:3820](https://github.com/deepseek-ai/deepseek-harness/blob/master/agent-session.ts#L3820)）。改造：
+pi 的内置工具 `read/bash/edit/write` 是编译期 import + 字符串名数组（`core/tools/index.ts`、[sdk.ts:28-40](https://github.com/earendil-works/pi/blob/main/sdk.ts#L28-L40)、[agent-session.ts:3820](https://github.com/earendil-works/pi/blob/main/agent-session.ts#L3820)）。改造：
 
 ```ts
 export const readTool = defineToolPlugin({
@@ -60,16 +60,16 @@ export const readTool = defineToolPlugin({
 
 - 与 `codemode`/`tool-search`/`mcp` 一样是 `builtin:*` 插件，进 `BUILTIN_PLUGINS` 清单（替代硬编码数组）。
 - `replaceable: true` + `omitReplacedPlugins()`：第三方插件同工具名时整包替换（pi 已有的 `omitReplacedExtensions()` 思路）。
-- 工具描述、snippets、guidelines 通过 `@zeta-agent/framework` 注册表贡献给 system prompt section（[05 §7](../agent-framework/tools-and-policies.md#7-顺序敏感部分中间件与提示词)）。
+- 工具描述、snippets、guidelines 通过 `@zeta-agent/framework` 注册表贡献给 system prompt section（[agent-framework §7](../agent-framework/tools-and-policies.md#7-顺序敏感部分中间件与提示词)）。
 - `exposure`（direct/model-only/codemode/deferred/hidden）、`namespace`、`defaultActive`、`prepareLoadout` 全部保留。
-- 工具执行中的资源获取（打开文件句柄、建立 watch）通过 `ctx.effect` 跟踪；卸载工具插件时逆自动撤销注册与资源（[04 §4](../framework/core-semantics.md#4-核心原语-ctxeffect)）。
+- 工具执行中的资源获取（打开文件句柄、建立 watch）通过 `ctx.effect` 跟踪；卸载工具插件时逆自动撤销注册与资源（[framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect)）。
 
-**工具热插拔**：`agent.plugins.registerTool()` 返回 disposer；若用 fiber 安装，则 `ctx.use(toolComponent, config)` 的 deactivate 自动撤销工具声明，并通过 `declareToolLoadout()` 更新 transcript 的 toolsAdded/toolsRemoved（pi 的 `declareToolChanges` 语义，[05 §11](../agent-framework/state-and-events.md#11-状态管理与持久化边界)）。
+**工具热插拔**：`agent.plugins.registerTool()` 返回 disposer；若用 fiber 安装，则 `ctx.use(toolComponent, config)` 的 deactivate 自动撤销工具声明，并通过 `declareToolLoadout()` 更新 transcript 的 toolsAdded/toolsRemoved（pi 的 `declareToolChanges` 语义，[agent-framework §11](../agent-framework/state-and-events.md#11-状态管理与持久化边界)）。
 
 
 ## 4 技能、提示词、主题插件
 
-pi 的 `SKILL.md`、`prompt templates`（Markdown + frontmatter）、`themes`（JSON + schema）由 `DefaultResourceLoader` 统一加载，扩展只能通过 `resources_discover` **追加路径**而不能换解析器（[02 §5.2](../research/pi-baseline.md)）。
+pi 的 `SKILL.md`、`prompt templates`（Markdown + frontmatter）、`themes`（JSON + schema）由 `DefaultResourceLoader` 统一加载，扩展只能通过 `resources_discover` **追加路径**而不能换解析器（[pi-baseline §5.2](../research/pi-baseline.md)）。
 
 改造为**注册表 + 解析器插件**：
 
@@ -99,15 +99,15 @@ export interface SessionPlugin extends AgentPlugin {
 }
 ```
 
-- 会话事件挂在 `agent_end` 的 **awaited listener** 上（pi 的屏障语义，[05 §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)），保证落盘先于 `prompt()` resolve。
-- `AgentTool.replay?: "never"|"safe"` 由会话插件解释（论文"意图存在但结果未知"的重放语义，[01 §4.4](../framework/overview.md)）。
+- 会话事件挂在 `agent_end` 的 **awaited listener** 上（pi 的屏障语义，[agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)），保证落盘先于 `prompt()` resolve。
+- `AgentTool.replay?: "never"|"safe"` 由会话插件解释（论文"意图存在但结果未知"的重放语义，[cordis-paper §4.4](../framework/overview.md)）。
 - 压缩策略也是插件：`addTurnBoundary` + `addContextTransform`，pi 的 `session_before_compact` 保留为插件事件。
-- 会话是 coeffect provider（`@zeta-agent/session:store`），agent 的提示词插件声明依赖它；store 更换时依赖方按 target/committed view 自动重激活（[01 §5.2](../research/cordis-paper-theory.md)）。
+- 会话是 coeffect provider（`@zeta-agent/session:store`），agent 的提示词插件声明依赖它；store 更换时依赖方按 target/committed view 自动重激活（[cordis-paper §5.2](../research/cordis-paper-theory.md)）。
 
 
 ## 6 工具副作用的边界分类
 
-论文 §12.1（[01 §12.1](../research/cordis-paper-theory.md)）的"获取 / 发射"是工具设计的硬约束：
+论文 §12.1（[cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）的"获取 / 发射"是工具设计的硬约束：
 
 | 类别 | 工具动作 | 自动撤销？ | 处理方式 |
 | --- | --- | --- | --- |
@@ -125,7 +125,7 @@ export interface SessionPlugin extends AgentPlugin {
 
 ## 7 权限、信任与沙箱
 
-pi 明确无内置权限系统（README：以启动用户权限运行）。论文给出三层方案（[01 §12.3](../research/cordis-paper-theory.md)）：
+pi 明确无内置权限系统（README：以启动用户权限运行）。论文给出三层方案（[cordis-paper-system §12.3](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）：
 
 1. **能力式门禁**：`ctx[key]` 只允许访问声明过的依赖；未声明访问抛错。`inject` 声明 = capability request，可在加载前审查。
 2. **拦截做细粒度策略**：`ctx.intercept(key, metadata)` 给依赖附加元数据（文件系统路径白名单、数据库只读），provider 在调用时 consult；**拦截增删不触发 reload**。
@@ -148,12 +148,12 @@ definePlugin({
 ```
 
 - 信任门控（pi 的 `project-trust.ts`）作为启动期插件，与 `\u001b` 命令审批一起工作。
-- 沙箱插件复用 `pi-codemode` 的 QuickJS/WASM 思路：模型生成的 JS 在沙箱里运行，**唯一能力是调用注入的工具**（[02 §7 codemode](../research/pi-baseline.md#7-生态包ai-durable-schema-mcp-env-codemode-telemetry-evals)）。
+- 沙箱插件复用 `pi-codemode` 的 QuickJS/WASM 思路：模型生成的 JS 在沙箱里运行，**唯一能力是调用注入的工具**（[pi-baseline §7 codemode](../research/pi-baseline.md#7-生态包ai-durable-schema-mcp-env-codemode-telemetry-evals)）。
 
 
 ## 8 自演化与安全管理
 
-论文结论把 self-evolving agent harness 列为首要未来方向（[01 §14](../research/cordis-paper-system.md#14-与本项目目标的关系)）：agent 持续生成并替换自身 harness 组件。我们的架构已具备前提（fiber 可卸载、依赖反应式重激活、汇合性保证），但**第一版只做受控自演化**：
+论文结论把 self-evolving agent harness 列为首要未来方向（[cordis-paper-system §14](../research/cordis-paper-system.md#14-与本项目目标的关系)）：agent 持续生成并替换自身 harness 组件。我们的架构已具备前提（fiber 可卸载、依赖反应式重激活、汇合性保证），但**第一版只做受控自演化**：
 
 | 能力 | 状态 | 机制 |
 | --- | --- | --- |
@@ -165,24 +165,69 @@ definePlugin({
 
 **安全护栏**：
 
-1. 生成的代码在沙箱中构建/求值（chord 的 `vm.Script` + 无 module cache 思路，[04 §8](../framework/components.md#8-组件加载器与-hmr)）；
-2. 依赖环静态检测（[03 §6.3](../architecture/framework-model.md)）；
+1. 生成的代码在沙箱中构建/求值（chord 的 `vm.Script` + 无 module cache 思路，[framework §8](../framework/components.md#8-组件加载器与-hmr)）；
+2. 依赖环静态检测（[framework-model/engineering §6.3](../architecture/framework-model.md)）；
 3. 新插件的 `inject` 声明即 capability 清单，编排器审查后才批准；
 4. 试加载失败 → fiber `FAILED`，旧插件按 closure rule 保留，不进入半替换状态；
 5. 所有变更可回滚：entry 记录变更前的 digest，回滚 = 重新加载旧 digest 的 fiber（Thm 80 保证最终状态只取决于配置）。
 
-> 关键风险：论文自己承认"一个错误自修改可能禁用恢复所需的进程"（[01 §2.3](../research/cordis-paper-theory.md)）。因此**必须先保证 loader/HMR 本身是不可替换的核心插件**（required root，chord 的 app root 模式），agent 只能替换普通插件。
+> 关键风险：论文自己承认"一个错误自修改可能禁用恢复所需的进程"（[cordis-paper §2.3](../research/cordis-paper-theory.md)）。因此**必须先保证 loader/HMR 本身是不可替换的核心插件**（required root，chord 的 app root 模式），agent 只能替换普通插件。
+
+### 8.1 递归自演化：研究轨预留
+
+第一版产品只做上面的**受控热替换**。但论文把 self-evolving harness 列为首要方向，且两个新参考项目——[DREAM-RSI](../research/recursive-self-evolution.md#2-dream-rsi约束可变面的自演化) 与 [Harness²](../research/recursive-self-evolution.md#3-harness²harness-作为可编辑配方)——给出了"如何生成、评估、晋升并递归改进 harness"的完整机制（详见 [recursive-self-evolution.md](../research/recursive-self-evolution.md)）。框架必须**预留原语**，未来可插拔地装入，而不改框架本身。
+
+**四个核心问题的答案（来自两个项目）**：
+
+| 问题 | DREAM-RSI 的答案 | Harness² 的答案 | 我们的预留 |
+| --- | --- | --- | --- |
+| 改什么 | 只改单一决策文件 `method.py`，其余冻结 | 8 组件可编辑配方树 | `StrategyPlugin` 白名单 + `EditableSurface` 元契约 |
+| 如何评估 | 冻结 trace + Eq.1 适应度（有分数） | 同任务行为对比 + 盲选（无 ground truth） | `fitness` seam + 无分数 `ProbeView` + 独立 judge |
+| 如何晋升 | 资格门禁 + incumbent 参赛 + 严格更优 + sha256 | KEEP_BASE + confounded 优先 | `qualify → rank → promoteIfBetter` + digest |
+| 如何防退化 | 单调改进 + 版本谱系 + RESUME | 预算恒等式 + 单次重试 + 全程 fallback | 原子替换 + 重放不变量 + 可审计 notes |
+
+**关键结论**：两个项目都刻意避开运行时热替换（研究焦点是"改得对不对"）。**我们既有 fiber 热替换（切得安全），又需补"改得对不对"机制**——两者结合才是完整自演化设计。
+
+### 8.2 晋升状态机（UML）
+
+```mermaid
+stateDiagram-v2
+    [*] --> Candidate : 生成提案（策略/配方树）
+    Candidate --> Qualifying : qualify（rc=0/无失败回放/有限 reward/有 episodes）
+    Qualifying --> Rejected : 资格失败
+    Qualifying --> Evaluating : 合格
+    Evaluating --> Comparing : fitness 或盲选
+    Comparing --> Rejected : 不优于 incumbent / KEEP_BASE
+    Comparing --> Canary : 严格更优 → 试加载
+    Canary --> RolledBack : digest 不符 / guard 失败 / 不变量破坏
+    Canary --> Promoted : 观察等价 ≃ 通过 → 写 digest
+    Promoted --> [*] : 下一轮生效
+    RolledBack --> [*] : 保留旧 fiber（closure rule）
+    Rejected --> [*] : 全量版本谱系留档
+```
+
+**晋升不变量**：① incumbent 永远参赛，只有严格更优才替换；② 晋升前后必须满足观察等价 `≃`（[cordis-paper §6.2](../research/cordis-paper-theory.md#6-上下文范式context-paradigm)）；③ Thm 80 的汇合判据不覆盖 emissions，晋升只改变配置、不改变已发射副作用；④ 任一失败保留旧 fiber 且全量留档可审计。
+
+### 8.3 递归控制护栏
+
+- **可演化面白名单**：agent 只能改 `StrategyPlugin.editable` 列出的文件；loader/HMR/fiber 核心/capability gate 是 required root，绝对不可替换；
+- **递归深度/频率上限**：每轮 `maxAttempts` 与全局 `maxCycles` 双重预算，防止自修改无限递归或禁用恢复路径；
+- **stage-scoped 权限**：探索阶段最小权限（files only），学习阶段加 shell，emission 工具走 withhold；
+- **防 ground truth 泄漏**：grader verdict / rubric / score 不得进入改进上下文，tripwire 命中即抛错（SE-H8）；
+- **经验库隔离**：per-domain 且 per-mode 各持一个 ExperienceLibrary，只读更早任务（SE-H10），避免跨租户/跨模式污染。
+
+> 完整 28 条建议（SE-D1..12、SE-H1..16）见 [recursive-self-evolution.md §5](../research/recursive-self-evolution.md#5-对现有设计的优化建议)。研究轨落地批次见该文 §6，产品轨暂不实现自动代码生成。
 
 
 ## 9 MCP 与 provider 插件
 
-- MCP：pi 的 `createMcpExtension()` 把 MCP server 的工具注册为 `mcp__<server>__<tool>`，监听 `session_start/before_agent_start/tool_call/turn_start/mcp_servers_change/session_shutdown`（[02 §5.2](../research/pi-baseline.md)）。我们做成 `mcp` 插件：server 配置是一个 coeffect（`@zeta-agent/mcp:servers`），工具注册是逆可撤销的 effect，server 变化时工具自动重激活。
-- Provider：`registerProvider`/`registerNativeProvider`/`registerVirtualModel` 保留；底层走 `@zeta-agent/agent-framework` 的 `StreamFn` broker（[05 §12](../agent-framework/state-and-events.md#12-模型服务作为-broker)）。模型目录由生成式 catalog + `accepts` 版本映射管理。
+- MCP：pi 的 `createMcpExtension()` 把 MCP server 的工具注册为 `mcp__<server>__<tool>`，监听 `session_start/before_agent_start/tool_call/turn_start/mcp_servers_change/session_shutdown`（[pi-baseline §5.2](../research/pi-baseline.md)）。我们做成 `mcp` 插件：server 配置是一个 coeffect（`@zeta-agent/mcp:servers`），工具注册是逆可撤销的 effect，server 变化时工具自动重激活。
+- Provider：`registerProvider`/`registerNativeProvider`/`registerVirtualModel` 保留；底层走 `@zeta-agent/agent-framework` 的 `StreamFn` broker（[agent-framework §12](../agent-framework/state-and-events.md#12-模型服务作为-broker)）。模型目录由生成式 catalog + `accepts` 版本映射管理。
 
 
 ## 10 模式插件（interactive / print / json / rpc）
 
-pi 的 `AppMode` 是联合类型 + if/else 分派（[02 §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。改造为**模式插件**：
+pi 的 `AppMode` 是联合类型 + if/else 分派（[pi-baseline §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。改造为**模式插件**：
 
 ```ts
 export interface ModePlugin extends AgentPlugin {
@@ -191,7 +236,7 @@ export interface ModePlugin extends AgentPlugin {
 }
 ```
 
-CLI 按参数选择并加载一个模式插件；其余模式插件不加载（互斥）。这样新增模式无需改 CLI 主流程。`print/json/rpc` 模式不加载 TUI 插件，保证无终端环境下完整可用（[03 §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式)）。
+CLI 按参数选择并加载一个模式插件；其余模式插件不加载（互斥）。这样新增模式无需改 CLI 主流程。`print/json/rpc` 模式不加载 TUI 插件，保证无终端环境下完整可用（[framework-model/engineering §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式)）。
 
 
 ## 11 装配流程
@@ -213,12 +258,12 @@ apps/zeta-cli/main.ts
   → modePlugin.run(session, ui)
 ```
 
-与 pi 启动链的对应：pi 的 `createAgentSessionServices()`（ModelRuntime + Settings + ResourceLoader）→ `createAgentSession()` → `_bindExtensionCore` → `_refreshToolRegistry` → `buildSystemPrompt()` → mode 分派（[02 §5.3](../research/pi-baseline.md)）。我们的差异是**每一步都是 fiber 插件而非硬编码调用**。
+与 pi 启动链的对应：pi 的 `createAgentSessionServices()`（ModelRuntime + Settings + ResourceLoader）→ `createAgentSession()` → `_bindExtensionCore` → `_refreshToolRegistry` → `buildSystemPrompt()` → mode 分派（[pi-baseline §5.3](../research/pi-baseline.md)）。我们的差异是**每一步都是 fiber 插件而非硬编码调用**。
 
 
 ## 12 两套扩展系统的统一
 
-pi 最大的架构决策点：coding-agent 的 `ExtensionAPI` 与 durable 的 `Extension{tools,sections,hooks,wraps,tasks}` 是**两套不兼容系统**（[02 §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。本节论证：**它们可以统一，且必须从第一天统一**——分裂是 pi 两个包各自演化的历史事故，不是本质差异。
+pi 最大的架构决策点：coding-agent 的 `ExtensionAPI` 与 durable 的 `Extension{tools,sections,hooks,wraps,tasks}` 是**两套不兼容系统**（[pi-baseline §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。本节论证：**它们可以统一，且必须从第一天统一**——分裂是 pi 两个包各自演化的历史事故，不是本质差异。
 
 ### 12.1 为什么不兼容（事实对比）
 
@@ -287,7 +332,7 @@ flowchart TB
 | 发射类工具无法自动回滚 | 明确 withhold/compensation 策略，默认 withhold；用户审批 |
 | 自演化误删核心插件 | 核心 loader/root 标记 required，不可被 agent 替换 |
 | 两套扩展兼容层复杂 | 分阶段：先统一内部，再做兼容门面（[08](../delivery/roadmap.md)） |
-| 权限默认策略改变用户体验 | 提供宽松/严格两档配置，默认沿用 pi 行为（无限制）以免破坏现有用法；严格档可选 |
+| 权限默认策略改变用户体验 | 提供宽松/严格两档配置，**权限门禁**默认沿用 pi 行为（无限制）以免破坏现有用法；严格档可选。注意这与 O-9（**发射交付**默认 withhold）是两个独立维度：门禁管"能不能调工具"，交付管"副作用何时落盘" |
 | 技能/主题解析器替换引入安全面 | 解析器插件也需沙箱与信任门控 |
 
 **开放问题**：
@@ -299,13 +344,13 @@ flowchart TB
 
 | 本文设计 | 上游依据 | 下游验证 |
 | --- | --- | --- |
-| 内置工具插件化 | [02 §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码) | 工具名冲突替换测试 |
-| 资源解析器插件化 | [02 §5.2](../research/pi-baseline.md) | 自定义解析器加载测试 |
-| 会话屏障 | [05 §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义) | 落盘先于 prompt resolve |
-| 获取/发射分类 | [01 §12.1](../research/cordis-paper-theory.md) | 工具分类审查 |
-| 权限/intercept | [01 §12.3](../research/cordis-paper-theory.md) | 拦截热更新不 reload |
-| 自演化护栏 | [01 §2.3](../research/cordis-paper-theory.md) | 故障注入 + 回滚测试 |
-| MCP/provider | [06 §9](./plugin-system.md#9-mcp-与-provider-插件) | 切换后端不 reload |
+| 内置工具插件化 | [pi-baseline §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码) | 工具名冲突替换测试 |
+| 资源解析器插件化 | [pi-baseline §5.2](../research/pi-baseline.md) | 自定义解析器加载测试 |
+| 会话屏障 | [agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义) | 落盘先于 prompt resolve |
+| 获取/发射分类 | [cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | 工具分类审查 |
+| 权限/intercept | [cordis-paper-system §12.3](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | 拦截热更新不 reload |
+| 自演化护栏 | [cordis-paper §2.3](../research/cordis-paper-theory.md) | 故障注入 + 回滚测试 |
+| MCP/provider | [plugin-system §9](./plugin-system.md#9-mcp-与-provider-插件) | 切换后端不 reload |
 | TUI 消费 UI 插件 | [07](./tui.md) | 槽位热替换 |
 | 迁移阶段 | [08](../delivery/roadmap.md) | 阶段验收 |
 

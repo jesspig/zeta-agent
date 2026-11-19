@@ -15,9 +15,9 @@
 
 > **依赖边界（重要）**：本组件是对论文的**自行实现**，**不引入任何上游 Cordis 包**（`cordis`、`@cordisjs/*`、`@deepseek-ai/cordis` 均不进依赖树）。`@zeta-agent/cordis`（及 C 方案下的 `packages/components/cordis/`）只是我们对该组件的命名；S12 源码仅作只读蓝本，不进入构建产物。本文出现的 `@cordisjs/group`、`@cordisjs/include`、`@cordisjs/hmr` 等名称均出自[01 论文精读](../research/cordis-paper-theory.md)对上游 Cordis 的描述，**不是我们的依赖**，对应的实现由我们的 `components/loader`、`components/hmr` 以自研方式提供。
 
-> **API 边界**：上层应用（CLI / TUI / 未来形态）与 Agent 框架**只通过 facade** 使用本框架（`src/index.ts` 导出的 `createContext` / `defineKey` / `defineComponent` / `ctx.use` / `ctx.on` / `loader.load` 等），**不得 import `src/components/**` 内部组件**。内部组件之间可互相组合，但对内不对外。详见 [03 §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)。
+> **API 边界**：上层应用（CLI / TUI / 未来形态）与 Agent 框架**只通过 facade** 使用本框架（`src/index.ts` 导出的 `createContext` / `defineKey` / `defineComponent` / `ctx.use` / `ctx.on` / `loader.load` 等），**不得 import `src/components/**` 内部组件**。内部组件之间可互相组合，但对内不对外。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)。
 
-> **HMR 的定位**：HMR 不是开发期可选工具，而是 component loader 的一部分（论文 §5.2 明确把"配置对账 + 热模块替换"列为 Cordis 三层中的第二层）。chord 设计文档同样强调"没有 dev/prod 之分，插件机械是核心机械"（[02 §3](../research/pi-baseline.md#3-earendil-workschord对象运行时与插件)）。因此 HMR 必须在本层实现，并被 agent 运行时（包括自演化）直接使用。
+> **HMR 的定位**：HMR 不是开发期可选工具，而是 component loader 的一部分（论文 §5.2 明确把"配置对账 + 热模块替换"列为 Cordis 三层中的第二层）。chord 设计文档同样强调"没有 dev/prod 之分，插件机械是核心机械"（[pi-baseline §3](../research/pi-baseline.md#3-earendil-workschord对象运行时与插件)）。因此 HMR 必须在本层实现，并被 agent 运行时（包括自演化）直接使用。
 
 **必须做到的六件事**（与 [03 P1-P6](../architecture/framework-model.md#2-从论文推导出的十条工程原则) 一致）：
 
@@ -33,27 +33,29 @@
 
 ## 2 包结构与导出
 
+> **以 [framework-model §5/§5.1](../architecture/framework-model.md#5-monorepo-目录草案) 的 C 方案为准**（用户裁决）：通用框架 = facade 包 + 独立组件 workspace 包，而非单体包内的 `src/components/` 目录。本节早前草案已废弃。
+
 ```
-packages/framework/
-  package.json          # @zeta-agent/framework, exports: "." / "./package.json"（facade 唯一出口）
-  src/
-    index.ts            # 【facade】createContext / defineKey / defineComponent / use / on / loader.load ...
-    components/         # 【内部组件】应用与其他框架不得直接 import
-      cordis/           #   effect/coeffect/fiber/context/lifecycle（论文复刻组件）
-      events/           #   emit/parallel/serial/bail/waterfall + @mode 校验
-      scope/            #   ScopeKey / Scoped<T> / scopeTarget / 双路径 teardown
-      seam/             #   Service Definition / Provider / Consumer 登记与能力图
-      registry/         #   defineRegistry / compose / accepts
-      loader/           #   Entry / 配置对账 / realm 重分配 / patch 分层
-      hmr/              #   单一队列 HMR + readiness + 模块驱逐（论文 §5.2）
-      health/           #   HealthBoard 单写者断言
-      store/            #   documents / transactions / watch
-      links/            #   memory / ipc / ws link
-      objects/          #   contract / object / reference
-    testing/            # fake context / 断言 / 汇合性测试工具
+packages/
+  framework/            # @zeta-agent/framework —— facade 包（唯一公开出口）
+    package.json        # exports: "." / "./package.json"
+    src/index.ts        # createContext / defineKey / defineComponent / use / on / loader.load ...
+  components/           # 分组目录（无 package.json），每个子目录是独立 workspace 包
+    cordis/             # @zeta-agent/cordis —— effect/coeffect/fiber/context（论文复刻组件）
+    events/             # @zeta-agent/events —— 五模式派发 + @mode 校验
+    scope/              # @zeta-agent/scope —— Scoped<T> 与范围路由
+    seam/               # @zeta-agent/seam —— Service Definition / Provider / Consumer
+    registry/           # @zeta-agent/registry —— defineRegistry / compose / accepts
+    loader/             # @zeta-agent/loader —— entry 对账 / patch 分层
+    hmr/                # @zeta-agent/hmr —— 单队列 HMR + readiness
+    health/             # @zeta-agent/health —— HealthBoard 单写者断言
+    store/              # @zeta-agent/store —— documents / transactions / watch
+    links/              # @zeta-agent/links —— memory / ipc / ws
+    objects/            # @zeta-agent/objects —— contract / object / reference
+    testing/            # @zeta-agent/testing —— fake context / 断言 / 汇合性测试
 ```
 
-`package.json` 只依赖可选 peer（`esbuild`、`ws`），与 chord 一致。`sideEffects: false`。**facade 是唯一公开面**：`exports` 只暴露 `.` 与 `./package.json`，不暴露 `./components/**`，从包管理层面阻止应用深入内核。
+`framework` facade 包只依赖组件包做装配与统一出口。应用（agent/tui/cli）**只依赖 facade 包**，不依赖任何组件子包（架构守护脚本强制，见 [framework-model §6.1](../architecture/framework-model.md#61-packagejson-依赖方向静态可检查)）。组件包可独立单测与替换实现。
 
 
 ## 文档关系

@@ -54,9 +54,9 @@ entry ↔ fiber 双向绑定：字段变化 → 调整 fiber；组件自行改�
 
 ### 8.4 HMR 三阶段（借鉴 chord + 论文）
 
-chord 的插件机制已经非常成熟：发现→esbuild 冷构建→`vm.Script` 求值（**无 module map / require cache**）→digest 驱动最小重求值→按 host 滚动发布→closure rule + 旧工作排空（[02 chord 报告 §3.4](../research/pi-baseline.md)）。论文的 HMR 三阶段（[01 §10.6](../research/cordis-paper-theory.md)）与之互补。我们的设计取两者之长：
+chord 的插件机制已经非常成熟：发现→esbuild 冷构建→`vm.Script` 求值（**无 module map / require cache**）→digest 驱动最小重求值→按 host 滚动发布→closure rule + 旧工作排空（[02 chord 报告 §3.4](../research/pi-baseline.md)）。论文的 HMR 三阶段（[cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法)）与之互补。我们的设计取两者之长：
 
-**阶段 1：发现与构建（development 期）**
+**阶段 1：发现与构建（运行时核心能力，非开发期工具）**
 - 只列目录、读 `package.json`（不解析源码），字段 `zeta.plugins`（glob + `!` 排除，仿 chord/pi）。
 - 每个 facet kind（如 `agent`、`tui`、`server`）一个文件，默认导出 component/facet。
 - 用 esbuild 把组件打成**单文件 wrapper**（CommonJS/ESM），host 包与外部依赖保持 external；失败作为返回值 `BuiltFacet {kind:"failed", errors}`，不抛异常。

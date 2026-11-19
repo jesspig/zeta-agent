@@ -20,8 +20,8 @@
 **不是逐文件翻译 pi**，而是按四层重新划分边界后实现。三条原则：
 
 1. **自底向上**：先 L1（core），再 L2（agent-core），再 L3（agent 插件 + TUI），最后 L4（CLI 装配）。
-2. **测试先行**：L2 的 12 条不变量等价测试（[05 §13](../agent-framework/state-and-events.md#13-测试策略与不变量等价清单)）先于插件管线实现；L1 的汇合性/可逆性测试先于 loader/HMR。
-3. **双轨兼容**：保留 pi 的字段赋值与两套 Extension 门面作为兼容层（[05 §4.2](../agent-framework/overview.md)、[06 §12](../agent/plugin-system.md#12-两套扩展系统的统一)），老扩展可继续用。
+2. **测试先行**：L2 的 12 条不变量等价测试（[agent-framework §13](../agent-framework/state-and-events.md#13-测试策略与不变量等价清单)）先于插件管线实现；L1 的汇合性/可逆性测试先于 loader/HMR。
+3. **双轨兼容**：保留 pi 的字段赋值与两套 Extension 门面作为兼容层（[agent-framework §4.2](../agent-framework/overview.md)、[plugin-system §12](../agent/plugin-system.md#12-两套扩展系统的统一)），老扩展可继续用。
 
 **范围边界**：pi 仓库只读作为事实来源，不在其上修改；新代码写在 `zeta-agent` 工作区（当前为 `bun init` 空项目）。
 
@@ -33,7 +33,7 @@
 **目标**：把当前 `bun init` 空项目变成可运行的 monorepo 骨架。
 
 - 根 `package.json`：`workspaces: ["apps/*","packages/*"]`、`devEngines` 锁 bun 1.4.2、`turbo` 脚本。
-- `turbo.json`（[03 §8](../architecture/engineering.md#8-构建任务图turbojson-草案)）、`tsconfig.base.json`、`bunfig.toml`（OpenTUI preload）。
+- `turbo.json`（[framework-model/engineering §8](../architecture/engineering.md#8-构建任务图turbojson-草案)）、`tsconfig.base.json`、`bunfig.toml`（OpenTUI preload）。
 - 建四个包目录与 `apps/zeta-cli` 的最小 `package.json` / `tsconfig`。
 - 安装锁定：`solid-js@^1.9.16`、`@opentui/core@0.9.3`、`@opentui/solid@0.9.3`、`turbo@<pinned>`、`esbuild`（可选 peer）。
 
@@ -43,9 +43,9 @@
 
 **目标**：ctx.effect / fiber 状态机 / coeffect / registry 可运行并通过论文判据测试。
 
-- 实现 [04 §3-7](../framework/core-semantics.md#3-核心数据模型)：`defineKey`、`createContext`、`ctx.effect`、`get/set/isolate/intercept`、`use`、`refresh/reload/unload/notify`、LIFO 逆、FAILED。
-- 实现 [04 §10](../framework/components.md#10-注册表与-contribution)：`defineRegistry` / `compose` / `accepts`。
-- 实现 [04 §11](../framework/api-and-testing.md#11-测试与调试-api) 测试工具：`assertQuiescent`、`assertNoResidue`、`replayConfig`、`observeDispose`、`faultInject`。
+- 实现 [framework §3-7](../framework/core-semantics.md#3-核心数据模型)：`defineKey`、`createContext`、`ctx.effect`、`get/set/isolate/intercept`、`use`、`refresh/reload/unload/notify`、LIFO 逆、FAILED。
+- 实现 [framework §10](../framework/components.md#10-注册表与-contribution)：`defineRegistry` / `compose` / `accepts`。
+- 实现 [framework §11](../framework/api-and-testing.md#11-测试与调试-api) 测试工具：`assertQuiescent`、`assertNoResidue`、`replayConfig`、`observeDispose`、`faultInject`。
 - **不实现**对象运行时与 HMR（留到阶段 3/5）。
 
 **退出条件**：
@@ -61,11 +61,11 @@
 
 **目标**：在不变量等价测试保护下，把 agent loop 落地为插件管线。
 
-- **先写** [05 §13](../agent-framework/state-and-events.md#13-测试策略与不变量等价清单) 的 24 个测试（12 条 × legacy/plugin）。
-- 实现 [05 §3](../agent-framework/runtime.md#3-公开-api-草案) 类型与 `runLoop`（逐字对应 [02 §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) 的 11 步）。
-- 实现 [05 §4](../agent-framework/runtime.md#4-agentplugin-管线替代-monkey-patch) 插件管线 + legacy 兼容层。
-- 实现 [05 §8](../agent-framework/tools-and-policies.md#8-工具流水线)：工具流水线、terminate 全批次、runToolCall。
-- 实现 [05 §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)：事件屏障、`agent_end` ≠ idle。
+- **先写** [agent-framework §13](../agent-framework/state-and-events.md#13-测试策略与不变量等价清单) 的 24 个测试（12 条 × legacy/plugin）。
+- 实现 [agent-framework §3](../agent-framework/runtime.md#3-公开-api-草案) 类型与 `runLoop`（逐字对应 [pi-baseline §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) 的 11 步）。
+- 实现 [agent-framework §4](../agent-framework/runtime.md#4-agentplugin-管线替代-monkey-patch) 插件管线 + legacy 兼容层。
+- 实现 [agent-framework §8](../agent-framework/tools-and-policies.md#8-工具流水线)：工具流水线、terminate 全批次、runToolCall。
+- 实现 [agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)：事件屏障、`agent_end` ≠ idle。
 
 **退出条件**：24 个等价测试全绿；`turbo run test` 通过；core 无 provider/持久化依赖（依赖图检查）。
 
@@ -75,11 +75,11 @@
 
 **目标**：用插件装配出一个可用 agent（工具、技能、提示词、会话、权限、MCP、模式）。
 
-- 实现 [06 §3](../agent/plugin-system.md#3-工具插件内置工具也走插件)：内置工具插件化 + replaceable。
-- 实现 [06 §4](../agent/plugin-system.md#4-技能提示词主题插件)：资源注册表 + 解析器插件。
-- 实现 [06 §5](../agent/plugin-system.md#5-会话与持久化插件)：会话插件 + 内存/JSONL 后端（SQLite 后置）。
-- 实现 [06 §6-7](../agent/plugin-system.md#6-工具副作用的边界分类)：获取/发射分类 + 权限/intercept + 沙箱基础。
-- 实现 [06 §9-10](../agent/plugin-system.md#9-mcp-与-provider-插件)：MCP 插件、provider broker、模式插件。
+- 实现 [plugin-system §3](../agent/plugin-system.md#3-工具插件内置工具也走插件)：内置工具插件化 + replaceable。
+- 实现 [plugin-system §4](../agent/plugin-system.md#4-技能提示词主题插件)：资源注册表 + 解析器插件。
+- 实现 [plugin-system §5](../agent/plugin-system.md#5-会话与持久化插件)：会话插件 + 内存/JSONL 后端（SQLite 后置）。
+- 实现 [plugin-system §6-7](../agent/plugin-system.md#6-工具副作用的边界分类)：获取/发射分类 + 权限/intercept + 沙箱基础。
+- 实现 [plugin-system §9-10](../agent/plugin-system.md#9-mcp-与-provider-插件)：MCP 插件、provider broker、模式插件。
 
 **退出条件**：`createAgent()` 可跑通一个完整 turn（含工具调用）；工具热插拔后 transcript 声明同步；权限策略热更新不触发 reload；print/json 模式可用。
 
@@ -89,10 +89,10 @@
 
 **目标**：OpenTUI Solid 界面 + CLI 入口，替换 pi 的交互式体验。
 
-- 实现 [07 §3-5](../agent/tui.md#3-架构renderer-signal-桥-插件槽位)：renderer、signal 桥、Solid slots。
-- 实现 [07 §6-8](../agent/tui.md#6-与-pi-tui-的对应关系)：主题、快捷键、生命周期。
-- 实现 `apps/zeta-cli`：参数、登录（最小）、loader 启动、模式选择（[06 §11](../agent/plugin-system.md#11-装配流程)）。
-- 实现 [07 §9](../agent/tui.md#9-测试策略)：`testRender` 帧快照。
+- 实现 [doc §3-5](../agent/tui.md#3-架构renderer-signal-桥-插件槽位)：renderer、signal 桥、Solid slots。
+- 实现 [doc §6-8](../agent/tui.md#6-与-pi-tui-的对应关系)：主题、快捷键、生命周期。
+- 实现 `apps/zeta-cli`：参数、登录（最小）、loader 启动、模式选择（[plugin-system §11](../agent/plugin-system.md#11-装配流程)）。
+- 实现 [doc §9](../agent/tui.md#9-测试策略)：`testRender` 帧快照。
 
 **退出条件**：`bun apps/zeta-cli/src/index.ts` 可交互对话；工具调用渲染正确；插件槽位可热替换；`--print/--json/--rpc` 可用；帧快照测试通过。
 
@@ -102,12 +102,22 @@
 
 **目标**：开发期热重载、跨进程对象、受控自演化。
 
-- [04 §8](../framework/components.md#8-组件加载器与-hmr)：三阶段 HMR（先做构建+digest+事务重载，跨 host rollout 后置）。
-- [04 §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径)：contract/document/store/link 最小实现（可选子路径）。
-- [06 §8](../agent/plugin-system.md#8-自演化与安全管理)：自演化护栏（required root、环检测、沙箱、试加载回滚）。
-- [06 §12](../agent/plugin-system.md#12-两套扩展系统的统一)：pi 两套 Extension 兼容门面。
+- [framework §8](../framework/components.md#8-组件加载器与-hmr)：三阶段 HMR（先做构建+digest+事务重载，跨 host rollout 后置）。
+- [framework §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径)：contract/document/store/link 最小实现（可选子路径）。
+- [plugin-system §8](../agent/plugin-system.md#8-自演化与安全管理)：自演化护栏（required root、环检测、沙箱、试加载回滚）。
+- [plugin-system §12](../agent/plugin-system.md#12-两套扩展系统的统一)：pi 两套 Extension 兼容门面。
+- **护栏强化**（来自 [recursive-self-evolution.md §6](../research/recursive-self-evolution.md#6-落地批次)）：晋升 digest 校验、workspace 不覆盖 + RESUME、stage-scoped 权限、grader tripwire、预算恒等式——即便不做完整递归自演化，这些也强化受控热替换。
 
 **退出条件**：改一个插件文件 → 不重启进程即生效，且其他插件的会话/连接保留；故障注入（语法错误）能回滚；自修改试加载失败不影响宿主。
+
+### 阶段 6：递归自演化研究轨（可选/后续）
+
+**定位**：产品轨阶段 1-5 不实现自动代码生成与部署；但框架已在阶段 5 预留所需 seam。研究轨仅在有可重放任务+评估器时启用。
+
+- 实现 [recursive-self-evolution.md §6](../research/recursive-self-evolution.md#6-落地批次) 的研究轨项：策略白名单沙箱、DecisionSurface 对偶、冻结 trace、fitness seam、资格门禁 + incumbent 单调晋升、ExperienceLibrary。
+- 验证来自 DREAM-RSI 的 A16-A20（见 §4 验收标准）。
+
+**退出条件**：同一任务上新旧策略可在冻结 trace 上重放比较；新策略只有严格更优（且资格合格）才晋升；递归过程不破坏 24 条不变量。
 
 
 ## 3 依赖关系与关键路径
@@ -135,7 +145,7 @@ flowchart LR
 
 ## 4 验收标准
 
-从 [03 §12](../architecture/engineering.md#12-验收标准) 展开为可检查清单：
+从 [framework-model/engineering §12](../architecture/engineering.md#12-验收标准) 展开为可检查清单：
 
 | # | 标准 | 证据形式 | 对应阶段 |
 | --- | --- | --- | --- |
@@ -154,13 +164,18 @@ flowchart LR
 | A13 | 事件 `@mode` 与派发点一致；单调 guard 任意顺序下 deny 不翻回 allow | 声明校验脚本 + 排列测试（[10 CORE-1/6](../research/dsh-optimizations.md#3-核心运行时优化core)） | 0-2 |
 | A14 | same config 不同顺序 → `--dump-config` 输出观察等价；patch 按 id 整块替换可复现 | 汇合测试 + patch 测试（[10 CORE-14/ENG-2](../research/dsh-optimizations.md#4-工程配置与-ui-优化eng)） | 0-1 |
 | A15 | effects 插件：进程崩溃重启后 durable intent 被重放且幂等键不产生重复 | 故障注入 + 重启测试（[10 SUP-1/2](../research/dsh-optimizations.md#5-域层与治理优化sup)） | 3 |
+| A16 | 晋升单调性：incumbent 参赛，新策略仅严格更优且资格合格才替换 | 候选竞争测试（[SE-D6](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
+| A17 | 重放不变量：budget===order.length、无重复、每步 isLegal、best≤runBest | 框架级断言（[SE-D10](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
+| A18 | 观察等价晋升：晋升前后 ctx 在键上的公开操作测试一致 | 汇合性扩展测试（[SE-H3](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 5-6 |
+| A19 | 无 ground truth：grader verdict / rubric / score 不进改进上下文，tripwire 命中即抛错 | 泄漏注入测试（[SE-H8](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 5-6 |
+| A20 | 递归不破坏不变量：自演化前后 24 条不变量等价测试全绿 | 不变量回归（[SE-H11](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
 
 
 ## 5 运行时 HMR 与测试
 
 > **定位**：我们复刻 Cordis 论文，HMR 属于 component loader（论文 §5.2），是 **@zeta-agent/framework 的运行时核心能力**，不是开发期便利工具。它同样服务于 agent 的自演化（运行时替换自身组件），因此其正确性由 A11/A12 验收。
 
-- **HMR**：[04 §8](../framework/components.md#8-组件加载器与-hmr) 的三阶段（发现/构建 → 分类 → 事务重载）+ 单一 `runExclusive` 队列 + readiness barrier + digest 复用 + 模块驱逐（[02 §3.4](../research/pi-baseline.md)、[10 ENG-5](../research/dsh-optimizations.md#4-工程配置与-ui-优化eng)）。无论开发期还是运行时，变更都走同一路径：watcher 标 dirty → 重建 → 按 id 整块替换 entry → 换 fiber，保留会话与其他插件状态。
+- **HMR**：[framework §8](../framework/components.md#8-组件加载器与-hmr) 的三阶段（发现/构建 → 分类 → 事务重载）+ 单一 `runExclusive` 队列 + readiness barrier + digest 复用 + 模块驱逐（[pi-baseline §3.4](../research/pi-baseline.md)、[10 ENG-5](../research/dsh-optimizations.md#4-工程配置与-ui-优化eng)）。无论开发期还是运行时，变更都走同一路径：watcher 标 dirty → 重建 → 按 id 整块替换 entry → 换 fiber，保留会话与其他插件状态。
 - **测试分层**：
   - 单元测试（`bun:test`）：core 语义、agent-core 流水线、插件逻辑；
   - 帧测试（`testRender`）：TUI；
@@ -187,7 +202,7 @@ flowchart LR
 
 | ID | 问题 | 建议 | 文档 |
 | --- | --- | --- | --- |
-| O-1 | agent-core 是否运行时依赖 core | 仅类型导入 + 构造注入（已定案，[05 §2](../agent-framework/overview.md#2-包边界与依赖)） | 05 |
+| O-1 | agent-core 是否运行时依赖 core | 仅类型导入 + 构造注入（已定案，[agent-framework §2](../agent-framework/overview.md#2-包边界与依赖)） | 05 |
 | O-4 | Bun 能否稳定驱逐 ESM 缓存 | 实测；不依赖，走独立产物+digest | 04 |
 | O-7 | hook priority 默认值与冲突 | 默认 100，冲突按注册序并报告 | 05 |
 | O-9 | 发射类工具默认策略 | **已重新建议**（[10 SUP-2](../research/dsh-optimizations.md#5-域层与治理优化sup)）：默认 withhold（事务内 enqueue + commit 后派发 + 幂等键），审计为附带能力；profile 可配置为直接执行以兼容 pi | 06 |
@@ -202,13 +217,13 @@ flowchart LR
 
 | 本文阶段 | 依据文档 | 验证标准 |
 | --- | --- | --- |
-| 阶段 0 | [03 §3/§5/§8](../architecture/framework-model.md) | A1 |
+| 阶段 0 | [framework-model/engineering §3/§5/§8](../architecture/framework-model.md) | A1 |
 | 阶段 1 | [04 全篇](../framework/overview.md) | A3/A4/A5 |
-| 阶段 2 | [05 全篇](../agent-framework/overview.md)、[02 §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) | A6 |
+| 阶段 2 | [05 全篇](../agent-framework/overview.md)、[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) | A6 |
 | 阶段 3 | [06 全篇](../agent/plugin-system.md) | A7/A8 |
 | 阶段 4 | [07 全篇](../agent/tui.md) | A9/A10 |
-| 阶段 5 | [04 §8-9](../framework/overview.md)、[06 §8/§12](../agent/plugin-system.md) | A11/A12 |
-| 理论判据 | [01 §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | A3/A4/A5 |
+| 阶段 5 | [framework §8-9](../framework/overview.md)、[plugin-system §8/§12](../agent/plugin-system.md) | A11/A12 |
+| 理论判据 | [cordis-paper §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | A3/A4/A5 |
 
 **返回索引**：[00 索引与交叉验证](../README.md)
 

@@ -22,7 +22,7 @@
 - `observeDispose(ctx)`：记录逆调用序列，验证 LIFO 顺序。
 - `faultInject(effectStep)`：让某个 effect 步骤抛错，验证 FAILED 路径与无残留。
 
-这些 API 是 [03 §12 验收](../architecture/engineering.md#12-验收标准) 的落地手段。
+这些 API 是 [framework-model/engineering §12 验收](../architecture/engineering.md#12-验收标准) 的落地手段。
 
 
 ## 12 与 chord / Cordis 的对应关系
@@ -58,13 +58,13 @@
 
 | 本文设计 | 上游依据 | 下游验证 |
 | --- | --- | --- |
-| `ctx.effect` 唯一入口 | [01 §10.1](../research/cordis-paper-theory.md) | [08](../delivery/roadmap.md#4-验收标准) 可逆性测试 |
-| LIFO 累积器 | [01 §4.2](../research/cordis-paper-theory.md) | `observeDispose` 逆序断言 |
-| 键命名空间 | [01 §12.6](../research/cordis-paper-theory.md)、[03 §6.2](../architecture/framework-model.md) | 同名键冲突测试 |
-| target/committed view | [01 §10.3](../research/cordis-paper-theory.md) | 同值替换触发 reload 测试 |
-| guard / Thm 70 | [01 §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | teardown 读依赖测试 |
-| entry 对账 | [01 §10.5](../research/cordis-paper-theory.md) | 配置 revision 测试 |
-| HMR 三阶段 | [01 §10.6](../research/cordis-paper-theory.md)、[02 chord 报告](../research/pi-baseline.md) | 故障注入测试 |
+| `ctx.effect` 唯一入口 | [cordis-paper §10.1](../research/cordis-paper-theory.md) | [08](../delivery/roadmap.md#4-验收标准) 可逆性测试 |
+| LIFO 累积器 | [cordis-paper §4.2](../research/cordis-paper-theory.md) | `observeDispose` 逆序断言 |
+| 键命名空间 | [cordis-paper §12.6](../research/cordis-paper-theory.md)、[framework-model/engineering §6.2](../architecture/framework-model.md) | 同名键冲突测试 |
+| target/committed view | [cordis-paper §10.3](../research/cordis-paper-theory.md) | 同值替换触发 reload 测试 |
+| guard / Thm 70 | [cordis-paper §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | teardown 读依赖测试 |
+| entry 对账 | [cordis-paper §10.5](../research/cordis-paper-theory.md) | 配置 revision 测试 |
+| HMR 三阶段 | [cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法)、[02 chord 报告](../research/pi-baseline.md) | 故障注入测试 |
 | 注册表 contribution | [02 chord 报告 §3.5](../research/pi-baseline.md) | 冲突报告测试 |
 | 对象运行时 | [02 chord 报告 §4-5](../research/pi-baseline.md) | 文档事务回放测试 |
 | 供上层使用 | [05](../agent-framework/overview.md)、[06](../agent/plugin-system.md)、[07](../agent/tui.md) | 各层集成测试 |

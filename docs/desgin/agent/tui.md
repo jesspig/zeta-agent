@@ -21,18 +21,18 @@
 
 ## 1 定位与替换目标
 
-pi 的 `@earendil-works/pi-tui` 是自研命令式组件模型：`Component.render(width): string[]`、`handleInput`、`invalidate()`，由 `TuiMainScreen.doRender()` 做行级差分（[02 §6](../research/pi-baseline.md#6-earendil-workspi-tui自研差分渲染)）。它已经支持扩展通过 `ExtensionUIContext.setWidget/setFooter/custom/setEditorComponent` 替换 UI。
+pi 的 `@earendil-works/pi-tui` 是自研命令式组件模型：`Component.render(width): string[]`、`handleInput`、`invalidate()`，由 `TuiMainScreen.doRender()` 做行级差分（[pi-baseline §6](../research/pi-baseline.md#6-earendil-workspi-tui自研差分渲染)）。它已经支持扩展通过 `ExtensionUIContext.setWidget/setFooter/custom/setEditorComponent` 替换 UI。
 
 目标栈要求用 OpenTUI + SolidJS 替代它。替换的收益：
 
 - 差分渲染由 OpenTUI 的 Zig 原生核心完成（只更新变化的 cell），我们不再维护 `doRender()` 的 600 行差分逻辑；
-- Solid 的细粒度响应式天然对应论文的"值级 reactivity"（FRP/signals，[01 §7.4](../research/cordis-paper-theory.md#7-独立性从局部到全局) 的 related work 段）——但我们要保持**组件级生命周期语义**由 fiber 管，signal 只负责值级更新；
+- Solid 的细粒度响应式天然对应论文的"值级 reactivity"（FRP/signals，[cordis-paper-system §13](../research/cordis-paper-system.md#13-相关工作定位) 的 related work 段）——但我们要保持**组件级生命周期语义**由 fiber 管，signal 只负责值级更新；
 - OpenTUI 自带 **Solid plugin slots**（`createSolidSlotRegistry` / `Slot` / `createSlot` / `SolidPlugin`），与"万物皆插件"直接契合。
 
 
 ## 2 OpenTUI Solid 事实基础
 
-以下全部来自官方文档（[03 §3.3](../architecture/framework-model.md) 附链接，访问 2026-11-19）：
+以下全部来自官方文档（[engineering §3.3](../architecture/engineering.md#33-opentui-solidjs) 附链接，访问 2026-11-19）：
 
 | 事实 | 说明 |
 | --- | --- |
@@ -73,7 +73,7 @@ flowchart LR
 
 ## 4 AgentEvent → Solid signal 映射
 
-保持 pi 的事件顺序语义（[05 §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)）是硬约束：signal 更新必须发生在 `await` listener 之前或之内，不能把异步消费者甩在后面。
+保持 pi 的事件顺序语义（[agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)）是硬约束：signal 更新必须发生在 `await` listener 之前或之内，不能把异步消费者甩在后面。
 
 ```ts
 export function createAgentSignals(agent: Agent) {
@@ -149,7 +149,7 @@ export function registerUiPlugin(plugin: SolidPlugin<ZetaSlots, SlotContext>) {
 - `@zeta-agent/agent` 的 UI 插件（如工具渲染器、主题、状态栏）导出 `SolidPlugin<ZetaSlots, SlotContext>`；
 - 它们由 `ctx.use(uiPluginComponent, config)` 加载，fiber 的 `apply` 中调用 `registry.register()` 并 `yield` 逆（unregister）；
 - 热替换 UI 插件时：fiber 卸载 → 逆注销槽位 → 新 fiber 注册新槽位；OpenTUI 只重绘变化部分（chord 的"插件 CSS 与代码一起热替换"模式）。
-- 运行时加载 TSX 插件需按官方文档引入 `@opentui/solid/runtime-plugin-support`，并配置 Bun 的 module map 与信任边界——这是 [04 §8](../framework/components.md#8-组件加载器与-hmr) HMR 与 OpenTUI 插件支持的交汇点，需实测。
+- 运行时加载 TSX 插件需按官方文档引入 `@opentui/solid/runtime-plugin-support`，并配置 Bun 的 module map 与信任边界——这是 [framework §8](../framework/components.md#8-组件加载器与-hmr) HMR 与 OpenTUI 插件支持的交汇点，需实测。
 
 **与 pi 的 `registerMessageRenderer/registerToolRenderer/registerMarkdownTransformer` 对应**：这些都变成 `Slot` 贡献；`setWidget/setFooter/setHeader/custom` 变成对应槽位名。pi 的"扩展可完全替换 editor"用 `editor` 槽位实现。
 
@@ -166,7 +166,7 @@ export function registerUiPlugin(plugin: SolidPlugin<ZetaSlots, SlotContext>) {
 | `SelectList` | `<select>` / `<tab_select>` | 官方组件 |
 | `Editor` | `<input>` / `<textarea>` + 自定义 renderable | 可 `extend()` |
 | `ExtensionUIContext.setWidget/setFooter/custom` | `Slot` 槽位 | 插件贡献 |
-| `Theme`（JSON + schema） | `theme` 注册表 + `@zeta-agent/themes:registry` 插件（[06 §4](./plugin-system.md#4-技能提示词主题插件)） | 主题本身是插件 |
+| `Theme`（JSON + schema） | `theme` 注册表 + `@zeta-agent/themes:registry` 插件（[plugin-system §4](./plugin-system.md#4-技能提示词主题插件)） | 主题本身是插件 |
 | OKLCH/OKHSL 颜色工具 | OpenTUI 自带颜色；必要时保留工具函数 | 视 API 覆盖情况 |
 
 **迁移注意**：pi 的 `StdinBuffer`、`keys.ts` 借鉴了 OpenTUI（MIT），迁移后直接使用官方实现，删除本地副本。
@@ -175,7 +175,7 @@ export function registerUiPlugin(plugin: SolidPlugin<ZetaSlots, SlotContext>) {
 ## 7 主题、语言与快捷键
 
 - **主题**：`@zeta-agent/themes:registry` 插件提供主题对象；TUI 通过 `SlotContext.theme` 消费。切换主题 = `ctx.set(themeKey, newTheme)` → notify → 订阅组件更新（不重启 TUI fiber）。
-- **语言/翻译**：chord 的 `Translations`/`LocaleChoice` 模式（[02 §3](../research/pi-baseline.md#3-earendil-workschord对象运行时与插件)），做成注册表插件；`formatTime/formatNumber` 保留为工具函数。
+- **语言/翻译**：chord 的 `Translations`/`LocaleChoice` 模式（[pi-baseline §3](../research/pi-baseline.md#3-earendil-workschord对象运行时与插件)），做成注册表插件；`formatTime/formatNumber` 保留为工具函数。
 - **快捷键**：`useKeyboard` 订阅 + 插件注册的 keymap（`@zeta-agent/keymap:registry`，有序 coeffect——快捷键冲突需显式优先级）。pi 的 `KeybindingsManager`/`KeyId/matchesKey` 逻辑保留为纯函数，UI 层用 Solid hook 接入。
 
 
@@ -219,7 +219,7 @@ test("renders transcript", async () => {
 
 ## 10 无 TUI 的运行形态
 
-print/json/rpc 模式（[03 §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式)、[06 §10](./plugin-system.md#10-模式插件interactive-print-json-rpc)）**不加载 `@zeta-agent/tui`**：
+print/json/rpc 模式（[framework-model/engineering §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式)、[plugin-system §10](./plugin-system.md#10-模式插件interactive-print-json-rpc)）**不加载 `@zeta-agent/tui`**：
 
 - 只订阅 AgentEvent 输出文本/JSON；
 - 不创建 renderer，不 preload Solid；
@@ -247,12 +247,12 @@ print/json/rpc 模式（[03 §9](../architecture/engineering.md#9-运行形态cl
 
 | 本文设计 | 上游依据 | 下游验证 |
 | --- | --- | --- |
-| AgentEvent → signal | [05 §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义) | 事件顺序测试 |
-| 插件槽位 | OpenTUI 官方文档（[03 §3.3](../architecture/framework-model.md)）、[06 §2](./plugin-system.md#2-插件清单与分类) | 槽位热替换测试 |
-| 与 pi-tui 对照 | [02 §6](../research/pi-baseline.md#6-earendil-workspi-tui自研差分渲染) | 功能清单覆盖 |
-| fiber 生命周期承载 UI 插件 | [04 §7](../framework/core-semantics.md#7-生命周期状态机) | onCleanup = 逆 |
-| 主题/语言注册表 | [06 §4](./plugin-system.md#4-技能提示词主题插件) | 切换不重启测试 |
-| 无 TUI 模式 | [03 §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式) | CI 冒烟 |
+| AgentEvent → signal | [agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义) | 事件顺序测试 |
+| 插件槽位 | OpenTUI 官方文档（[engineering §3.3](../architecture/engineering.md#33-opentui-solidjs)）、[plugin-system §2](./plugin-system.md#2-插件清单与分类) | 槽位热替换测试 |
+| 与 pi-tui 对照 | [pi-baseline §6](../research/pi-baseline.md#6-earendil-workspi-tui自研差分渲染) | 功能清单覆盖 |
+| fiber 生命周期承载 UI 插件 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) | onCleanup = 逆 |
+| 主题/语言注册表 | [plugin-system §4](./plugin-system.md#4-技能提示词主题插件) | 切换不重启测试 |
+| 无 TUI 模式 | [framework-model/engineering §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式) | CI 冒烟 |
 | 迁移阶段 | [08](../delivery/roadmap.md) | 阶段验收 |
 
 **返回索引**：[00 索引与交叉验证](../README.md)

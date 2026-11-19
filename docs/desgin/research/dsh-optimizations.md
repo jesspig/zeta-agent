@@ -21,7 +21,7 @@
 
 **S12 是论文的复刻蓝本，不是运行时依赖。** 它的 [docs/architecture.md:9-11](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md#L9-L11) 明确：*"Every part of the product is a plugin, including the model adapter, the tool registry, the session log, and the agent loop itself… **There is no privileged core to patch**"*。这把我们的设计从"基于论文的推断"提升为"有生产参考的实现路径"。
 
-**由复刻定位推出的一条结构性结论**：S12 中一切通用机械——五模式事件系统、scope、seam/registry、loader、配置分层（profile/bundle/patch）、HMR、HealthBoard——都必须由我们自己实现并归入 **L1 `@zeta-agent/framework`**（论文 core library + component loader 两层），而不是当作外部依赖或上层增强。HMR 尤其如此：论文 §5.2 把"配置对账 + 热模块替换"列为 Cordis 的第二层，chord 也强调"没有 dev/prod 之分"。因此 [08 §5](../delivery/roadmap.md#5-运行时-hmr-与测试) 已从"开发期体验"改名为"运行时 HMR"。
+**由复刻定位推出的一条结构性结论**：S12 中一切通用机械——五模式事件系统、scope、seam/registry、loader、配置分层（profile/bundle/patch）、HMR、HealthBoard——都必须由我们自己实现并归入 **L1 `@zeta-agent/framework`**（论文 core library + component loader 两层），而不是当作外部依赖或上层增强。HMR 尤其如此：论文 §5.2 把"配置对账 + 热模块替换"列为 Cordis 的第二层，chord 也强调"没有 dev/prod 之分"。因此 [doc §5](../delivery/roadmap.md#5-运行时-hmr-与测试) 已从"开发期体验"改名为"运行时 HMR"。
 
 它同时暴露了我们设计的四个**实质性缺口**：
 
@@ -101,7 +101,7 @@
 ## 3 核心运行时优化（CORE）
 
 ### CORE-1（P0）事件派发模式升为一等公民
-- **现状**：05 §3.1 的 9 种事件全部按序 await listener；05 §4.2 `HookChain.run` 只有一种"依次 await 并 transform input"。
+- **现状**：05 §3.1 的 10 种事件全部按序 await listener；05 §4.2 `HookChain.run` 只有一种"依次 await 并 transform input"。
 - **建议**：定义 `DispatchMode = 'emit' | 'parallel' | 'serial' | 'bail' | 'waterfall'`，每个事件声明带 `@mode`；把 HookChain 拆成 `serial`（无 next）与 `waterfall`（around + next，缺 next 短路）两种原语。映射建议：`message_end`/`tool_execution_end`→emit、`beforeToolCall`/`afterToolCall`/`prepareRequest`→waterfall、`agent_end` 屏障→serial。加构建期脚本校验声明与派发点一致（仿 `verify-cordis-catalog`）。
 - **来源**：S12 [docs/cordis-primer.md:15-35](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cordis-primer.md#L15-L35)、[vendor/cordis/src/events.ts:193-265](https://github.com/deepseek-ai/deepseek-harness/blob/master/vendor/cordis/src/events.ts#L193-L265)、[docs/subsystems/core.md:108](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md#L108)。
 - **理由**：这是 CORE-5/6 的语义基础，也是 02 §9 不变量 #1（message_end 屏障）与 #6（no-throw）的承载机制。
@@ -260,7 +260,7 @@
 
 ### 5.1 三个最重要的补强
 
-1. **durable effects 是我们 [06 §6] 缺失的那一半**。我们正确识别了论文的 acquisition/emission 边界，但把 emission 交付留在"策略声明"层（O-9 甚至建议默认"直接执行+审计"）。S13 的 `Effects` 把它落成机制：事务内 `enqueue(kind,key,payload)`、commit 后 dispatch、`(kind,key)` 唯一、保留 `seq` 队列位置、`generation` 守卫防误删、指数退避、`Later` 表示"正常等待不算失败"、连续 3 次失败才报 health error。这才是论文 "withhold / output commit" 的可执行定义，也是我们 `AgentTool.replay: "never"|"safe"` 的落点。
+1. **durable effects 是我们 [plugin-system §6] 缺失的那一半**。我们正确识别了论文的 acquisition/emission 边界，但把 emission 交付留在"策略声明"层（O-9 甚至建议默认"直接执行+审计"）。S13 的 `Effects` 把它落成机制：事务内 `enqueue(kind,key,payload)`、commit 后 dispatch、`(kind,key)` 唯一、保留 `seq` 队列位置、`generation` 守卫防误删、指数退避、`Later` 表示"正常等待不算失败"、连续 3 次失败才报 health error。这才是论文 "withhold / output commit" 的可执行定义，也是我们 `AgentTool.replay: "never"|"safe"` 的落点。
 2. **"一次写入者 + 窄接口"从文档规则变成运行时不变量**。S13 的 `HealthBoard.claim()` 对重复 claim 直接抛错；`EngineFor<Role> = Pick<Engine,...>` 让每个调用方只看到自己需要的命令。我们 03 §6 只有包依赖方向，缺**运行状态写入权表**。
 3. **结构化治理取代自由文本推断**。`Attention{id,question,triggerId}` + `waitsForPerson` + `followupOwners` + `handback` 把"等人工"变成可判定的事实；S13 明确把"从报告自由文本推断 waiting"列为**拒绝概念**。
 
@@ -271,11 +271,11 @@
 | SUP-1 | P0 | 新增 `effects` **服务插件**（不放 core，core 必须无 I/O）：`enqueue` 事务内、commit 后 dispatch、`(kind,key)` 唯一、`seq` 保序、`generation` 防覆盖、指数退避、`Later` 不计数、每 kind 一 handler、3 次阈值 health | 06 §6/§5，04 §5.2 | `src/app/effects.ts`；`docs/003-execution.md` "Stored work" |
 | SUP-2 | P0 | 把 06 O-9 的默认"直接执行+审计"改为**默认 withhold（事务内 enqueue、commit 后执行）+ 幂等键**；审计是附带能力 | 06 §6/§13，08 §7 O-9 | [src/app/outbox.ts:26-37](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/app/outbox.ts#L26-L37)；[docs/007-architecture.md:166-181](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md#L166-L181) |
 | SUP-3 | P1 | 会话插件增加 `atomic()`（嵌套 SAVEPOINT）+ `afterCommit()` 双层：内存跟随用 afterCommit，跨崩溃副作用用 Effects；WAL + synchronous=FULL | 06 §5/§11，04 §5.1 | [src/app/store.ts:58-64,133-162](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/app/store.ts#L58-L64) |
-| SUP-4 | P1 | 一等不可变 `Mandate` + `MandateBasis` + `revalidate`，"消息/提示词是数据，不能改权限"写入 [06 §7] 前置条款 | 06 §7 | [src/core/model.ts:116-133](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/core/model.ts#L116-L133)；[src/policy.ts:167-240](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/policy.ts#L167-L240)；[docs/002-authorization.md:5](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/002-authorization.md#L5) |
+| SUP-4 | P1 | 一等不可变 `Mandate` + `MandateBasis` + `revalidate`，"消息/提示词是数据，不能改权限"写入 [plugin-system §7] 前置条款 | 06 §7 | [src/core/model.ts:116-133](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/core/model.ts#L116-L133)；[src/policy.ts:167-240](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/policy.ts#L167-L240)；[docs/002-authorization.md:5](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/002-authorization.md#L5) |
 | SUP-5 | P1 | `policyVersion/policyChanged/policyEffects`：变更只通知受影响 Ticket（`policy-changed` Input），**不撤销在途 Mandate**，重排运行中 Eval | 06 §8，05 §9 | [src/policy.ts:111-165](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/policy.ts#L111-L165)；[src/core/engine.ts:255](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/core/engine.ts#L255) |
 | SUP-6 | P1 | 用 bundle patch 定义 worker/router 两套 preset + `order` + `group/isolate`，插件清单从 TS 常量移到可被 profile 覆盖的层 | 06 §2/§3/§11，05 §4 | [cordis.patch.yml:4-20,121-132](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/cordis.patch.yml#L4-L20)；[src/app/sessions.ts:48](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/app/sessions.ts#L48)；`tests/bundle-patch.spec.ts` |
 | SUP-7 | P1 | `write:false/edit:false/fetch:false` + `WORK_TOOLS` 白名单 + `noWait` 守卫，形成"硬裁剪（工具不存在）+ 软拦截（beforeToolCall）"双层 | 06 §3/§7 | [cordis.patch.yml:116-120,163-167](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/cordis.patch.yml#L116-L120)；[src/app/sessions.ts:61-86](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/app/sessions.ts#L61-L86) |
-| SUP-8 | P1 | [03 §6] 增补"state → 唯一 writer"运行表 + `HealthBoard.claim` 式冲突即抛断言 | 03 §6，04 §10 | [docs/007-architecture.md:259-274](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md#L259-L274)；[src/infra/health.ts:15-33](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/infra/health.ts#L15-L33) |
+| SUP-8 | P1 | [framework-model §6] 增补"state → 唯一 writer"运行表 + `HealthBoard.claim` 式冲突即抛断言 | 03 §6，04 §10 | [docs/007-architecture.md:259-274](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md#L259-L274)；[src/infra/health.ts:15-33](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/infra/health.ts#L15-L33) |
 | SUP-9 | P1 | 插件 API 采用"命令式请求 / 过去式事实"命名 + `UserError(code,values)` 固定拒绝码，与 hook no-throw 契约配套 | 05 §3.4/§4.2/§7 | [src/core/engine.ts:40-257](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/core/engine.ts#L40-L257)；[docs/007-architecture.md:62,272-274](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md#L62) |
 | SUP-10 | P1 | 带类型的 `DomainEvent` 联合 + 单一 `emit()` 作为插件间唯一广播通道，避免插件直接互调形成隐式环 | 05 §10，04 §10 | [src/core/ports.ts:85-103](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/core/ports.ts#L85-L103)；[docs/007-architecture.md:105-109](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md#L105-L109) |
 | SUP-11 | P2 | 幂等消息投递：`messageId(requestId)` + `holds/send` + 持久化 history，让 05 §10 的 await 屏障跨重启不重复 | 05 §10/§11，06 §5 | [src/app/delivery.ts:16,31-85](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/app/delivery.ts#L16) |
@@ -326,7 +326,7 @@ S13 的 `Effects` + `Outbox` 正是论文 §12.1 的 acquisition/emission 边界
 | 本文结论 | 上游来源 | 下游验证 |
 | --- | --- | --- |
 | 五大发现 | S12 [docs/architecture.md:9-11](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md#L9-L11) | 各建议的验收测试 |
-| 32 条优化建议 | S12/S13 源码路径（逐条标注） | §6 批次验收 |
+| 47 条优化建议 | S12/S13 源码路径（逐条标注） | §6 批次验收 |
 | 与论文一致处 | [01](./cordis-paper-theory.md)、[09](../architecture/fact-registry.md) | [03 P1-P10](../architecture/framework-model.md#2-从论文推导出的十条工程原则) |
 | 具体修订 | [7 修订清单](#7-对既有文档的修订清单) | 各文档更新后的交叉引用表 |
 

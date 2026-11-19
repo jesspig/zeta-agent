@@ -28,7 +28,7 @@ export const defineKey = <T>(namespace: string, name: string, opts?: KeyOptions<
 // 例：export const ToolsKey = defineKey<ToolRegistry>("@zeta-agent/tools", "registry", { commutative: true });
 ```
 
-`namespace + name` 防止 key collision（[03 §6.2](../architecture/framework-model.md)）；`operations` 是论文定义 29 的 `A k`，`commutative` 是定义 46 的见证——**声明为 true 是 provider 的义务**，运行时不校验。
+`namespace + name` 防止 key collision（[framework-model/engineering §6.2](../architecture/framework-model.md)）；`operations` 是论文定义 29 的 `A k`，`commutative` 是定义 46 的见证——**声明为 true 是 provider 的义务**，运行时不校验。
 
 ### 3.2 组件与 fiber
 
@@ -84,7 +84,7 @@ export interface Context {
 }
 ```
 
-`ctx[key]` 解析算法（论文算法 6，[01 §10.4](../research/cordis-paper-theory.md)）：沿 fiber 链向上，找到第一个 committed view 绑定该键的 fiber → 返回；遇到声明但未提交的 fiber → 抛 `INACTIVE_ACCESS`；到根仍未声明 → 抛 `UNDECLARED_ACCESS`。`ctx.get(key)` 是不失败的 store 查询；`ctx[key]` 强制规格检查。
+`ctx[key]` 解析算法（论文算法 6，[cordis-paper §10.4](../research/cordis-paper-theory.md)）：沿 fiber 链向上，找到第一个 committed view 绑定该键的 fiber → 返回；遇到声明但未提交的 fiber → 抛 `INACTIVE_ACCESS`；到根仍未声明 → 抛 `UNDECLARED_ACCESS`。`ctx.get(key)` 是不失败的 store 查询；`ctx[key]` 强制规格检查。
 
 
 ## 4 核心原语 ctx.effect
@@ -98,7 +98,7 @@ export type Disposer = () => void | Promise<void>;
 export const composeDispose = (...ds: Disposer[]): Disposer;  // 前插组合 ⇒ LIFO
 ```
 
-采用 async generator 是论文的 `Maybe(ℑ)` 续延在 TS 中的自然对应（[01 §4.3](../research/cordis-paper-theory.md)）：`yield dispose` = 一个 effect 步骤；`return` = 终止；`for await` 的每次迭代之间就是可中断边界。
+采用 async generator 是论文的 `Maybe(ℑ)` 续延在 TS 中的自然对应（[cordis-paper §4.3](../research/cordis-paper-theory.md)）：`yield dispose` = 一个 effect 步骤；`return` = 终止；`for await` 的每次迭代之间就是可中断边界。
 
 ### 4.2 算法
 
@@ -135,10 +135,10 @@ function effect(ctx: Context, callback: EffectCallback): Disposer {
 > **P0 修订（[10 CORE-2](../research/dsh-optimizations.md#3-核心运行时优化core)）**：除"LIFO + 一次性"外，**exact disposer 身份是 load-bearing**——复合 generator effect 必须直接 `yield` 底层注册返回的那个 disposer，不能 `yield` 包装函数。包装会让注销变成并发兄弟，在最后一个 turn 仍在 drain 时就触发 teardown。`assertNoResidue` 需断言 teardown 位于正确的嵌套 yield 位置，而非仅"调用过一次"。
 
 1. `armed` 防止二次撤销（在不产生该 effect 的状态上施加逆，违反 witness 前提）；
-2. `guard` 在每次迭代前检查，既是中断也是"可取消"的实现（对应 agent 的 AbortSignal，见 [05 §6](../agent-framework/runtime.md#6-取消与中断)）；
+2. `guard` 在每次迭代前检查，既是中断也是"可取消"的实现（对应 agent 的 AbortSignal，见 [agent-framework §6](../agent-framework/runtime.md#6-取消与中断)）；
 3. 逆前插到 `ctx.dispose`，实现递归上下文 `∂²Γ`——子组件的撤销也是父组件的一个 effect。
 
-**不验证的内容**：逆是否真的撤销（witness）；同键操作是否真的可交换（commutativity witness）。这两条都是 provider 作者义务，由测试与代码审查保证（[01 §10.1](../research/cordis-paper-theory.md)）。
+**不验证的内容**：逆是否真的撤销（witness）；同键操作是否真的可交换（commutativity witness）。这两条都是 provider 作者义务，由测试与代码审查保证（[cordis-paper §10.1](../research/cordis-paper-theory.md)）。
 
 ### 4.3 与 chord 的统一
 
@@ -160,11 +160,11 @@ chord 的 "facet 在 load 之后不可能失败" 原则（setup 只做声明）�
 
 - 每个 effect 步骤 `yield` 一个逆；逆只负责撤销**该步骤在自己施加点产生的影响**。
 - 撤销顺序严格 LIFO：`inverse = value ∘ inverse`。
-- 嵌套：`ctx.use` 实例化子 fiber 时，父 fiber 得到的逆是"把子 fiber 的 target 设为 null 并 unload"——**子 fiber 的所有 effect 随父 fiber 一起撤销**（论文定义 52，[01 §8.2](../research/cordis-paper-theory.md)）。
+- 嵌套：`ctx.use` 实例化子 fiber 时，父 fiber 得到的逆是"把子 fiber 的 target 设为 null 并 unload"——**子 fiber 的所有 effect 随父 fiber 一起撤销**（论文定义 52，[cordis-paper §8.2](../research/cordis-paper-theory.md)）。
 - 一次性：多次调用 `dispose()` 只有第一次生效。
 - 可观测性：`ctx.registry` + `ctx[@@store]` 提供测试断言入口；逆调用计数可通过 `onDispose` hook 观察。
 
-### 5.2 获取 vs 发射（论文 §12.1，[01 §12.1](../research/cordis-paper-theory.md)）
+### 5.2 获取 vs 发射（论文 §12.1，[cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）
 
 | 类别 | 例子 | 处理 |
 | --- | --- | --- |
@@ -191,20 +191,20 @@ function set(ctx, key, value) {
 }
 ```
 
-`set` 是 `𝔈*Σ`（[01 §5.1](../research/cordis-paper-theory.md)），自动获得跟踪与恢复；`notify` 对每个活 fiber 检查：键是否在其 `inject` 中、realm 是否一致 → `refresh(fiber)`（论文算法 3，[01 §10.2](../research/cordis-paper-theory.md)）。`refresh` 幂等使 neutral 变更无害。
+`set` 是 `𝔈*Σ`（[cordis-paper §5.1](../research/cordis-paper-theory.md)），自动获得跟踪与恢复；`notify` 对每个活 fiber 检查：键是否在其 `inject` 中、realm 是否一致 → `refresh(fiber)`（论文算法 3，[cordis-paper §10.2](../research/cordis-paper-theory.md)）。`refresh` 幂等使 neutral 变更无害。
 
 ### 6.2 隔离与拦截
 
 - `ctx.isolate(key, realm?)`：派生一个子 context，只覆盖 `@@isolate[key]`，父表不变；逆为 identity（丢弃派生 context 即可）。`realm` 省略时生成新 symbol。用于**多 agent 会话 / 多租户 / 测试沙箱**：同一工具键在不同会话解析到不同实现。
-- `ctx.intercept(key, metadata)`：派生 context，把 metadata 按 key 的 monoid 合并到 `@@intercept`（right-biased，context 优先）。provider 在依赖被调用时 consult 元数据决定是否允许（如只读数据库、路径白名单）。**不改变依赖是否满足，因此不触发 reload**（[01 §5.3](../research/cordis-paper-theory.md)）。
+- `ctx.intercept(key, metadata)`：派生 context，把 metadata 按 key 的 monoid 合并到 `@@intercept`（right-biased，context 优先）。provider 在依赖被调用时 consult 元数据决定是否允许（如只读数据库、路径白名单）。**不改变依赖是否满足，因此不触发 reload**（[cordis-paper §5.3](../research/cordis-paper-theory.md)）。
 - 两者都是 derived realization（论文定义 23），没有需要跟踪的 effect；恢复=丢弃派生 context。
 
 ### 6.3 committed view 与读取
 
-fiber 通过 `ctx[key]` 读依赖时，读的是**自己 committed view 指向的 provider 的绑定**，而不是裸 store（[01 §10.4](../research/cordis-paper-theory.md)）。这保证：
+fiber 通过 `ctx[key]` 读依赖时，读的是**自己 committed view 指向的 provider 的绑定**，而不是裸 store（[cordis-paper §10.4](../research/cordis-paper-theory.md)）。这保证：
 
 - 加载期间（含自己的 teardown）读到的依赖集合不变（Thm 71）；
-- 未声明的访问在运行期被拒绝，形成 capability 式门禁（[01 §12.3](../research/cordis-paper-theory.md)）。
+- 未声明的访问在运行期被拒绝，形成 capability 式门禁（[cordis-paper-system §12.3](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）。
 
 
 ## 7 生命周期状态机
@@ -283,8 +283,7 @@ async function reload(fiber: Fiber): Promise<void> {
 async function unload(fiber: Fiber): Promise<void> {
   await Promise.all([...notify(fiber.ctx, providedKeys(fiber))].map(f => f.awaitIdle())); // guard
   await fiber.state.dispose();                           // LIFO
-  fiber.state = { kind: "INACTIVE" };
-  fiber.state.committed = null;
+  fiber.state = { kind: "INACTIVE" };                     // INACTIVE 变体无 committed 字段，置此即丢弃视图
   if (fiber.target !== null) {                           // 惯性链回 reload
     fiber.state = { kind: "LOADING", ... };
     fiber.inertia = schedule(() => reload(fiber));
@@ -306,7 +305,7 @@ async function unload(fiber: Fiber): Promise<void> {
 ### 7.4 失败与取消
 
 - **失败**（论文 §4.4）：迭代抛错 → 进入 `FAILED`，把已累积的逆跑完（什么都没安装），错误留在 fiber 上；**不重试、不传播给父、兄弟不受影响**。`FAILED` 的 fiber 保持 quiet，target 即使非 null 也不会自动重启；配置 revision 才重试。
-- **取消**：`ctx.effect` 的 guard 可接入 `AbortSignal`；agent 的 abort 通过取消在途迭代实现（[05 §6](../agent-framework/runtime.md#6-取消与中断)）。取消与失败不同：取消后 `state` 回 INACTIVE 且不写错误。
+- **取消**：`ctx.effect` 的 guard 可接入 `AbortSignal`；agent 的 abort 通过取消在途迭代实现（[agent-framework §6](../agent-framework/runtime.md#6-取消与中断)）。取消与失败不同：取消后 `state` 回 INACTIVE 且不写错误。
 - **异步惯性**：TS 的 Promise 是 eager，`schedule()` 直接返回 Promise；宿主是惰性时（如 Rust future）需显式 spawn。我们使用 Bun/TS，取 eager 语义。
 
 
