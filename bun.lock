@@ -19,6 +19,8 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/agent-framework": "workspace:*",
+        "@zeta-agent/capabilities": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
       },
     },
     "packages/agent-components": {
@@ -56,6 +58,22 @@
       "name": "@zeta-agent/events",
       "version": "0.0.0",
       "dependencies": {
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
+    "packages/components/observability": {
+      "name": "@zeta-agent/observability",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/cordis": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
+    "packages/components/security": {
+      "name": "@zeta-agent/security",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/cordis": "workspace:*",
         "@zeta-agent/framework": "workspace:*",
       },
     },
@@ -105,6 +123,10 @@
     "@zeta-agent/events": ["@zeta-agent/events@workspace:packages/components/events"],
 
     "@zeta-agent/framework": ["@zeta-agent/framework@workspace:packages/framework"],
+
+    "@zeta-agent/observability": ["@zeta-agent/observability@workspace:packages/components/observability"],
+
+    "@zeta-agent/security": ["@zeta-agent/security@workspace:packages/components/security"],
 
     "@zeta-agent/testing": ["@zeta-agent/testing@workspace:packages/testing"],
 

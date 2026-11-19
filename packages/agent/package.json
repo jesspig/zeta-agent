@@ -5,7 +5,9 @@
   "type": "module",
   "main": "./src/index.ts",
   "dependencies": {
-    "@zeta-agent/agent-framework": "workspace:*"
+    "@zeta-agent/agent-framework": "workspace:*",
+    "@zeta-agent/capabilities": "workspace:*",
+    "@zeta-agent/framework": "workspace:*"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",
