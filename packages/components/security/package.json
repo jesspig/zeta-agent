@@ -1,0 +1,16 @@
+{
+  "name": "@zeta-agent/security",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@zeta-agent/framework": "workspace:*",
+    "@zeta-agent/cordis": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir dist --target bun",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test --pass-with-no-tests"
+  }
+}
