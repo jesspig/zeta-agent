@@ -14,6 +14,15 @@
       "name": "@zeta-agent/cli",
       "version": "0.0.0",
     },
+    "packages/agent": {
+      "name": "@zeta-agent/agent",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/agent-framework": "workspace:*",
+        "@zeta-agent/capabilities": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
     "packages/agent-components": {
       "name": "@zeta-agent/agent-components",
       "version": "0.0.0",
@@ -96,6 +105,8 @@
     "@types/bun": ["@types/bun@1.4.4", "", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
 
     "@types/node": ["@types/node@26.6.6", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog=="],
+
+    "@zeta-agent/agent": ["@zeta-agent/agent@workspace:packages/agent"],
 
     "@zeta-agent/agent-components": ["@zeta-agent/agent-components@workspace:packages/agent-components"],
 
