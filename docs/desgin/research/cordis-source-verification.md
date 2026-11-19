@@ -115,19 +115,19 @@ const backup.restore(restored)  // restored = aborted ∪ skipped 单元的模�
 
 ## 6 落地决议
 
-1. **已修正**：`@mode` 措辞（runtime.md、framework-model.md、overview.md、roadmap.md、capability-reservation.md、fact-registry.md）；
-2. **待修正**：HMR 语义（components.md §8.4）、Effect 类型 union、FiberState 6 态、撤销两层语义、Entry 字段模型、parallel 错误聚合——集中在 [core-semantics.md](../framework/core-semantics.md) 与 [components.md](../framework/components.md)；
-3. **保留偏离**：Bun 模块驱逐路径（ Node 内部 API 不可用）、形式化 `CoeffectKey` 模型（比官方更严谨，标注自研增强）；
-4. **采纳**：官方 logger/EffectMeta/VFS/env/self-dispose 7-case 判别并入对应设计文档。
+1. **已修正（正文已落地）**：`@mode` 措辞（声明合并替代）；HMR 按 unit 部分提交语义（components.md §8.4）；Effect 4 形态（core-semantics §4.1）；FiberState 6 态（core-semantics §3.2/§7）；View=Impl（core-semantics §3.2）；撤销两层语义（core-semantics §4.1/§5）；Entry 字段模型（components.md §8.1，name/按服务 isolate/group.config）；parallel 错误聚合（runtime.md §3.1 校正注记）。
+2. **阶段 5+ 待办**：VFS（`fs/core` 的 mount scheme 最长匹配）与 env 四层优先级 + 可撤销 populate 尚未作为组件纳入 framework 清单；self-dispose 7-case 判别尚未细化到实现级——这些是增强项，不阻断阶段 0-1。
+3. **保留偏离**：Bun 模块驱逐路径（Node 内部 API 不可用）、形式化 `CoeffectKey` 模型（比官方更严谨，标注自研增强）。
+4. **采纳**：官方 logger/EffectMeta 已并入 [observability.md](../framework/observability.md)；VFS/env/7-case 见第 2 条待办。
 
 ## 7 交叉引用与验证
 
 | 本文结论 | 上游来源 | 下游验证 |
 | --- | --- | --- |
 | 五模式正确、@mode 不存在 | cordis `events.ts` | [runtime.md](../agent-framework/runtime.md) 已修正 |
-| HMR 部分提交语义 | cordis `hmr/index.ts` | [components.md](../framework/components.md) §8.4 待修正 |
-| 撤销两层语义 | cordis `fiber.ts` + dispose.spec.ts | [core-semantics.md](../framework/core-semantics.md) §5 待修正 |
-| 可观测性官方能力 | cordis `logger.ts` | 新建 framework/observability.md |
+| HMR 部分提交语义 | cordis `hmr/index.ts` | [components.md](../framework/components.md) §8.4 已落地 |
+| 撤销两层语义 | cordis `fiber.ts` + dispose.spec.ts | [core-semantics.md](../framework/core-semantics.md) §4.1/§5 已落地 |
+| 可观测性官方能力 | cordis `logger.ts` | [observability.md](../framework/observability.md) 已落地 |
 | 七个缺口参考 | 见 §5 逐条链接 | architecture/fact-registry.md |
 
 **总索引**：[README.md](../README.md)　|　**事实登记**：[fact-registry.md](../architecture/fact-registry.md)

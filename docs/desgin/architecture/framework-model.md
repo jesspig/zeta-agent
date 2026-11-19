@@ -8,7 +8,7 @@
 
 - [1 目标与边界](#1-目标与边界)
 - [2 从论文推导出的十条工程原则](#2-从论文推导出的十条工程原则)
-- [4 两个框架 + 应用形态（组件拼装模型）](#4-两个框架-应用形态组件拼装模型)
+- [4 两个框架与应用形态（组件拼装模型）](#4-两个框架与应用形态组件拼装模型)
 - [5 monorepo 目录草案](#5-monorepo-目录草案)
 - [6 依赖约束与分层](#6-依赖约束与分层)
 - [13 交叉引用与验证](#13-交叉引用与验证)
@@ -17,19 +17,18 @@
 
 ### 1.1 目标
 
-按用户规划，依次交付四层，每层都可独立使用、独立测试：
+交付**两个框架 + 应用形态**（当前模型，详见 [§4](./framework-model.md#4-两个框架与应用形态组件拼装模型)；早期"四层"是迁移视角的历史表述，已废弃）：
 
-1. **开发框架层**（类 `@earendil-works/chord`）：提供上下文、fiber 生命周期、可撤销 effect、响应式 coeffect、依赖注入与隔离、声明式组件加载器、HMR。
-2. **Agent 开发框架层**（类 `@earendil-works/pi-agent-core`）：在开发框架之上提供 agent loop、工具流水线、事件协议、状态机、可替换 hook——**核心保持极简，工具/模型/策略全部外置**。
-3. **Agent 实现层**：在开发框架与 agent 框架之上实现具体 agent（内置工具、技能、会话、权限、工作流）。
-4. **TUI 层**：用 OpenTUI + SolidJS 实现终端界面，UI 片段本身也是插件贡献。
+1. **通用框架 `@zeta-agent/framework`**（复刻 Cordis 论文的 core library + component loader）：由多个内部组件拼装——cordis（effect/fiber/coeffect）、events、scope、seam、registry、loader、hmr、store、links、health、objects 与 observability；对上层只暴露 facade。
+2. **Agent 框架 `@zeta-agent/agent-framework`**（类 pi-agent-core）：由 loop/inbox/tools/decision/session/stream 组件拼装，在通用框架 facade 之上提供 agent loop、工具流水线、事件协议、状态机、可替换 hook——**核心保持极简，工具/模型/策略全部外置**，对上层只暴露 facade。
+3. **应用形态层**：`@zeta-agent/agent`（插件装配出的极简 harness）、`@zeta-agent/tui`（OpenTUI 与 SolidJS，UI 片段作为插件贡献）、`apps/zeta-cli`（装配与入口）——都只调用两个框架的 facade，不深入组件。
 
 ### 1.2 明确不做
 
-- 不做 Web ORM、不做通用后端框架；开发框架只提供动态组合语义（与 Cordis "meta-framework" 定位一致，见 [cordis-paper §10.0](../research/cordis-paper-theory.md)）。
+- 不做 Web ORM、不做通用后端框架；开发框架只提供动态组合语义（与 Cordis "meta-framework" 定位一致，见 [cordis-paper §10.0](../research/cordis-paper-system.md)）。
 - **产品轨**：第一版不实现自演化 agent 的自动代码生成与部署；只保证**架构允许**运行时组件替换（见 [plugin-system §8](../agent/plugin-system.md#8-自演化与安全管理)）。
 - **研究轨（预留）**：框架预留递归自演化所需 seam（策略白名单、DecisionSurface、fitness/judge、资格门禁、ExperienceLibrary），未来可插拔装入，无需改框架。两个参考项目 DREAM-RSI 与 Harness² 的机制见 [recursive-self-evolution.md](../research/recursive-self-evolution.md)，研究轨批次见 [roadmap 阶段 6](../delivery/roadmap.md#阶段-6递归自演化研究轨可选后续)。
-- 不引入多余抽象层（KISS/DRY/YAGNI）：四层各一个包，共享类型就地导出，不设 `@zeta-agent/types` 之类空壳包。
+- 不引入多余抽象层（KISS/DRY/YAGNI）：两个 facade 包 + 组件子包（C 方案，见 [§5.1](#51-组件子包清单与依赖图c-方案)），共享类型就地导出，不设 `@zeta-agent/types` 之类空壳包。
 
 ### 1.3 成功判据（论文给出的黄金判据）
 
@@ -40,19 +39,19 @@
 
 | # | 原则 | 论文依据 | 违反后果 | 详文档 |
 | --- | --- | --- | --- | --- |
-| P1 | **唯一变更入口**：所有上下文修改走 `ctx.effect` | [cordis-paper §10.0](../research/cordis-paper-theory.md) | 出现无法撤销的副作用，时间可组合性失效 | [framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect) |
+| P1 | **唯一变更入口**：所有上下文修改走 `ctx.effect` | [cordis-paper §10.0](../research/cordis-paper-system.md) | 出现无法撤销的副作用，时间可组合性失效 | [framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect) |
 | P2 | **逆在施加点返回**，LIFO 累积 | [cordis-paper §4.2](../research/cordis-paper-theory.md) | 逆在不匹配的状态上执行 | [framework §5](../framework/core-semantics.md#5-撤销协议与-lifo-累积器) |
-| P3 | **声明依赖与提供**，provider 唯一 | [cordis-paper §8.1](../research/cordis-paper-theory.md) | 依赖不明确、键冲突 | [framework §6](../framework/core-semantics.md#6-依赖注入与隔离) |
-| P4 | **target / committed view 用 provider uid** | [cordis-paper §10.3](../research/cordis-paper-theory.md) | 同值替换无法被检测 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) |
+| P3 | **声明依赖与提供**，provider 唯一 | [cordis-paper §8.1](../research/cordis-paper-system.md) | 依赖不明确、键冲突 | [framework §6](../framework/core-semantics.md#6-依赖注入与隔离) |
+| P4 | **target / committed view 用 provider uid** | [cordis-paper §10.3](../research/cordis-paper-system.md) | 同值替换无法被检测 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) |
 | P5 | **撤回延迟到消费者去活之后**（guard） | Thm 70，[cordis-paper §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | teardown 读到已撤销依赖 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) |
-| P6 | **惯性状态机**：转换中不被打断，完成再检查 target | [cordis-paper §10.3](../research/cordis-paper-theory.md) | 半加载状态、竞态 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) |
+| P6 | **惯性状态机**：转换中不被打断，完成再检查 target | [cordis-paper §10.3](../research/cordis-paper-system.md) | 半加载状态、竞态 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) |
 | P7 | **同键操作必须可交换**，顺序敏感显式声明 | [cordis-paper §7.2](../research/cordis-paper-theory.md) | 交错加载后状态依赖顺序 | [agent-framework §7](../agent-framework/tools-and-policies.md#7-顺序敏感部分中间件与提示词) |
 | P8 | **获取 vs 发射分类**：只自动撤销获取 | [cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | 错误承诺"自动回滚外部副作用" | [plugin-system §6](../agent/plugin-system.md#6-工具副作用的边界分类) |
 | P9 | **core 不依赖 provider / 持久化 / UI** | agent-core 1.0.0 的架构决定（[02](../research/pi-baseline.md)） | 上层无法替换实现 | [agent-framework §2](../agent-framework/overview.md#2-包边界与依赖) |
-| P10 | **插件 UI 用槽位贡献**，不由 core 直接画 | OpenTUI Solid plugin slots（[engineering §3.3](#33-opentui-solidjs)） | TUI 与插件耦合 | [doc §5](../agent/tui.md#5-插件-ui-槽位) |
+| P10 | **插件 UI 用槽位贡献**，不由 core 直接画 | OpenTUI Solid plugin slots（[engineering §3.3](#33-opentui-与-solidjs)） | TUI 与插件耦合 | [doc §5](../agent/tui.md#5-插件-ui-槽位) |
 
 
-## 4 两个框架 + 应用形态（组件拼装模型）
+## 4 两个框架与应用形态（组件拼装模型）
 
 > **概念修正**：本项目只有**两个框架**——通用框架 `@zeta-agent/framework` 与 Agent 框架 `@zeta-agent/agent-framework`。每个框架**内部由许多组件拼装而成**；Cordis 复刻只是**通用框架内部的一个组件**，不等于通用框架本身。框架对上层应用暴露**封装好的 API（facade）**；CLI / TUI / 未来任何应用形态都调用框架 API，**不深入内核、不直接调用组件**。
 >
@@ -278,7 +277,7 @@ flowchart TB
 ### 6.3 循环依赖策略
 
 - 构建期：turbo 任务图 + 包依赖检查禁止循环。
-- 运行期：coeffect 依赖环会让相关组件永久 inactive（[cordis-paper §12.5](../research/cordis-paper-theory.md)），loader 在加载前按声明做静态环检测并报错。
+- 运行期：coeffect 依赖环会让相关组件永久 inactive（[cordis-paper §12.5](../research/cordis-paper-system.md)），loader 在加载前按声明做静态环检测并报错。
 - 确实需要双向交互时，按论文的四组件拆法把"双向"拆成两个 core + 两个 integration。
 
 
@@ -287,9 +286,9 @@ flowchart TB
 | 本文决策 | 依据文档 | 验证点 |
 | --- | --- | --- |
 | P1-P10 | [01 论文精读](../research/cordis-paper-theory.md) 各节 | 逐条检查实现 |
-| 四层包布局 | [04](../framework/overview.md)、[05](../agent-framework/overview.md)、[06](../agent/plugin-system.md)、[07](../agent/tui.md) | 包依赖方向 |
+| 两框架 + 应用形态包布局 | [framework](../framework/overview.md)、[agent-framework](../agent-framework/overview.md)、[agent](../agent/README.md)、[tui](../agent/tui.md) | 包依赖方向（facade 边界） |
 | agent-core 边界 | [02 pi 基线](../research/pi-baseline.md) | 不变量测试清单 |
-| 键命名空间 | [cordis-paper §12.6](../research/cordis-paper-theory.md) | 同名键冲突测试 |
+| 键命名空间 | [cordis-paper §12.6](../research/cordis-paper-system.md) | 同名键冲突测试 |
 | HMR | [cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法) | 故障注入测试 |
 | 技术栈版本 | 官方文档（§3 各链接） | lockfile 与 CI 日志 |
 | 迁移映射 | [08 路线图](../delivery/roadmap.md) | 阶段验收 |

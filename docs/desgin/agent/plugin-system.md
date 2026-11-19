@@ -43,7 +43,7 @@ pi 的 `coding-agent` 把 agent-core + ai + tui + 扩展系统 + 内置工具 + 
 | **模式插件** | `mode:interactive`, `mode:print`, `mode:json`, `mode:rpc` | `AppMode` 联合类型 + if/else | ❌ 互斥，运行时选一 |
 | **UI 插件** | TUI 组件/widget/footer/header 贡献 | `ExtensionUIContext` / `setWidget` | ✅ 槽位 |
 
-每个插件都是一个 `AgentPlugin`（[agent-framework §3.4](../agent-framework/overview.md)）+ 可选的 fiber component（需要热重载/生命周期时）。
+每个插件都是一个 `AgentPlugin`（[agent-framework §4 AgentPlugin 管线](../agent-framework/runtime.md#4-agentplugin-管线替代-monkey-patch)）+ 可选的 fiber component（需要热重载/生命周期时）。
 
 
 ## 3 工具插件：内置工具也走插件
@@ -100,7 +100,7 @@ export interface SessionPlugin extends AgentPlugin {
 ```
 
 - 会话事件挂在 `agent_end` 的 **awaited listener** 上（pi 的屏障语义，[agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)），保证落盘先于 `prompt()` resolve。
-- `AgentTool.replay?: "never"|"safe"` 由会话插件解释（论文"意图存在但结果未知"的重放语义，[cordis-paper §4.4](../framework/overview.md)）。
+- `AgentTool.replay?: "never"|"safe"` 由会话插件解释（论文"意图存在但结果未知"的重放语义，[core-semantics §7.4 FAILED 与取消](../framework/core-semantics.md#74-失败与取消)）。
 - 压缩策略也是插件：`addTurnBoundary` + `addContextTransform`，pi 的 `session_before_compact` 保留为插件事件。
 
 ### 5.1 Typed recap 与压缩事务（CT-2/CT-3/CT-8，来源 [harness-optimization-papers.md §3.2-3.3](../research/harness-optimization-papers.md#3-you-dont-need-long-context压缩与-sssm)）

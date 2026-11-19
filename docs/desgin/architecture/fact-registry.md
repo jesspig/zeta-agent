@@ -69,9 +69,9 @@
 | 同键操作需可交换见证；不同键天然独立；有序链不可交换 | S1 p.28-30 | 预印本原文 | 2026-08 | 高 | 原文（定义 44-46、定理 45/47） | 支持（[cordis-paper §7.2](../research/cordis-paper-theory.md)） |
 | 九条规则 + target/committed view + guard；唯一施加累积器的规则是 L-Unload | S1 p.31-40 | 预印本原文 | 2026-08 | 高 | 原文（定义 48-56、表 1） | 支持（[cordis-paper §8](../research/cordis-paper-system.md#8-动态组合演算组件与-fiber)） |
 | Thm 68/69/70/71/73/80 构成全局保证（恢复、撤回顺序、解析一致、静止、汇合） | S1 p.43-55 | 预印本原文 | 2026-08 | 高 | 原文（定理陈述） | 支持（[cordis-paper §9](../research/cordis-paper-system.md#9-元理论五条承重保证)） |
-| `ctx.effect` 是所有上下文变更的唯一入口；不验证 witness | S1 p.59（算法 1） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper §10.1](../research/cordis-paper-theory.md)）；Cordis v4 描述，Koishi 用 v3 |
-| 生命周期状态机 refresh/reload/unload + guard 等待依赖方 + 惯性链接 | S1 p.61-63（算法 5） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper §10.3](../research/cordis-paper-theory.md)） |
-| entry 字段 id/url/isolate/intercept/config/disabled；逐字段最小对账 | S1 p.65-66（定义 81） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper §10.5](../research/cordis-paper-theory.md)） |
+| `ctx.effect` 是所有上下文变更的唯一入口；不验证 witness | S1 p.59（算法 1） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper §10.1](../research/cordis-paper-system.md)）；Cordis v4 描述，Koishi 用 v3 |
+| 生命周期状态机 refresh/reload/unload + guard 等待依赖方 + 惯性链接 | S1 p.61-63（算法 5） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper §10.3](../research/cordis-paper-system.md)） |
+| entry 字段 id/url/isolate/intercept/config/disabled；逐字段最小对账 | S1 p.65-66（定义 81） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper §10.5](../research/cordis-paper-system.md)） |
 | HMR 三阶段：分类、过期检测、事务式重载 | S1 p.67-69（算法 8-10） | 预印本原文 | 2026-08 | 中高 | 原文 | 支持（[cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法)） |
 | 获取/发射分属边界内外；发射需 withhold 或 compensation | S1 p.70-71 | 预印本原文 | 2026-08 | 高 | 原文 | 支持（[cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)） |
 | 论文把 self-evolving agent harness 列为首要未来验证方向 | S1 p.82-83 | 预印本原文 | 2026-08 | 高 | 原文 | 支持（[cordis-paper-system §14](../research/cordis-paper-system.md#14-与本项目目标的关系)） |
@@ -109,7 +109,7 @@
 | --- | --- | --- | --- | --- |
 | 可撤销 effect + LIFO 是组件卸载不残留的可行机制 | S1 定理 7/16/68（理论） | S2 chord 的 facet 重载保留数据/连接、closure rule（工程） | 检索"plugin unload resource leak"类问题：pi 的 deactivate 局限（S1 p.5）与 chord 的实证说明反向支持 | **支持** |
 | 依赖应声明并按 provider 变化反应式重激活 | S1 Thm 70/71（理论） | S2 chord 注册表 watchable + 对象 park/waiting（工程） | S4 的 DI 式扩展在 provider 替换时不重激活（S1 §7.4 已列为局限），无反例推翻 | **支持** |
-| 唯一变更入口 `ctx.effect` 可覆盖所有插件机制 | S1 p.59（ctx.effect 归约 provision/instantiation/coeffect 操作） | S2 的 serve/contribute/references 可映射为 provide/set（[framework §4.3](../framework/overview.md)） | 未发现 chord 有绕过 context 的插件副作用通道（natives 只经注册表） | **支持**（映射为作者推断，见下） |
+| 唯一变更入口 `ctx.effect` 可覆盖所有插件机制 | S1 p.59（ctx.effect 归约 provision/instantiation/coeffect 操作） | S2 的 serve/contribute/references 可映射为 provide/set（[framework 注册表 contribution](../framework/components.md)） | 未发现 chord 有绕过 context 的插件副作用通道（natives 只经注册表） | **支持**（映射为作者推断，见下） |
 | agent-core 的事件顺序/屏障是不变量，插件化必须保持 | S3 测试（事件完成顺序 vs 源码顺序、agent_end 屏障） | S4 的 `agent-session.ts` 依赖该屏障落盘（:548、:707-718） | 无反例；若破坏会同时打破 pi 上层与测试 | **支持** |
 | OpenTUI 能替代自研 TUI 并支持插件 UI 槽位 | S9/S10 官方 API | S5 的自研 Component/TUI 接口与 ExtensionUIContext 证明"UI 可插拔"需求真实 | 未实测 native 在目标平台可用性 → 平台风险，不推翻设计方向 | **部分支持**（方向支持，平台待实测） |
 | 最终状态只取决于配置（Thm 80）可作为验收判据 | S1 定理 80 | S2 chord 的 reload 提交后对象状态由插件集决定（design.md） | 论文自述限制：不覆盖 emissions（S1 p.55）→ 验收需限定观察状态 | **部分支持**（限定为观察状态） |
@@ -147,12 +147,12 @@
 
 | 设计决策（文档） | 论文来源 | pi 来源 | 验证方式 | 状态 |
 | --- | --- | --- | --- | --- |
-| P1 唯一变更入口 ctx.effect | [cordis-paper §10.1](../research/cordis-paper-theory.md) | S2 facet 声明与注册表可映射 | [04] 测试 + A4 | 待实现 |
+| P1 唯一变更入口 ctx.effect | [cordis-paper §10.1](../research/cordis-paper-system.md) | S2 facet 声明与注册表可映射 | [04] 测试 + A4 | 待实现 |
 | P2 逆在施加点返回 / LIFO | [cordis-paper §4.2](../research/cordis-paper-theory.md) | — | `observeDispose` | 待实现 |
-| P3 声明依赖 + 键命名空间 | [cordis-paper §8.1/§12.6](../research/cordis-paper-theory.md) | S2 契约+注册表 | 同名键冲突测试 | 待实现 |
-| P4 target/committed 用 uid | [cordis-paper §10.3](../research/cordis-paper-theory.md) | — | 同值替换触发 reload | 待实现 |
+| P3 声明依赖 + 键命名空间 | [cordis-paper §8.1/§12.6](../research/cordis-paper-system.md) | S2 契约+注册表 | 同名键冲突测试 | 待实现 |
+| P4 target/committed 用 uid | [cordis-paper §10.3](../research/cordis-paper-system.md) | — | 同值替换触发 reload | 待实现 |
 | P5 guard 延迟撤回 | [cordis-paper §9/§10.3](../research/cordis-paper-system.md#9-元理论五条承重保证) | — | teardown 读依赖测试 | 待实现 |
-| P6 惯性状态机 | [cordis-paper §4.4/§10.3](../framework/overview.md) | — | 转换中 target 变化测试 | 待实现 |
+| P6 惯性状态机 | [core-semantics §7 生命周期](../framework/core-semantics.md#7-生命周期状态机) | — | 转换中 target 变化测试 | 待实现 |
 | P7 同键交换 / 顺序显式 | [cordis-paper §7.2](../research/cordis-paper-theory.md) | S3 事件完成顺序 vs 源码顺序 | 环检测 + 顺序测试 | 待实现 |
 | P8 获取 vs 发射 | [cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | S4 工具无权限（S1 README） | 工具分类审查 | 待实现 |
 | P9 core 无 provider/持久化 | — | S3 依赖仅 pi-ai+pi-schema；S3 CHANGELOG 1.0.0 | 依赖图检查 | 待实现 |

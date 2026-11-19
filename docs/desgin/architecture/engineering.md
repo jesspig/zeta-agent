@@ -36,7 +36,7 @@
 
 → 我们的 `turbo.json` 草案见 [§8](#8-构建任务图turbojson-草案)。
 
-### 3.3 OpenTUI + SolidJS
+### 3.3 OpenTUI 与 SolidJS
 
 官方事实（OpenTUI Docs，`https://opentui.com/docs/`、`/docs/bindings/solid/`、`/docs/api/solid/`、`/docs/plugins/solid/`，访问 2026-11-19）：
 
@@ -68,7 +68,7 @@
 
 - **组织名统一为 `zeta-agent`**：npm scope 使用 `@zeta-agent/*`（内部包），根工作区包名 `zeta-agent`，CLI 二进制名 `zeta-agent`。
   - 原因：`zeta` 已被注册，不得使用 `@zeta/*` scope；避免与既有 `zeta` 包名/命令冲突（二进制名一并统一，如仍需 `zeta` 作为短命令可在 CLI 内做 alias）。
-  - 全部 coeffect 键的命名空间前缀同步为 `@zeta-agent/...`（如 `@zeta-agent/tools:registry`），见 [§6.2](#62-键命名空间防止-key-collision)。
+  - 全部 coeffect 键的命名空间前缀同步为 `@zeta-agent/...`（如 `@zeta-agent/tools:registry`），见 [framework-model §6.2 键命名空间](./framework-model.md#62-键命名空间防止-key-collision)。
 - 内部包版本统一（如 `0.1.0`），用 workspace 协议引用：`"@zeta-agent/framework": "workspace:*"`（Bun 支持）。
 - 所有包 `"type": "module"`，`exports` 至少 `"."` 与 `"./package.json"`；子路径按需开放（如 `@zeta-agent/framework/objects`）。
 - 外部依赖锁定：精确版本写入 lockfile；`bun install --frozen-lockfile` 用于 CI。
@@ -221,7 +221,7 @@ interface PerformanceBudget {
 | `@earendil-works/pi-durable` | `@zeta-agent/framework/store` + session 插件 | 持久化作为 coeffect provider，而非 core 依赖 |
 | `@earendil-works/pi-schema` | 用 TS 类型 + `defineKey`/JSON Schema 生成 | 直接依赖 typebox 或原生 schema 生成器，保持类型推导 |
 
-**迁移不是逐文件翻译**，而是按四层重新划分边界；每个 pi 机制的落点在 [02](../research/pi-baseline.md) 的对照表给出。
+**迁移不是逐文件翻译**，而是按"两个框架 + 应用形态"重新划分边界；每个 pi 机制的落点在 [02](../research/pi-baseline.md) 的对照表给出。
 
 
 ## 11 风险、回滚与开放问题
@@ -231,7 +231,7 @@ interface PerformanceBudget {
 | 顺序语义漂移 | hook 从"字段赋值"改成"插件管线"后顺序变化 | 先为 [02](../research/pi-baseline.md) 列出的每条不变量建立插件版等价测试 | 推断 |
 | OpenTUI native 依赖在 CI 不可用 | 平台/架构不匹配 | 用 `testRender` 做无终端测试；CLI 提供 `--print` 绕开 TUI | 官方文档 |
 | Bun 与 Node 生态兼容 | 某些 provider SDK 只测 Node | 运行时通过 `StreamFn` 抽象隔离；必要时在 worker 里跑 Node 兼容层 | 推断 |
-| 过度设计 | 过早抽象通用工具层 | 严格四包，公共代码就地导出 | KISS |
+| 过度设计 | 过早抽象通用工具层 | 两个 facade 包 + 组件子包，公共代码就地导出 | KISS |
 | 恢复承诺过头 | 把"发射"当成可撤销 | 明确 withhold/compensation 策略（[cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)） | 论文 |
 | 版本漂移 | solid-js <1.9.16 的 Seroval 公告 | 锁 `^1.9.16` | 官方文档 |
 

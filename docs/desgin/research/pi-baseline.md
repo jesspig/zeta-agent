@@ -407,7 +407,7 @@ interface TUI extends Component {
 | 包管理 | npm workspaces + package-lock | Bun workspaces + bun.lock | 替换 |
 | 任务编排 | 手写串行 build 链 | Turborepo + turbo.json | 新增 |
 | 运行时 | Node ≥22.19；bun 仅构建二进制 | Bun 为主运行时 | 替换 |
-| TUI | 自研 `@earendil-works/pi-tui`（命令式 + 差分渲染） | OpenTUI + SolidJS（Zig native + 响应式） | 替换 |
+| TUI | 自研 `@earendil-works/pi-tui`（命令式 + 差分渲染） | OpenTUI 与 SolidJS（Zig native + 响应式） | 替换 |
 | 插件加载 | jiti（源码/编译/二进制三态）+ alias + virtual modules | 需重新设计（建议 esbuild/vm + digest，见 [framework §8](../framework/components.md#8-组件加载器与-hmr)） | 重新设计 |
 | 扩展系统 | 两套：coding-agent ExtensionAPI + durable Extension/Registry | 统一为 fiber 插件（[05](../agent-framework/overview.md)） | 统一 |
 | 持久化 | coding-agent JSONL SessionManager + durable 多后端 | session 作为 coeffect provider（[06](../agent/plugin-system.md)） | 重新定位 |
@@ -417,7 +417,7 @@ interface TUI extends Component {
 
 | 本文事实 | 下游文档 | 验证点 |
 | --- | --- | --- |
-| chord facet / registry / 无缓存求值 / rollout | [framework §4/§8/§10](../framework/overview.md) | ctx.effect 归一、HMR 三阶段、注册表 contribution |
+| chord facet / registry / 无缓存求值 / rollout | [framework 核心语义与组件](../framework/components.md) | ctx.effect 归一、HMR 三阶段、注册表 contribution |
 | agent-core 事件/顺序/不变量 | [05 全篇](../agent-framework/overview.md) | 插件版等价测试 |
 | coding-agent 扩展 API 与启动链 | [06 全篇](../agent/plugin-system.md) | 工具/技能/会话/权限插件 |
 | pi-tui Component/TUI 与差分渲染 | [07 TUI 设计](../agent/tui.md) | OpenTUI Solid 替代后的对应关系 |

@@ -4,6 +4,12 @@
 > **所属索引**：[本目录索引](./README.md) · [总索引](../README.md)
 > **来源分级**：一手来源为 [在线论文](https://arxiv.org/abs/2608.25512v1) 与 [GitHub 源码](https://github.com/earendil-works/pi)（逐文件链接见正文）；汇总见 [事实登记](../architecture/fact-registry.md)。
 
+> **⚠ 后续校正（以 [cordis 官方源码验证](./cordis-source-verification.md) 为准）**：本文是对 **S12 deepseek-harness 的 vendored 变体**的调研记录，其中两条结论后来被官方源码推翻，请勿直接当现行设计：
+> 1. **`@mode` 静态校验**（§1.1、CORE-1、CORE-16）：官方**无 @mode**，静态约束靠 `interface Events` 声明合并；@mode 是 S12 变体做法。现行设计见 [runtime.md §3.1](../agent-framework/runtime.md#31-事件协议保持-10-种事件原样语义)。
+> 2. **"HMR backup 可简化/不做备份驱逐"**（§1.2）：官方 HMR **保留 backup**，语义是按 unit 部分恢复（`ModuleBackup.restore`），不是全局回滚也不是取消备份。现行设计见 [components.md §8.4](../framework/components.md#84-hmr-三阶段借鉴-chord-论文)。
+>
+> 本文其余建议（单调 guard、exact disposer、Seam 三段式、durable effects 等）已被采纳并落地。
+
 ## 目录
 
 - [1 结论速览与事实校正](#1-结论速览与事实校正)

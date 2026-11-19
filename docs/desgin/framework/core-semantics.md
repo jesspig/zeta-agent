@@ -38,7 +38,7 @@ export interface Component<P = unknown, D extends CoeffectKey<any>[] = any, R ex
   readonly version?: string;
   readonly inject: D;               // 需要的键（规格 d）
   readonly provide: R;              // 可提供的键（p）
-  apply(ctx: FiberContext, config: P): EffectIterator | Promise<EffectIterator>;
+  apply(ctx: FiberContext, config: P): Effect | Promise<Effect>;  // Effect 为 §4.1 定义的 4 形态联合
   accepts?: Record<string, (value: unknown) => unknown>; // 版本映射，借鉴 chord
 }
 
@@ -98,7 +98,7 @@ export interface Context {
 }
 ```
 
-`ctx[key]` 解析算法（论文算法 6，[cordis-paper §10.4](../research/cordis-paper-theory.md)）：沿 fiber 链向上，找到第一个 committed view 绑定该键的 fiber → 返回；遇到声明但未提交的 fiber → 抛 `INACTIVE_ACCESS`；到根仍未声明 → 抛 `UNDECLARED_ACCESS`。`ctx.get(key)` 是不失败的 store 查询；`ctx[key]` 强制规格检查。
+`ctx[key]` 解析算法（论文算法 6，[cordis-paper §10.4](../research/cordis-paper-system.md)）：沿 fiber 链向上，找到第一个 committed view 绑定该键的 fiber → 返回；遇到声明但未提交的 fiber → 抛 `INACTIVE_ACCESS`；到根仍未声明 → 抛 `UNDECLARED_ACCESS`。`ctx.get(key)` 是不失败的 store 查询；`ctx[key]` 强制规格检查。
 
 
 ## 4 核心原语 ctx.effect
@@ -127,20 +127,21 @@ export const composeDispose = (...ds: Disposer[]): Disposer;  // effect 内前�
 与论文算法 1 同构，但用 async generator：
 
 ```ts
-async function execute(callback: EffectCallback, guard: () => boolean): Promise<Disposer> {
-  const iter = toIterator(callback(ctx));           // 普通 Disposer 嵌入为单步 generator
+// execute 接收"已解析的 Effect"（不是 callback），4 形态由 toIterator 归一
+async function execute(effect: Effect, guard: () => boolean): Promise<Disposer> {
+  const iter = toIterator(effect);                   // Disposer/iterable/Promise→异步迭代器
   let inverse: Disposer = NOOP;
   while (guard()) {
     const { value, done } = await iter.next();
-    if (value) inverse = composeDispose(value, inverse); // 新逆在前 ⇒ LIFO
+    if (value) inverse = composeDispose(value, inverse); // 单个 effect 内：新逆在前 ⇒ LIFO
     if (done) break;
   }
   return inverse;
 }
 
-function effect(ctx: Context, callback: EffectCallback): Disposer {
+function effect(ctx: Context, callback: EffectCallback, label?: string): Disposer {
   let armed = true;
-  const task = execute(callback, () => armed);
+  const task = execute(callback(ctx), () => armed);  // 先解析 callback 得 Effect，再交 execute
   const dispose: Disposer = async () => {
     if (!armed) return;              // 一次性
     armed = false;                   // 同时中断在途迭代
@@ -160,7 +161,7 @@ function effect(ctx: Context, callback: EffectCallback): Disposer {
 2. `guard` 在每次迭代前检查，既是中断也是"可取消"的实现（对应 agent 的 AbortSignal，见 [agent-framework §6](../agent-framework/runtime.md#6-取消与中断)）；
 3. 逆前插到 `ctx.dispose`，实现递归上下文 `∂²Γ`——子组件的撤销也是父组件的一个 effect。
 
-**不验证的内容**：逆是否真的撤销（witness）；同键操作是否真的可交换（commutativity witness）。这两条都是 provider 作者义务，由测试与代码审查保证（[cordis-paper §10.1](../research/cordis-paper-theory.md)）。
+**不验证的内容**：逆是否真的撤销（witness）；同键操作是否真的可交换（commutativity witness）。这两条都是 provider 作者义务，由测试与代码审查保证（[cordis-paper §10.1](../research/cordis-paper-system.md)）。
 
 ### 4.3 与 chord 的统一
 
@@ -182,7 +183,7 @@ chord 的 "facet 在 load 之后不可能失败" 原则（setup 只做声明）�
 
 - 每个 effect 步骤 `yield` 一个逆；逆只负责撤销**该步骤在自己施加点产生的影响**。
 - 撤销顺序严格 LIFO：`inverse = value ∘ inverse`。
-- 嵌套：`ctx.use` 实例化子 fiber 时，父 fiber 得到的逆是"把子 fiber 的 target 设为 null 并 unload"——**子 fiber 的所有 effect 随父 fiber 一起撤销**（论文定义 52，[cordis-paper §8.2](../research/cordis-paper-theory.md)）。
+- 嵌套：`ctx.use` 实例化子 fiber 时，父 fiber 得到的逆是"把子 fiber 的 target 设为 null 并 unload"——**子 fiber 的所有 effect 随父 fiber 一起撤销**（论文定义 52，[cordis-paper §8.2](../research/cordis-paper-system.md)）。
 - 一次性：多次调用 `dispose()` 只有第一次生效。
 - 可观测性：`ctx.registry` + `ctx[@@store]` 提供测试断言入口；逆调用计数可通过 `onDispose` hook 观察。
 
@@ -213,7 +214,7 @@ function set(ctx, key, value) {
 }
 ```
 
-`set` 是 `𝔈*Σ`（[cordis-paper §5.1](../research/cordis-paper-theory.md)），自动获得跟踪与恢复；`notify` 对每个活 fiber 检查：键是否在其 `inject` 中、realm 是否一致 → `refresh(fiber)`（论文算法 3，[cordis-paper §10.2](../research/cordis-paper-theory.md)）。`refresh` 幂等使 neutral 变更无害。
+`set` 是 `𝔈*Σ`（[cordis-paper §5.1](../research/cordis-paper-theory.md)），自动获得跟踪与恢复；`notify` 对每个活 fiber 检查：键是否在其 `inject` 中、realm 是否一致 → `refresh(fiber)`（论文算法 3，[cordis-paper §10.2](../research/cordis-paper-system.md)）。`refresh` 幂等使 neutral 变更无害。
 
 ### 6.2 隔离与拦截
 
@@ -223,7 +224,7 @@ function set(ctx, key, value) {
 
 ### 6.3 committed view 与读取
 
-fiber 通过 `ctx[key]` 读依赖时，读的是**自己 committed view 指向的 provider 的绑定**，而不是裸 store（[cordis-paper §10.4](../research/cordis-paper-theory.md)）。这保证：
+fiber 通过 `ctx[key]` 读依赖时，读的是**自己 committed view 指向的 provider 的绑定**，而不是裸 store（[cordis-paper §10.4](../research/cordis-paper-system.md)）。这保证：
 
 - 加载期间（含自己的 teardown）读到的依赖集合不变（Thm 71）；
 - 未声明的访问在运行期被拒绝，形成 capability 式门禁（[cordis-paper-system §12.3](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖)）。
@@ -233,18 +234,21 @@ fiber 通过 `ctx[key]` 读依赖时，读的是**自己 committed view 指向�
 
 ### 7.1 状态图
 
+> **6 态定义（与 §3.2 类型、cordis 官方一致）**：`PENDING`（初始；依赖未齐备或已卸载，对应旧草案的 INACTIVE）、`LOADING`、`ACTIVE`、`UNLOADING`、`FAILED`、`DISPOSED`（独立终态，O-Remove 后）。早期草案的单一 `INACTIVE` 已拆为 `PENDING` + `DISPOSED`。
+
 ```mermaid
 stateDiagram-v2
-    [*] --> Inactive : O-Insert
-    Inactive --> Loading : L-Begin (target ≠ null)
-    Loading --> Loading : L-Iter / L-Finish
-    Loading --> Active : L-Finish (最后一步)
-    Active --> Unloading : L-Leave / L-Divert
-    Loading --> Unloading : L-Divert
-    Loading --> Failed : raise (任何迭代)
-    Unloading --> Inactive : L-Unload (guard 满足)
-    Inactive --> [*] : O-Remove (空表且无子)
-    note right of Unloading
+    [*] --> PENDING : O-Insert
+    PENDING --> LOADING : L-Begin (target ≠ null)
+    LOADING --> LOADING : L-Iter / L-Finish
+    LOADING --> ACTIVE : L-Finish (最后一步)
+    ACTIVE --> UNLOADING : L-Leave / L-Divert
+    LOADING --> UNLOADING : L-Divert (target 改变)
+    LOADING --> FAILED : raise (任何迭代)
+    UNLOADING --> PENDING : L-Unload (guard 满足；回 PENDING，非 DISPOSED)
+    PENDING --> DISPOSED : O-Remove (空表且无子)
+    DISPOSED --> [*]
+    note right of UNLOADING
       O-Retire 可在任意状态施加（自环，图中省略）
     end note
 ```
@@ -267,7 +271,7 @@ function targetOf(fiber: Fiber): View | null {
   for (const key of fiber.component.inject) {
     const provider = activeProviderOf(key, fiber.ctx);   // 只看 ACTIVE fiber 的表
     if (!provider) return null;                          // γ ⊭ d
-    view.set(key, provider.uid);
+    view.set(key, provider);                             // 存 Impl（含 value/check/dependents/isolate），非纯 uid
   }
   return view;
 }
@@ -289,8 +293,8 @@ function refresh(fiber: Fiber): void {
 async function reload(fiber: Fiber): Promise<void> {
   const target0 = fiber.target;
   fiber.state.committed = resolve(fiber.component.inject); // 提交视图
-  const iter = await fiber.component.apply(fiber.ctx, config);
-  const dispose = await execute(iter, () => viewsEqual(fiber.target, target0));
+  const applyEffect = await fiber.component.apply(fiber.ctx, config);  // Effect（已解析）
+  const dispose = await execute(applyEffect, () => viewsEqual(fiber.target, target0));
   fiber.state.dispose = composeDispose(dispose, fiber.state.dispose);
   if (viewsEqual(fiber.target, target0)) {
     fiber.state = { kind: "ACTIVE", dispose, committed: fiber.state.committed };
@@ -304,8 +308,8 @@ async function reload(fiber: Fiber): Promise<void> {
 
 async function unload(fiber: Fiber): Promise<void> {
   await Promise.all([...notify(fiber.ctx, providedKeys(fiber))].map(f => f.awaitIdle())); // guard
-  await fiber.state.dispose();                           // LIFO
-  fiber.state = { kind: "INACTIVE" };                     // INACTIVE 变体无 committed 字段，置此即丢弃视图
+  await fiber.state.dispose();                           // LIFO（effect 内严格串行）
+  fiber.state = { kind: "PENDING" };                     // 卸载完成回 PENDING（无 committed 字段，置此即丢弃视图）
   if (fiber.target !== null) {                           // 惯性链回 reload
     fiber.state = { kind: "LOADING", ... };
     fiber.inertia = schedule(() => reload(fiber));
@@ -318,7 +322,7 @@ async function unload(fiber: Fiber): Promise<void> {
 | 语义 | 实现位置 | 论文保证 |
 | --- | --- | --- |
 | 只在依赖齐备时开始加载 | `targetOf` 返回 null 时不 L-Begin | Thm 70 |
-| 撤回延迟到消费者去活之后 | `unload` 先 `await` 所有 notified fiber 到 INACTIVE | Thm 70 |
+| 撤回延迟到消费者去活之后 | `unload` 先 `await` 所有 notified fiber 到 PENDING/DISPOSED | Thm 70 |
 | 转换期间读到同一份依赖 | `reload` 提交 view，`unload` 最后才丢弃 | Thm 71 |
 | 逆序撤销 | `composeDispose` 前插 | Thm 68 / Thm 16 |
 | 系统必然静止 | guard 只等待已不满足的依赖方；依赖图按需遍历 | Thm 73 |
@@ -327,7 +331,7 @@ async function unload(fiber: Fiber): Promise<void> {
 ### 7.4 失败与取消
 
 - **失败**（论文 §4.4）：迭代抛错 → 进入 `FAILED`，把已累积的逆跑完（什么都没安装），错误留在 fiber 上；**不重试、不传播给父、兄弟不受影响**。`FAILED` 的 fiber 保持 quiet，target 即使非 null 也不会自动重启；配置 revision 才重试。
-- **取消**：`ctx.effect` 的 guard 可接入 `AbortSignal`；agent 的 abort 通过取消在途迭代实现（[agent-framework §6](../agent-framework/runtime.md#6-取消与中断)）。取消与失败不同：取消后 `state` 回 INACTIVE 且不写错误。
+- **取消**：`ctx.effect` 的 guard 可接入 `AbortSignal`；agent 的 abort 通过取消在途迭代实现（[agent-framework §6](../agent-framework/runtime.md#6-取消与中断)）。取消与失败不同：取消后 `state` 回 PENDING 且不写错误。
 - **异步惯性**：TS 的 Promise 是 eager，`schedule()` 直接返回 Promise；宿主是惰性时（如 Rust future）需显式 spawn。我们使用 Bun/TS，取 eager 语义。
 
 
@@ -376,9 +380,9 @@ sequenceDiagram
     Note over C,F: guard: provider 撤回须等消费者去活
     L->>C: disable entry
     C->>F: O-Retire → target=null → L-Leave
-    F->>F: await 依赖方到 Inactive
+    F->>F: await 依赖方到 PENDING/DISPOSED
     F->>F: L-Unload 应用 accumulator (逆序)
-    F->>C: INACTIVE, committed=null
+    F->>C: PENDING, committed=null
 ```
 
 ### 图 3：绑定变化传播（活动图）

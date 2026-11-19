@@ -19,7 +19,7 @@ pi-agent-core 的价值在于**不变量与顺序控制**：6 个源文件、10 
 
 > 核心判断：**重构的风险不是功能缺失，而是顺序语义漂移**。因此 §13 的等价测试先于实现。
 
-> **框架定位（概念修正）**：`@zeta-agent/agent-framework` 是由内部组件（loop/turn/inbox、tools/decision/guard、session/stream/interrupt）**拼装成的 Agent 框架**，对上层应用只暴露 facade API（`createAgent()` / `Agent` / `AgentPlugin` / `AgentRuntime`，见 `src/index.ts`）。应用（CLI/TUI/未来形态）调用 facade，**不 import 内部组件**。本框架通过 `@zeta-agent/framework` 的 facade 使用通用能力，也不深入其内核。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)。
+> **框架定位（概念修正）**：`@zeta-agent/agent-framework` 是由内部组件（loop/turn/inbox、tools/decision/guard、session/stream/interrupt）**拼装成的 Agent 框架**，对上层应用只暴露 facade API（`createAgent()` / `Agent` / `AgentPlugin` / `AgentRuntime`，见 `src/index.ts`）。应用（CLI/TUI/未来形态）调用 facade，**不 import 内部组件**。本框架通过 `@zeta-agent/framework` 的 facade 使用通用能力，也不深入其内核。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架与应用形态组件拼装模型)。
 
 
 ## 2 包边界与依赖

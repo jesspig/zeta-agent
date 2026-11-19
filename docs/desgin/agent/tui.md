@@ -1,6 +1,6 @@
-# TUI 设计（OpenTUI + SolidJS）
+# TUI 设计（OpenTUI 与 SolidJS）
 
-> **文档定位**：TUI 设计（OpenTUI + SolidJS）（从 `07-TUI设计.md` 拆分/重命名而来，内容保持原样，链接已按新结构重写）。
+> **文档定位**：TUI 设计（OpenTUI 与 SolidJS）（从 `07-TUI设计.md` 拆分/重命名而来，内容保持原样，链接已按新结构重写）。
 > **所属索引**：[本目录索引](./README.md) · [总索引](../README.md)
 > **来源分级**：一手来源为 [在线论文](https://arxiv.org/abs/2608.25512v1) 与 [GitHub 源码](https://github.com/earendil-works/pi)（逐文件链接见正文）；汇总见 [事实登记](../architecture/fact-registry.md)。
 
@@ -23,7 +23,7 @@
 
 pi 的 `@earendil-works/pi-tui` 是自研命令式组件模型：`Component.render(width): string[]`、`handleInput`、`invalidate()`，由 `TuiMainScreen.doRender()` 做行级差分（[pi-baseline §6](../research/pi-baseline.md#6-earendil-workspi-tui自研差分渲染)）。它已经支持扩展通过 `ExtensionUIContext.setWidget/setFooter/custom/setEditorComponent` 替换 UI。
 
-目标栈要求用 OpenTUI + SolidJS 替代它。替换的收益：
+目标栈要求用 OpenTUI 与 SolidJS 替代它。替换的收益：
 
 - 差分渲染由 OpenTUI 的 Zig 原生核心完成（只更新变化的 cell），我们不再维护 `doRender()` 的 600 行差分逻辑；
 - Solid 的细粒度响应式天然对应论文的"值级 reactivity"（FRP/signals，[cordis-paper-system §13](../research/cordis-paper-system.md#13-相关工作定位) 的 related work 段）——但我们要保持**组件级生命周期语义**由 fiber 管，signal 只负责值级更新；
@@ -32,7 +32,7 @@ pi 的 `@earendil-works/pi-tui` 是自研命令式组件模型：`Component.rend
 
 ## 2 OpenTUI Solid 事实基础
 
-以下全部来自官方文档（[engineering §3.3](../architecture/engineering.md#33-opentui-solidjs) 附链接，访问 2026-11-19）：
+以下全部来自官方文档（[engineering §3.3](../architecture/engineering.md#33-opentui-与-solidjs) 附链接，访问 2026-11-19）：
 
 | 事实 | 说明 |
 | --- | --- |
@@ -248,7 +248,7 @@ print/json/rpc 模式（[framework-model/engineering §9](../architecture/engine
 | 本文设计 | 上游依据 | 下游验证 |
 | --- | --- | --- |
 | AgentEvent → signal | [agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义) | 事件顺序测试 |
-| 插件槽位 | OpenTUI 官方文档（[engineering §3.3](../architecture/engineering.md#33-opentui-solidjs)）、[plugin-system §2](./plugin-system.md#2-插件清单与分类) | 槽位热替换测试 |
+| 插件槽位 | OpenTUI 官方文档（[engineering §3.3](../architecture/engineering.md#33-opentui-与-solidjs)）、[plugin-system §2](./plugin-system.md#2-插件清单与分类) | 槽位热替换测试 |
 | 与 pi-tui 对照 | [pi-baseline §6](../research/pi-baseline.md#6-earendil-workspi-tui自研差分渲染) | 功能清单覆盖 |
 | fiber 生命周期承载 UI 插件 | [framework §7](../framework/core-semantics.md#7-生命周期状态机) | onCleanup = 逆 |
 | 主题/语言注册表 | [plugin-system §4](./plugin-system.md#4-技能提示词主题插件) | 切换不重启测试 |

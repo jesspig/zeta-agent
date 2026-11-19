@@ -17,11 +17,11 @@
 
 ## 1 迁移策略总览
 
-**不是逐文件翻译 pi**，而是按四层重新划分边界后实现。三条原则：
+**不是逐文件翻译 pi**，而是按"两个框架 + 应用形态"重新划分边界后实现（早期"四层 L1-L4"是迁移视角的历史表述，已废弃，见 [framework-model §1.1](../architecture/framework-model.md#11-目标)）。三条原则：
 
-1. **自底向上**：先 L1（core），再 L2（agent-core），再 L3（agent 插件 + TUI），最后 L4（CLI 装配）。
+1. **自底向上**：先通用框架 `@zeta-agent/framework`（内部组件），再 Agent 框架 `@zeta-agent/agent-framework`（内部组件），最后应用形态（agent 插件 / TUI / CLI 装配）；应用层只调 facade。
 2. **测试先行**：L2 的 12 条不变量等价测试（[agent-framework §13](../agent-framework/state-and-events.md#13-测试策略与不变量等价清单)）先于插件管线实现；L1 的汇合性/可逆性测试先于 loader/HMR。
-3. **双轨兼容**：保留 pi 的字段赋值与两套 Extension 门面作为兼容层（[agent-framework §4.2](../agent-framework/overview.md)、[plugin-system §12](../agent/plugin-system.md#12-两套扩展系统的统一)），老扩展可继续用。
+3. **双轨兼容**：保留 pi 的字段赋值与两套 Extension 门面作为兼容层（[agent-framework §4.2 插件管线](../agent-framework/runtime.md#42-方案)、[plugin-system §12](../agent/plugin-system.md#12-两套扩展系统的统一)），老扩展可继续用。
 
 **范围边界**：pi 仓库只读作为事实来源，不在其上修改；新代码写在 `zeta-agent` 工作区（当前为 `bun init` 空项目）。
 
@@ -32,16 +32,18 @@
 
 **目标**：把当前 `bun init` 空项目变成可运行的 monorepo 骨架。
 
-- 根 `package.json`：`workspaces: ["apps/*","packages/*"]`、`devEngines` 锁 bun 1.4.2、`turbo` 脚本。
-- `turbo.json`（[framework-model/engineering §8](../architecture/engineering.md#8-构建任务图turbojson-草案)）、`tsconfig.base.json`、`bunfig.toml`（OpenTUI preload）。
-- 建四个包目录与 `apps/zeta-cli` 的最小 `package.json` / `tsconfig`。
+- 根 `package.json`：`workspaces: ["apps/*","packages/*","packages/components/*","packages/agent-components/*"]`（**C 方案**，见 [engineering §5.1/§8](../architecture/engineering.md#8-构建任务图turbojson-草案)；分组目录自身无 `package.json`）、`devEngines` 锁 bun 1.4.2、`turbo` 脚本。
+- `turbo.json`、`tsconfig.base.json`、`bunfig.toml`（OpenTUI preload）。
+- 建两个 facade 包（`packages/framework`、`packages/agent-framework`）、两个分组目录（`packages/components/*`、`packages/agent-components/*` 的组件包）与 `apps/zeta-cli` 的最小 `package.json` / `tsconfig`。
 - 安装锁定：`solid-js@^1.9.16`、`@opentui/core@0.9.3`、`@opentui/solid@0.9.3`、`turbo@<pinned>`、`esbuild`（可选 peer）。
 
 **退出条件**：`bun install` 成功；`turbo run build/typecheck/test` 空任务全绿；依赖图无环。
 
-### 阶段 1：`@zeta-agent/framework` 内核（2-3 天）
+### 阶段 1：`@zeta-agent/framework` 内部组件（2-3 天）
 
-**目标**：ctx.effect / fiber 状态机 / coeffect / registry 可运行并通过论文判据测试。
+**目标**：ctx.effect / fiber 状态机 / coeffect / registry 可运行并通过论文判据测试。组件以 C 方案的独立 workspace 包落地（`packages/components/cordis`、`events`、`scope`、`seam`、`registry`、`health`…），facade 包只做装配。
+
+> **开工前必读校正（[cordis-source-verification.md](../research/cordis-source-verification.md)）**：阶段 1 实现须以官方源码验证后的设计为准，而非早期草案——① FiberState 是 **6 态**（PENDING/LOADING/ACTIVE/FAILED/DISPOSED/UNLOADING），不是 5 态；② Effect 接受 **4 种形态**（Disposer / 同步 iterable / Promise&lt;Disposer&gt; / 异步 iterable）；③ committed view 存 **Impl**（含 `check()` 动态能力判定与 `dependents`），不是纯 uid；④ 撤销是**两层语义**——单 effect 内严格 LIFO，fiber 卸载多 effect 时逆序启动、并发执行；⑤ 事件静态约束靠 `interface Events` 声明合并（非 @mode），`parallel` 用 `Promise.allSettled` + `AggregateError`。
 
 - 实现 [framework §3-7](../framework/core-semantics.md#3-核心数据模型)：`defineKey`、`createContext`、`ctx.effect`、`get/set/isolate/intercept`、`use`、`refresh/reload/unload/notify`、LIFO 逆、FAILED。
 - 实现 [framework §10](../framework/components.md#10-注册表与-contribution)：`defineRegistry` / `compose` / `accepts`。
@@ -173,6 +175,12 @@ flowchart LR
 | A22 | 执行隔离：工具调用走 ExecutionBackend；capabilities() 关键层降级即 FAILED；凭证不进日志/snapshot | [security.md](../agent/security.md) 能力探测 + 凭证测试 | 3-5 |
 | A23 | egress 与审计：发射目标白名单默认拒绝；进程外 AuditSink 带 finalized 完整性标记 | [security.md §4/§6](../agent/security.md) 门禁 + 审计测试 | 3-5 |
 | A24 | 官方源码对照：@mode 措辞、HMR 按 unit 部分提交、撤销两层语义与 cordis 官方一致 | [cordis-source-verification.md](../research/cordis-source-verification.md) 对照检查 | 0-2 |
+| A25 | 类型骨架可编译：Effect 4 形态 / Impl 视图 / 6 态状态机 / AgentPluginApi（含 capabilities/onEffect/addRedactor）通过 `tsc` | [core-semantics.md](../framework/core-semantics.md)、[runtime.md](../agent-framework/runtime.md) 类型测试 | 0-1 |
+| A26 | 压缩正确性：typed recap 六段齐全；Offloader 外置块可由 `workspace:///` 取回；压缩纳入 agent_end 屏障；双阈值 + peak 指标生效 | [plugin-system.md §5.1](../agent/plugin-system.md)、[harness-optimization-papers.md](../research/harness-optimization-papers.md) CT-1/2/3 | 3-4 |
+| A27 | 经验检索：evidence 完整落盘（code/scores/traces）；`experience.query` 支持任意历史候选的非马尔可夫检索；evidence store 无有损摘要 | [observability.md §3.1](../framework/observability.md)、SE-M3 | 5-6 |
+| A28 | 多租户 realm 隔离：per-tenant 资源经 realm 解析；跨租户事件不串；配额作为 coeffect 可 reserve | [security.md §7](../agent/security.md#7-多租户identity-与-realm) | 3-5 |
+| A29 | 评测体系：fitness seam 可插拔；A/B 与回归门禁可运行；实验隔离与 search/test 分离 | [engineering.md §9.3](../architecture/engineering.md#93-评测与基准体系缺口-5-补全)、SE-M11 | 5-6 |
+| A30 | 部署三态：local 单文件 / daemon / remote 可切换；readiness/liveness/configDigest 可查询；二进制架构校验 | [engineering.md §9.1](../architecture/engineering.md#91-部署拓扑与三态运行缺口-7-补全) | 5 |
 
 
 ## 5 运行时 HMR 与测试
@@ -197,7 +205,7 @@ flowchart LR
 | OpenTUI native 不可用 | 4 | CI 平台不支持 | 用 `--print` 模式；TUI 包声明平台矩阵 |
 | 插件缓存无法驱逐 | 5 | HMR 换代码后行为未变 | 改用独立构建产物 URL + vm/digest（[04 O-4](../framework/api-and-testing.md#13-风险与开放问题)） |
 | 两套扩展兼容层复杂 | 3/5 | 旧扩展加载失败 | 延后兼容门面到阶段 5；先保内部统一 |
-| 权限策略破坏习惯 | 3 | 用户抱怨工具被挡 | 默认沿用 pi 无限制行为（[06 O-9](../agent/plugin-system.md#13-风险与开放问题)） |
+| 权限策略破坏习惯 | 3 | 用户抱怨工具被挡 | 权限门禁默认沿用 pi 无限制行为（[fact-registry C5](../architecture/fact-registry.md#4-矛盾与争议显式并列)）——注意这是**权限维度**，与 O-9（发射交付维度，默认 withhold）不同 |
 
 
 ## 7 开放问题与决策点
@@ -226,7 +234,7 @@ flowchart LR
 | 阶段 2 | [05 全篇](../agent-framework/overview.md)、[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) | A6 |
 | 阶段 3 | [06 全篇](../agent/plugin-system.md) | A7/A8 |
 | 阶段 4 | [07 全篇](../agent/tui.md) | A9/A10 |
-| 阶段 5 | [framework §8-9](../framework/overview.md)、[plugin-system §8/§12](../agent/plugin-system.md) | A11/A12 |
+| 阶段 5 | [framework §8-9 组件与对象运行时](../framework/components.md)、[plugin-system §8/§12](../agent/plugin-system.md) | A11/A12 |
 | 理论判据 | [cordis-paper §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | A3/A4/A5 |
 
 **返回索引**：[00 索引与交叉验证](../README.md)

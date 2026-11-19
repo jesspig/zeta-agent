@@ -34,7 +34,7 @@ classDiagram
     class Component~P~ {
       +inject: CoeffectKey[]
       +provide: CoeffectKey[]
-      +apply(ctx, config) EffectIterator
+      +apply(ctx, config) Effect
     }
     class Fiber {
       +uid: FiberId
@@ -57,19 +57,7 @@ classDiagram
 
 ## 状态机图（fiber 生命周期）
 
-```mermaid
-stateDiagram-v2
-    [*] --> Inactive : O-Insert
-    Inactive --> Loading : L-Begin (target != null)
-    Loading --> Loading : L-Iter (yield 逆)
-    Loading --> Active : L-Finish
-    Loading --> Failed : raise
-    Active --> Unloading : L-Leave / L-Divert
-    Loading --> Unloading : L-Divert
-    Unloading --> Inactive : L-Unload (guard 满足)
-    Unloading --> Loading : 惯性链回
-    Inactive --> [*] : O-Remove
-```
+权威的 6 态状态机图见 [core-semantics §7.1](./core-semantics.md#71-状态图)（PENDING / LOADING / ACTIVE / UNLOADING / FAILED / DISPOSED）。本索引不重画，避免两处维护不一致——以 §7.1 为准。
 
 ## 跨目录关系
 

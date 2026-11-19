@@ -54,7 +54,8 @@ flowchart TB
         AG2 --- AG3["security.md<br/>安全与多租户（缺口 4+3）"]
     end
     subgraph D["delivery/"]
-        D0["README.md"] --- D1["roadmap.md<br/>阶段计划与验收 A1-A15"]
+        D0["README.md"] --- D1["roadmap.md<br/>阶段计划与验收 A1-A30"]
+        D1 --- D2["review-record.md<br/>全面审查与修复记录"]
     end
     ROOT --> R0 & A0 & F0 & AF0 & AG0 & D0
 ```
@@ -100,7 +101,7 @@ flowchart TB
 
 | 概念 | 一句话 | 权威文档 |
 | --- | --- | --- |
-| 两个框架 | 通用框架 + Agent 框架，各自内部由组件拼装，对应用只暴露 facade | [framework-model.md](./architecture/framework-model.md#4-两个框架-应用形态组件拼装模型) |
+| 两个框架 | 通用框架 + Agent 框架，各自内部由组件拼装，对应用只暴露 facade | [framework-model.md](./architecture/framework-model.md#4-两个框架与应用形态组件拼装模型) |
 | 复刻而非引入 | 不引入任何上游 Cordis 包；`@zeta-agent/cordis` 是自研组件命名 | 本文下方"依赖边界" |
 | revertible effect | 每个上下文变换带逆，按 LIFO 组合 | [core-semantics.md](./framework/core-semantics.md#4-核心原语-ctxeffect) |
 | reactive coeffect | 上下文变化按依赖规格分类为 activating/deactivating/neutral | [core-semantics.md](./framework/core-semantics.md#6-依赖注入与隔离) |
@@ -135,7 +136,7 @@ flowchart TB
 
 | ID | 问题 | 建议 | 出处 |
 | --- | --- | --- | --- |
-| O-9 | 发射类工具默认策略 | 默认 withhold（事务内 enqueue + commit 后派发 + 幂等键） | [plugin-system.md](./agent/plugin-system.md#13-风险与开放问题) |
+| O-9 | 发射类工具默认策略（**待用户确认的建议**） | 建议默认 withhold（事务内 enqueue + commit 后派发 + 幂等键），profile 可配置为直接执行；与"权限门禁默认无限制"是两个独立维度 | [plugin-system.md](./agent/plugin-system.md#13-风险与开放问题) |
 | G3/G4 | Bun 模块缓存驱逐、OpenTUI 平台可用性实测 | 阶段 0/4 实测 | [fact-registry.md §5](./architecture/fact-registry.md#5-缺口与未验证项) |
 
 ## 交付状态
@@ -145,4 +146,4 @@ flowchart TB
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ⏳ 代码尚未开工，按 [delivery/roadmap.md](./delivery/roadmap.md) 阶段 0-5 执行。
+- ⏳ 代码尚未开工，按 [delivery/roadmap.md](./delivery/roadmap.md) 阶段 0-6 执行。

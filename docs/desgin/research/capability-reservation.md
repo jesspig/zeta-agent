@@ -45,7 +45,7 @@ flowchart TB
 
 **框架负责"能拼装什么"，harness 负责"实际拼了什么"。**
 
-> 概念对齐：本文的 L1 = 通用框架 `@zeta-agent/framework`，L2 = Agent 框架 `@zeta-agent/agent-framework`。**两个框架各自内部都由许多组件拼装而成**（Cordis 只是通用框架内部的一个组件），框架对应用只暴露 facade API。因此"能力预留"指的是**框架内部组件与 facade 上的契约预留**，而不是让应用去接触组件。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型)。
+> 概念对齐：本文的 L1 = 通用框架 `@zeta-agent/framework`，L2 = Agent 框架 `@zeta-agent/agent-framework`。**两个框架各自内部都由许多组件拼装而成**（Cordis 只是通用框架内部的一个组件），框架对应用只暴露 facade API。因此"能力预留"指的是**框架内部组件与 facade 上的契约预留**，而不是让应用去接触组件。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架与应用形态组件拼装模型)。
 
 ### 1.2 与 YAGNI 的关系
 
@@ -89,7 +89,7 @@ flowchart TB
 | 唯一变更入口 / 撤销 | `ctx.effect` + exact disposer + LIFO | [framework §4](../framework/core-semantics.md#4-核心原语-ctxeffect) |
 | 依赖声明 / 隔离 / 拦截 | `CoeffectKey` + `ctx.get/set/isolate/intercept` | [framework §6](../framework/core-semantics.md#6-依赖注入与隔离) |
 | 事件 | 5 种派发模式 + 声明合并静态约束 | [10 CORE-1](./dsh-optimizations.md#3-核心运行时优化core) |
-| 生命周期 / 热替换 | fiber 状态机 + guard + HMR | [framework §7/§8](../framework/overview.md) |
+| 生命周期 / 热替换 | fiber 状态机 + guard + HMR | [framework 生命周期与 HMR](../framework/components.md) |
 | 服务登记 | seam 三段式 + 注册表 contribution | [10 CORE-13](./dsh-optimizations.md#3-核心运行时优化core) |
 | 配置与分发 | profile/bundle/patch + `--dump-config` | [framework §8](../framework/components.md#8-组件加载器与-hmr) |
 | 范围路由 | `Scoped<T>` + scope-filtered 事件 | [10 CORE-4](./dsh-optimizations.md#3-核心运行时优化core) |
@@ -203,7 +203,7 @@ flowchart TB
 | LG-15 | L2 | 05 §8/§13、04 O-6 | **节点级策略元数据**：`{retry,timeout,cache,trace,onError}` 作为 registerTool options | [types.py:428-577](https://github.com/langchain-ai/langgraph/blob/main/types.py#L428-L577)、[graph/state.py:667-682](https://github.com/langchain-ai/langgraph/blob/main/graph/state.py#L667-L682) | 生产化时的重试/超时/缓存是节点元数据而非全局配置 |
 | LG-16 | — | 03 §9 | **仅参考**：RPC/SDK 线协议字段 `Thread/ThreadState/RunCreate/Command/Send` | [sdk-py/schema.py:189-940](https://github.com/langchain-ai/langgraph/blob/main/sdk-py/schema.py#L189-L940) | 未来 RPC 实现零成本对接生态客户端 |
 
-**恢复语义硬约束**：LangGraph 的 `interrupt()` 恢复时**节点从头重放全部逻辑**（[types.py:928](https://github.com/agentscope-ai/agentscope/blob/main/types.py#L928)），因此副作用必须按 id 幂等/去重——这正是我们 `AgentTool.replay:'never'|'safe'` 的对应钩子，应在 LG-9 中显式承接。
+**恢复语义硬约束**：LangGraph 的 `interrupt()` 恢复时**节点从头重放全部逻辑**（[types.py:928](https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/types.py#L928)），因此副作用必须按 id 幂等/去重——这正是我们 `AgentTool.replay:'never'|'safe'` 的对应钩子，应在 LG-9 中显式承接。
 
 
 ## 5 优化建议总表

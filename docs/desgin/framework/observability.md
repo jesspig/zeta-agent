@@ -21,7 +21,7 @@
 
 ## 1 设计原则
 
-1. **默认 no-op、可热替换**：可观测性是插件，不是内核 I/O（呼应 [P9](overview.md#1-定位与设计目标)）；L1 只在 effect/fiber 边界 emit 结构化事件，具体 sink 由插件提供；
+1. **默认 no-op、可热替换**：可观测性是插件，不是内核 I/O（呼应 [P9 · framework-model §2](../architecture/framework-model.md#2-从论文推导出的十条工程原则)）；L1 只在 effect/fiber 边界 emit 结构化事件，具体 sink 由插件提供；
 2. **依赖 OTel ≠ 有可观测性**：coze-studio 把 otel 全标 `// indirect` 却零埋点、`GetTraceSDK` 是空桩——我们不重蹈覆辙，必须有真实埋点与类型测试；
 3. **优雅降级**：OTLP 配置失败退回本地文件日志（`Layer.catchCause(() => local)`），绝不拖垮启动（opencode）；
 4. **脱敏在源头**：coze 只在展示层掩码、日志层裸奔；我们在事件总线与日志 sink 前统一脱敏；

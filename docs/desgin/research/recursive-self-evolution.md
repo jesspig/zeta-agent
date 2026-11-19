@@ -139,7 +139,7 @@
 
 ## 5 对现有设计的优化建议
 
-> 层：L1=通用框架 `@zeta-agent/framework`；L2=Agent 框架 `@zeta-agent/agent-framework`；L3=agent。完整清单见 [`capability-reservation.md §5`](./capability-reservation.md#5-优化建议总表) 的 SE 系列（本次新增）。
+> 层：L1=通用框架 `@zeta-agent/framework`；L2=Agent 框架 `@zeta-agent/agent-framework`；L3=agent。SE-D/SE-H 系列清单见本文 §5；Meta-Harness 的 SE-M 系列见 [harness-optimization-papers.md §4](./harness-optimization-papers.md#4-建议汇总se-m-ct-)；AS/CR/LG 系列见 [capability-reservation.md §5](./capability-reservation.md#5-优化建议总表)。
 
 ### 来自 DREAM-RSI（SE-D 系列）
 
@@ -197,7 +197,7 @@
 | 冻结 trace + 适应度 | S17 `trace_pool.py`/`eval.py` | 新增验收 A16-A20 |
 | 8 组件分三类预留 | S18 `tree.py`/`prompts.py` | [capability-reservation §3.3](./capability-reservation.md#3-现有扩展点盘点) |
 | 角色是 seam 不是类 | S18 `prompts.py`/`proposer.py` | AgentPlugin 管线设计 |
-| 三轴分离 | S18 `spec.py`/`substrate/base.py` | [framework-model §4](../architecture/framework-model.md#4-两个框架-应用形态组件拼装模型) |
+| 三轴分离 | S18 `spec.py`/`substrate/base.py` | [framework-model §4](../architecture/framework-model.md#4-两个框架与应用形态组件拼装模型) |
 | 无 ground truth 强制 | S18 `ANSWER_FREE`/tripwire | 安全验收判据 |
 
 **总索引**：[README.md](../README.md)　|　**事实登记**：[fact-registry.md](../architecture/fact-registry.md)

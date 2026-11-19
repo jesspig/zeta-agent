@@ -14,19 +14,23 @@
 
 ### 8.1 Entry（论文定义 81）
 
+> **字段模型已按 cordis 官方源码校正（[cordis-source-verification §3 #10](../research/cordis-source-verification.md)）**：官方 Entry 无 `url`（用 `name` 模块说明符）、无 `children`（group 的 `config` 即子 entry 列表，id 用 `:` 分层）、`isolate` 是按服务的 `Dict<true|string>`、`disabled` 支持 `JsExpr`。早期草案的 `url`/`children` 模型已废弃，roadmap 阶段 1 以本模型为准。
+
 ```ts
 export interface Entry {
-  readonly id: string;                 // 对账键，稳定
-  readonly url: string;                // 组件模块 URL
-  readonly isolate?: boolean | string; // true=局部 realm（按 id 标记）；string=全局 realm
-  readonly intercept?: Metadata;       // 拦截元数据
-  readonly config?: unknown;           // 绑定进 apply 的载荷
-  readonly disabled?: boolean;         // administratively off
-  readonly children?: Entry[];         // @zeta-agent/framework/group
+  readonly id: string;                            // 对账键，稳定；group 子项用 ':' 分层
+  readonly name: string;                          // 模块说明符（替代旧草案的 url）
+  readonly config?: unknown;                      // 绑定进 apply 的载荷；group 的 config 即子 entry 列表
+  readonly isolate?: Record<string, true | string>; // 按服务名：true=局部 realm，string=全局 realm label
+  readonly intercept?: Record<string, unknown>;   // 按服务的拦截元数据
+  readonly inject?: Inject;                       // 依赖声明（数组或对象）
+  readonly disabled?: boolean | { __jsExpr: string }; // administratively off / JS 表达式
+  readonly group?: boolean | null;                // true=group，config 为子 entry 列表
+  readonly volatile?: boolean;                    // volatile 变更走 reflect.notify 不 remount
 }
 ```
 
-entry ↔ fiber 双向绑定：字段变化 → 调整 fiber；组件自行改配置/禁用自己 → 回写 entry（chord 的插件也能自我修改应用，[02 chord 报告 §0](../research/pi-baseline.md)）。
+entry ↔ fiber 双向绑定：字段变化 → 调整 fiber；组件自行改配置/禁用自己 → 回写 entry（官方 `internal/plugin` 监听有 7-case 判别，排除 loader 主动移除/父卸载/tree 销毁；chord 的插件也能自我修改应用，[02 chord 报告 §0](../research/pi-baseline.md)）。
 
 > **P0 修订（[10 CORE-14 / ENG-1/2](../research/dsh-optimizations.md#4-工程配置与-ui-优化eng)）**：entry 不再由应用手写数组，而是**有序配置层派生**：`profile bundles → profile patch → home patch → --patch overlay`，作用于**空 entry 列表**。patch 引擎按 `id` **整块替换 config（非深合并）**或 `insert` 新行；`name` 不一致则跳过并告警；保留 `EntryOwner` 来源归因以支持 `--dump-config`。row 顺序不承载加载语义（激活由 service 可用性驱动）。字段增加 `volatile?: boolean`：volatile 变更走 `reflect.notify` 直接更新运行中的 fiber（不 remount），material 才走完整生命周期。preset 的 `config.plugins` 也是 entry list，同一 patch 机制递归应用。CLI 提供 `--profile` / `--dump-config`。
 
@@ -34,13 +38,13 @@ entry ↔ fiber 双向绑定：字段变化 → 调整 fiber；组件自行改�
 
 | 字段变化 | 动作 |
 | --- | --- |
-| `id` / `url` | 重建 fiber（retire → 等去活 → remove → insert） |
-| `isolate` | realm 重分配（见下） |
+| `id` / `name` | 重建 fiber（retire → 等去活 → remove → insert） |
+| `isolate` | realm 重分配（见下，按服务名字典） |
 | `intercept` | 就地更新（读时 consult，不 reload） |
-| `config` | 交给组件自己 diff，仅材料变化时 reload |
+| `config` | group 内按 id keyed diff；其余交给组件 diff，仅材料变化 reload |
 | `disabled` | true → unload；false → 重新 insert |
 
-`@zeta-agent/framework/group` 把 `children` 作为 config，按 `id` 做 keyed diff，递归复用同一 dispatch；`@zeta-agent/framework/include` 加载外部 JSON/YAML 并嫁接子树——都是普通组件，用 `ctx.use` 实现，不进内核。
+`group: true` 的 entry 把 `config` 作为子 entry 列表，按 `id` 做 keyed diff + `Promise.all`，递归复用同一 dispatch；include 加载外部 JSON/YAML 并嫁接子树——都是普通组件，用 `ctx.use` 实现，不进内核。官方用 `EntryTree.sep=':'` 做分层 id，冲突时 file wins + 逐条上报（include journal 三方 reconcile）。
 
 ### 8.3 realm 重分配与 delimiters
 
@@ -165,11 +169,12 @@ flowchart LR
 classDiagram
     class Entry {
       +id: string
-      +url: string
-      +isolate: boolean|string
-      +intercept: Metadata
+      +name: string
+      +isolate: Record~string, true|string~
+      +intercept: Record~string, unknown~
       +config: unknown
-      +disabled: boolean
+      +group: boolean
+      +disabled: boolean|JsExpr
     }
     class Fiber {
       +uid: FiberId
@@ -178,7 +183,14 @@ classDiagram
       +committed: View
     }
     class View {
-      +Map~CoeffectKey, FiberId~
+      +Map~CoeffectKey, Impl~
+    }
+    class Impl {
+      +uid: FiberId
+      +value: unknown
+      +check(): boolean
+      +dependents: Set~FiberId~
+      +isolate: symbol
     }
     class StoreSlot {
       +realm: symbol

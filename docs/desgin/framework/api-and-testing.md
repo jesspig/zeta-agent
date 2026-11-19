@@ -13,10 +13,10 @@
 
 ## 11 测试与调试 API
 
-`@zeta-agent/framework/testing` 提供：
+`@zeta-agent/testing` 提供（facade 包名统一，见 [overview §2](./overview.md#2-包结构与导出)）：
 
 - `createTestContext()`：无 HMR、无 IO 的 ctx，带 `get/set/use/effect` 全部语义。
-- `assertQuiescent(ctx)`：等待所有 fiber 到 settled 状态（INACTIVE/ACTIVE/FAILED）。
+- `assertQuiescent(ctx)`：等待所有 fiber 到 settled 状态（PENDING/ACTIVE/FAILED/DISPOSED）。
 - `assertNoResidue(ctx, baseline)`：断言所有 effect 的逆都调用过一次、`@@store` 回到基线（对应 Cor 69）。
 - `replayConfig(ctx, entries, orders[])`：用多种加载顺序重放，断言最终观察状态一致（对应 Thm 80）。
 - `observeDispose(ctx)`：记录逆调用序列，验证 LIFO 顺序。
@@ -58,12 +58,12 @@
 
 | 本文设计 | 上游依据 | 下游验证 |
 | --- | --- | --- |
-| `ctx.effect` 唯一入口 | [cordis-paper §10.1](../research/cordis-paper-theory.md) | [08](../delivery/roadmap.md#4-验收标准) 可逆性测试 |
+| `ctx.effect` 唯一入口 | [cordis-paper §10.1](../research/cordis-paper-system.md) | [08](../delivery/roadmap.md#4-验收标准) 可逆性测试 |
 | LIFO 累积器 | [cordis-paper §4.2](../research/cordis-paper-theory.md) | `observeDispose` 逆序断言 |
-| 键命名空间 | [cordis-paper §12.6](../research/cordis-paper-theory.md)、[framework-model/engineering §6.2](../architecture/framework-model.md) | 同名键冲突测试 |
-| target/committed view | [cordis-paper §10.3](../research/cordis-paper-theory.md) | 同值替换触发 reload 测试 |
+| 键命名空间 | [cordis-paper §12.6](../research/cordis-paper-system.md)、[framework-model/engineering §6.2](../architecture/framework-model.md) | 同名键冲突测试 |
+| target/committed view | [cordis-paper §10.3](../research/cordis-paper-system.md) | 同值替换触发 reload 测试 |
 | guard / Thm 70 | [cordis-paper §9](../research/cordis-paper-system.md#9-元理论五条承重保证) | teardown 读依赖测试 |
-| entry 对账 | [cordis-paper §10.5](../research/cordis-paper-theory.md) | 配置 revision 测试 |
+| entry 对账 | [cordis-paper §10.5](../research/cordis-paper-system.md) | 配置 revision 测试 |
 | HMR 三阶段 | [cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法)、[02 chord 报告](../research/pi-baseline.md) | 故障注入测试 |
 | 注册表 contribution | [02 chord 报告 §3.5](../research/pi-baseline.md) | 冲突报告测试 |
 | 对象运行时 | [02 chord 报告 §4-5](../research/pi-baseline.md) | 文档事务回放测试 |

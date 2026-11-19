@@ -112,8 +112,21 @@ export interface AgentPluginApi {
   declareToolLoadout(tools: AgentTool<any>[]): void; // 对齐 transcript 声明
   useContext(): CoreContextLike | undefined;        // 注入的 ctx（若有）
   readonly events: EventBus;                        // 插件间共享事件总线
+
+  // 安全/可观测依赖的契约（P0-4：security.md §9、observability.md §8 引用；A21/A22 验收）
+  capabilities(): Capabilities;                     // 能力探测：关键层退化即 FAILED，见 security.md §9
+  onEffect(handler: (meta: EffectMeta) => void): () => void;  // effect 元树 → span，见 observability.md §3
+  addRedactor(rule: RedactRule): () => void;         // 源头脱敏，见 observability.md §5
 }
+
+export interface Capabilities {
+  isolation: LayerState; seccomp: LayerState; fsConfinement: LayerState;
+  auditSink: LayerState; egressDefaultDeny: LayerState;
+}
+type LayerState = 'active' | 'degraded' | 'unsupported' | 'disabled';
 ```
+
+> `defineServicePlugin`（security/observability 使用）是 `AgentPlugin` 的一个便利构造器：其 `install(api)` 收到的就是上面的 `AgentPluginApi`，通过 `api.capabilities()/onEffect()/addRedactor()` 接入；这些方法的默认实现为 no-op/`active`，由 `@zeta-agent/framework` 的对应组件（health/observability/security）在 facade 层提供。因此能力探测与观测既不需要插件深入内核，也能被 A21/A22 验证。
 
 **每个注册都返回 disposer**——这是论文 revertible effect 的直接落地（[cordis-paper §4](../research/cordis-paper-theory.md#4-可撤销效应revertible-effects)）：插件卸载时，逆按 LIFO 撤销它的全部注册。若上层注入了 `ctx`，插件也可用 `ctx.effect` 把这些注册纳入 fiber 生命周期，实现 agent 插件的热重载。
 
@@ -260,7 +273,7 @@ classDiagram
       +pendingToolCalls: Set
     }
     class AgentEvent {
-      <<union: 9 kinds>>
+      <<union: 10 kinds（pi AgentEvent 10 变体；cordis 另 11 内部事件、coding-agent 40+ ExtensionEvent，勿混）>>
     }
     class AgentTool {
       +name: string
