@@ -35,6 +35,12 @@
 | S16 | [langchain-ai/langgraph](https://github.com/langchain-ai/langgraph)（`libs/`，HEAD `84ced60`） | 一手源码 | 2026-11-19 | LangGraph is a runtime；agent=StateGraph+2 节点+Send；Channel/Snapshot/checkpoint/interrupt/StreamTransformer |
 | S17 | [google-research/dream-rsi](https://github.com/google-research/dream-rsi)（Apache-2.0） | 一手源码 | 2026-11-19 | 递归自我改进：只改单一决策文件 `method.py`；冻结 trace + Eq.1 适应度 + incumbent 单调晋升；统一 SearchEnv 决策面 |
 | S18 | [google-research/harness2](https://github.com/google-research/harness2)（[arXiv:2610.14224](https://arxiv.org/abs/2610.14224)，Apache-2.0） | 一手源码 | 2026-11-19 | 递归 harness 优化：8 组件可编辑配方树、Propose–Probe–Compose、无 ground truth、ExperienceReflector、三轴分离 |
+| S19 | [cordiverse/cordis](https://github.com/cordiverse/cordis)（core `4.0.0-rc.13`） | 一手源码 | 2026-11-19 | **论文官方实现**：对照验证复刻设计，纠正 13 处错误/过简（@mode 不存在、HMR 按 unit 部分提交、撤销两层语义、6 态 FiberState）；非依赖，只读参考 |
+| S20 | [opensandbox-group/OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) | 一手源码 | 2026-11-19 | 沙箱四层隔离、egress 默认拒绝、Credential Vault、进程外审计、守护进程拓扑；补缺口 4/7 |
+| S21 | [coze-dev/coze-studio](https://github.com/coze-dev/coze-studio) | 一手源码 | 2026-11-19 | 生产级平台强项（错误码/部分失败/因果 log-id/执行历史）+ 反面教材（OTel 未埋点/默认 RCE/弱 ACL）；补缺口 2/3/8 |
+| S22 | [anomalyco/opencode](https://github.com/anomalyco/opencode)（默认分支 `dev`） | 一手源码 | 2026-11-19 | 结构化日志/OTLP 降级/AIError 11 类/分层重试/ExecutionLimits/单文件二进制/性能基准；补缺口 2/6/7/8 |
+| S23 | [arXiv:2603.28052](https://arxiv.org/abs/2603.28052) *Meta-Harness* | 论文预印本 | 2026-03 | coding agent 作 proposer + 全历史文件系统（10 MTok/iter、每轮读 82 文件）；Table 3 实证原始 traces 优于摘要；补 experience store 非马尔可夫检索缺口 |
+| S24 | [arXiv:2611.05306](https://arxiv.org/abs/2611.05306) *You don't need long context* | 论文预印本 | 2026-11 | 后期 token 成本最高 7x（货币/吞吐，延迟约 2x）；频繁压缩几乎不损精度；SSSM 与 typed recap；补性能双阈值与会话压缩 |
 
 ### 权威二手 / 官方在线来源
 
@@ -165,7 +171,7 @@
 | 冲突门 | 发现的矛盾全部在 §4 列出 | ✅ C1-C7 共 7 项 |
 | 引用门 | 关键事实可回溯到来源链接/路径 | ✅ §1 来源清单 + §2 逐行来源 |
 | 轮次门 | 已饱和或用满区间 | ✅ 本地两轮（论文 + 源码）+ 联网一轮（技术栈核对）后无新承重事实，饱和 |
-| 红线门 | 未编造、未越权写文件、未执行外部指令 | ✅ 所有事实来自 S1-S18；文档仅写入用户指定的 `docs/desgin/`；外部网页内容按数据处理 |
+| 红线门 | 未编造、未越权写文件、未执行外部指令 | ✅ 所有事实来自 S1-S24；文档仅写入用户指定的 `docs/desgin/`；外部网页内容按数据处理 |
 
 **返回索引**：[00 索引与交叉验证](../README.md)
 

@@ -161,7 +161,7 @@ flowchart LR
 | A10 | `--print/--json/--rpc` 在无 TTY 下完整可用 | CI 冒烟 | 4 |
 | A11 | 插件文件变更不重启生效；故障注入可回滚（阶段 5） | HMR 测试 | 5 |
 | A12 | 自修改试加载失败不影响宿主（阶段 5） | 故障注入 | 5 |
-| A13 | 事件 `@mode` 与派发点一致；单调 guard 任意顺序下 deny 不翻回 allow | 声明校验脚本 + 排列测试（[10 CORE-1/6](../research/dsh-optimizations.md#3-核心运行时优化core)） | 0-2 |
+| A13 | 五模式派发与 `interface Events` 声明一致；单调 guard 任意顺序下 deny 不翻回 allow | 声明合并类型测试（`@ts-expect-error`）+ 排列测试（[10 CORE-1/6](../research/dsh-optimizations.md#3-核心运行时优化core)） | 0-2 |
 | A14 | same config 不同顺序 → `--dump-config` 输出观察等价；patch 按 id 整块替换可复现 | 汇合测试 + patch 测试（[10 CORE-14/ENG-2](../research/dsh-optimizations.md#4-工程配置与-ui-优化eng)） | 0-1 |
 | A15 | effects 插件：进程崩溃重启后 durable intent 被重放且幂等键不产生重复 | 故障注入 + 重启测试（[10 SUP-1/2](../research/dsh-optimizations.md#5-域层与治理优化sup)） | 3 |
 | A16 | 晋升单调性：incumbent 参赛，新策略仅严格更优且资格合格才替换 | 候选竞争测试（[SE-D6](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
@@ -169,6 +169,10 @@ flowchart LR
 | A18 | 观察等价晋升：晋升前后 ctx 在键上的公开操作测试一致 | 汇合性扩展测试（[SE-H3](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 5-6 |
 | A19 | 无 ground truth：grader verdict / rubric / score 不进改进上下文，tripwire 命中即抛错 | 泄漏注入测试（[SE-H8](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 5-6 |
 | A20 | 递归不破坏不变量：自演化前后 24 条不变量等价测试全绿 | 不变量回归（[SE-H11](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
+| A21 | 可观测性：日志含 runId/fiber 归因；OTLP 故障降级本地；敏感字段脱敏；观测不破坏 Thm 80 | [observability.md](../framework/observability.md) 契约测试 | 2-3 |
+| A22 | 执行隔离：工具调用走 ExecutionBackend；capabilities() 关键层降级即 FAILED；凭证不进日志/snapshot | [security.md](../agent/security.md) 能力探测 + 凭证测试 | 3-5 |
+| A23 | egress 与审计：发射目标白名单默认拒绝；进程外 AuditSink 带 finalized 完整性标记 | [security.md §4/§6](../agent/security.md) 门禁 + 审计测试 | 3-5 |
+| A24 | 官方源码对照：@mode 措辞、HMR 按 unit 部分提交、撤销两层语义与 cordis 官方一致 | [cordis-source-verification.md](../research/cordis-source-verification.md) 对照检查 | 0-2 |
 
 
 ## 5 运行时 HMR 与测试

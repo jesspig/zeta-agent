@@ -13,6 +13,9 @@
 | [dsh-optimizations.md](./dsh-optimizations.md) | deepseek-harness + superagent 调研，47 条优化建议（CORE/ENG/SUP） | 优化建议 |
 | [capability-reservation.md](./capability-reservation.md) | AgentScope / CrewAI / LangGraph 调研，47 条预留建议（AS/CR/LG） | 预留建议 |
 | [recursive-self-evolution.md](./recursive-self-evolution.md) | DREAM-RSI / Harness² 递归自演化调研，SE-D/SE-H 共 28 条建议 | 自演化研究轨 |
+| [cordis-source-verification.md](./cordis-source-verification.md) | Cordis 官方源码对照验证：13 处错误/过简纠正 + HMR 语义 | 复刻对照 |
+| [platform-engineering.md](./platform-engineering.md) | OpenSandbox/coze-studio/opencode 对 7 缺口的 43 条建议 | 平台工程参考 |
+| [harness-optimization-papers.md](./harness-optimization-papers.md) | Meta-Harness 与短上下文两篇论文：经验检索、typed recap、双阈值预算 | 论文补强 |
 
 ## UML 概览：本目录如何喂养架构
 

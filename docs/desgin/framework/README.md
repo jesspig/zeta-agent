@@ -11,6 +11,7 @@
 | [core-semantics.md](./core-semantics.md) | 核心数据模型、ctx.effect、撤销协议、依赖注入与隔离、fiber 生命周期 | 核心语义 |
 | [components.md](./components.md) | loader/patch、HMR、对象运行时、注册表 contribution | 框架组件 |
 | [api-and-testing.md](./api-and-testing.md) | 测试与调试 API、与 chord/Cordis 对应、风险与开放问题、交叉引用 | API 与取舍 |
+| [observability.md](./observability.md) | 可观测性（缺口 2）：结构化日志、因果 ID、trace、脱敏、SLO | 缺口补全 |
 
 ## 类图（核心类型）
 

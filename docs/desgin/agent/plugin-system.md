@@ -102,6 +102,28 @@ export interface SessionPlugin extends AgentPlugin {
 - 会话事件挂在 `agent_end` 的 **awaited listener** 上（pi 的屏障语义，[agent-framework §10](../agent-framework/state-and-events.md#10-事件协议与屏障语义)），保证落盘先于 `prompt()` resolve。
 - `AgentTool.replay?: "never"|"safe"` 由会话插件解释（论文"意图存在但结果未知"的重放语义，[cordis-paper §4.4](../framework/overview.md)）。
 - 压缩策略也是插件：`addTurnBoundary` + `addContextTransform`，pi 的 `session_before_compact` 保留为插件事件。
+
+### 5.1 Typed recap 与压缩事务（CT-2/CT-3/CT-8，来源 [harness-optimization-papers.md §3.2-3.3](../research/harness-optimization-papers.md#3-you-dont-need-long-context压缩与-sssm)）
+
+压缩产物**不是自由文本摘要，而是 typed recap schema**——论文 Appendix A/G 实证"良好压缩是为后续执行精心挑选的简报，而非叙事摘要"：
+
+```ts
+interface SemanticRecap {
+  objective: string;                       // 逐字/近逐字任务副本（属 system 单一事实源）
+  establishedFacts: { text: string; kind: 'observation' | 'unverified' }[]; // 严格区分
+  appliedChanges: { file: string; what: string; verified: boolean }[];
+  verification: { check: string; result: string }[];
+  deadEnds: string[];                       // 不要重复的失败路径
+  remainingPlan: string[];                  // 有序子目标 + 立即下一步 + 完成条件
+  narrowRetrieveCommand?: string;           // 内容被截断时给窄命令取回，而非 dump 全文
+}
+```
+
+**压缩事务**：surface `replace` 先经 Offloader（AS-9）把待裁剪块外置为 `workspace:///` URI，再原子替换为带指针的 recap 节点；session 记录压缩血缘（threshold / recap / URI 列表 / 压缩前 token 数）支持审计；压缩纳入 `agent_end` 的 awaited listener 屏障，落盘先于 `prompt()` resolve。压缩后 replay：工具结果若能由 `(kind,key)` 幂等重建则标 `safe`，否则其**已验证事实必须写入 recap**。
+
+**两种模式**：默认 **EoCC**（阈值触发，对应 `compactionThreshold`），实验性 **SAC**（每动作一次，峰值上下文降到 7–9K）——两模式共享同一 recap schema。约束：压缩阈值必须与 `maxOutputBytes` 联动（论文中 Qwen 3 Coder Next 因 verbose 轨迹在紧阈值下崩塌）。语义状态必须是**可解释自然语言**（SSSM 的核心），不塞进不可解释的向量。
+
+> 注意：论文明确"良好压缩 ≠ 长上下文无用"——长输入任务的收益主要来自**选择性读取**而非压缩（CT-9：一等工具 `doc-read` 6000/8000 有界窗口 + `grep -n` + `doc-stats`）。且 evidence store（研究轨）**禁止有损摘要**（SE-M2：Meta-Harness Table 3 实证 Summary 档 38.7 反低于 Scores-only 41.3）。
 - 会话是 coeffect provider（`@zeta-agent/session:store`），agent 的提示词插件声明依赖它；store 更换时依赖方按 target/committed view 自动重激活（[cordis-paper §5.2](../research/cordis-paper-theory.md)）。
 
 
@@ -285,7 +307,7 @@ Cordis 把 **provision、instantiation、coeffect 操作全部归约为 `ctx.eff
 | --- | --- |
 | `registerTool` / `Extension.tools` | `AgentPlugin` + `api.registerTool`（fiber 注册，带 exact disposer） |
 | `Extension.sections` | 带 `order` 元数据的 keyed coeffect，由 `compose` 排序 |
-| `on(event)` / `Extension.hooks` | 通用框架五模式事件总线 + `@mode` 校验 |
+| `on(event)` / `Extension.hooks` | 通用框架五模式事件总线（静态约束来自 `interface Events` 声明合并，见 cordis 源码验证） |
 | `wrapSection/wrapTool` | Decision union + waterfall（单调 guard、beforeBuiltins 顺序位） |
 | `Extension.tasks` | `ctx.use` 的后台 job fiber |
 | `Registry.install` | Seam provider + `ctx.set(registryKey)` + `compose` |

@@ -10,6 +10,9 @@
 - [7 包包名与版本策略](#7-包包名与版本策略)
 - [8 构建任务图（turbo.json 草案）](#8-构建任务图turbojson-草案)
 - [9 运行形态：CLI / SDK / RPC / 静默模式](#9-运行形态cli-sdk-rpc-静默模式)
+- [9.1 部署拓扑与三态运行](#91-部署拓扑与三态运行缺口-7-补全)
+- [9.2 性能预算、Profiling 与回归门禁](#92-性能预算profiling-与回归门禁缺口-6-补全)
+- [9.3 评测与基准体系](#93-评测与基准体系缺口-5-补全)
 - [10 与 pi 的映射与迁移策略](#10-与-pi-的映射与迁移策略)
 - [11 风险、回滚与开放问题](#11-风险回滚与开放问题)
 - [12 验收标准](#12-验收标准)
@@ -38,7 +41,8 @@
 官方事实（OpenTUI Docs，`https://opentui.com/docs/`、`/docs/bindings/solid/`、`/docs/api/solid/`、`/docs/plugins/solid/`，访问 2026-11-19）：
 
 - OpenTUI 是 **Zig 编写的原生终端 UI 核心 + TypeScript 绑定**：渲染组件树、Flexbox 布局、处理终端输入、只更新变化的 cell；**OpenCode 在生产中使用它**。
-- `@opentui/solid` 当前版本 **0.9.3**，`solid-js` peer `^1.9.12`；官方建议用 ≥1.9.16（早期 1.9.x 依赖有安全公告的 Seroval）。安装：`bun install solid-js@^1.9 @opentui/solid`。
+- `@opentui/solid` 当前版本 **0.9.3**（npm 元数据，访问 2026-11-19），`solid-js` peer `^1.9.12`；官方建议用 ≥1.9.16（早期 1.9.x 依赖有安全公告的 Seroval）。安装：`bun install solid-js@^1.9 @opentui/solid`。
+- **版本差异说明**：opencode 实装锁定 `0.8.4`（core/keymap/solid 同步，`solid-js@1.9.17`），是它自己锁定的旧版本，与本设计采用的最新版 0.9.3 不冲突；两版 slot API 是否兼容需实测（[opencode 调研](../research/platform-engineering.md)）。opencode 默认分支是 `dev`（不是 `main`），引用其源码链接须用 `blob/dev/`。
 - 配置：TS `jsx: "preserve"`, `jsxImportSource: "@opentui/solid"`；Bun `bunfig.toml` 加 `preload = ["@opentui/solid/preload"]`。
 - 入口：`import { render } from "@opentui/solid"; await render(() => <App />)`；`render` 不返回 disposer，渲染器销毁负责 dispose Solid root 与 `onCleanup`。
 - Hooks：`useRenderer()`, `useKeyboard()`, `onResize()`, `onFocus/blur`, `useTerminalDimensions()`, `usePaste`, `useSelectionHandler`, `useTimeline()`；特殊组件 `Portal`, `Dynamic`。
@@ -127,6 +131,82 @@
 | RPC | CLI `--rpc` | 通过 stdin/stdout JSON-RPC 暴露 agent 控制面（参照 pi 的 RPC 文档） |
 
 所有形态共享同一个 `ctx` + fiber loader；TUI 只是众多 observer 之一。这保证论文 Thm 80 的汇合判据可在无 UI 的测试中验证。
+
+### 9.1 部署拓扑与三态运行（缺口 7 补全）
+
+> 来源：[platform-engineering.md §7](../research/platform-engineering.md#7-部署形态缺口-7)（opencode / OpenSandbox / cordis daemon 调研）。
+
+**三态运行形态**（沿用 §9 的 facade，仅部署拓扑不同）：
+
+| 形态 | 部署单元 | 适用场景 | 参考 |
+| --- | --- | --- | --- |
+| **local 单文件** | `zeta-cli` 单二进制（内嵌 SQLite + inproc backend + prompts/skills/schema） | 离线 / air-gapped / 个人使用 | opencode `Bun.build({compile})` |
+| **daemon 本地守护** | `zeta-daemon` 本地 HTTP + token + IPC heartbeat/autoRestart | 多客户端共享、IDE/桌面接入 | OpenSandbox execd / cordis daemon |
+| **remote 远程** | SDK/gRPC + 远程执行后端（容器/microVM） | 团队/云端、不可信代码 | OpenSandbox server + execd |
+
+```mermaid
+flowchart TB
+    subgraph L["local 单文件"]
+        CLI["zeta-cli (Bun compile)<br/>内嵌 SQLite + inproc backend"]
+    end
+    subgraph D["daemon 本地守护"]
+        GW["本地 HTTP + X-ZETA-TOKEN"]
+        DM["zeta-daemon<br/>heartbeat / autoRestart / IPC"]
+        GW --> DM
+    end
+    subgraph R["remote 远程"]
+        SDK["SDK / gRPC"]
+        SRV["zeta-server（控制面）"]
+        EXE["执行后端<br/>container / microVM + egress sidecar"]
+        SDK --> SRV --> EXE
+    end
+    CLI --> GW
+    GW --> SDK
+```
+
+**运营契约（以 coze 为反面教材）**：
+- 框架暴露 `AgentRuntime.readiness() / liveness() / configDigest()` seam，`--rpc` 可直接查询（coze 后端无探针、密钥明文注入）；
+- 容器部署配 liveness/readiness probe + 资源限制 + Recreate 滚动策略；密钥走 Secret 引用而非明文 `value`；
+- 灰度/回滚沿用 [plugin-system §8.2 晋升状态机](../agent/plugin-system.md#82-晋升状态机uml)：`qualify → canary → digest 校验 → promote/rollback`；
+- 单文件二进制须做**架构校验**：`NativeArch.verify(file, arch)` 校验主镜像与所有嵌入资源同架构（opencode 真实事故：ARM64 Windows 嵌入 x64 dll 导致终端打不开）；
+- 12 target 矩阵：`os (linux/darwin/win32) × arch (arm64/x64) × libc (glibc/musl) × avx2 baseline`；原生资源用 `import with {type:"file"}` 嵌入；
+- 启动关键路径：重模块（OTLP 五件套、Sentry）用 `await import()`，写测试断言"首帧不 await telemetry、产物无顶层 sentry import"。
+
+### 9.2 性能预算、Profiling 与回归门禁（缺口 6 补全）
+
+> 来源：[platform-engineering.md §6](../research/platform-engineering.md#6-性能缺口-6)（opencode 调研）。
+
+**性能预算**（定义可强制的上限，非事后实测）：
+```ts
+interface PerformanceBudget {
+  maxSteps?: number;              // turn 内最大步骤
+  maxToolCalls?: number;          // 单次执行工具调用数
+  maxOutputBytes?: number;        // 输出裁剪（boundOutput）——须与压缩阈值联动，见下
+  // CT-1（论文 arXiv:2611.05306 §2.4.1）：单一 maxContextTokens 拆为双阈值 + peak 指标
+  totalContextLimit?: number;     // 硬终止线
+  compactionThreshold?: number;   // 越过即触发压缩，为压缩 turn 预留空间
+  peakLiveContextTokens?: number; // 一等预算指标：成本/延迟/内存由 peak 决定而非累计量
+  maxWallMs?: number; maxCpuMs?: number; maxMemBytes?: number;
+}
+```
+`ctx.effect` 在工具/turn 边界检查预算：越过 `compactionThreshold` 先触发压缩，超 `totalContextLimit` 才 degrade/kill，并落审计事件。
+
+> **来源（[harness-optimization-papers.md §3.1](../research/harness-optimization-papers.md#3-you-dont-need-long-context压缩与-sssm)）**：后期 token 成本最高 7x（货币/吞吐换算，延迟约 2x）；256K→16K 的收益由 **peak live context** 决定。论文实证频繁压缩几乎不损精度（22 个阈值配置中最多 5 个损失 >2pt），但 Qwen 3 Coder Next 在 16K/12K 从 53.0% 崩塌到 3.6%——因此 `compactionThreshold` 必须与 `maxOutputBytes` 联动，保证 verbose 轨迹仍有工作空间。
+
+**Profiling 工具**：TUI Debug HUD（`monitorEventLoopDelay` + cpu/rss ring + p99，见 [observability.md §6](../framework/observability.md#6-debug-hud-与诊断)）；首帧时间（TimeToFirstDraw）；effect/fiber 派发延迟。
+
+**回归门禁**：引入 `perf` turbo 任务（与 build/test 同级）：
+- 基准用中位数 + min、warm-up、交错抗 JIT、`--base <main> --head .` 对比；
+- CI 卡阈值（延迟/内存/首帧），参考 opencode `strobe` 与 `script/bench.ts`；
+- 长会话虚拟滚动（`@tanstack/solid-virtual`）避免 `For each={messages()}` 全量挂载——见 [tui.md §4](../agent/tui.md#4-agentevent-solid-signal-映射) 的性能约束。
+
+**TUI 帧率**：`CliRendererConfig { targetFps:60, gatherStats:false, openConsoleOnError:false }`，全屏动画期间临时降到 30 并恢复。
+
+### 9.3 评测与基准体系（缺口 5 补全）
+
+- 承接 pi-evals（[pi-baseline §7](../research/pi-baseline.md#7-生态包ai-durable-schema-mcp-env-codemode-telemetry-evals) 记录的 vitest-evals/docker/plan/report）；
+- 自演化的 fitness function、实验隔离、A/B 判定、回归门禁见 [recursive-self-evolution.md §5](../research/recursive-self-evolution.md#5-对现有设计的优化建议) 的 SE-D5/H11；
+- 评测数据治理：trace pool 冻结、防泄漏（按 iterNNN 顺序重放），与 [observability §7](../framework/observability.md#7-观测不破坏-thm-80) 的旁路约束一致。
 
 
 ## 10 与 pi 的映射与迁移策略

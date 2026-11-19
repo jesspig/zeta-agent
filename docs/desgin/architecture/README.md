@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | [framework-model.md](./framework-model.md) | 两个框架 + 应用形态、组件拼装模型、monorepo 目录、依赖约束 | 架构决策 |
 | [engineering.md](./engineering.md) | 技术栈事实、包命名/版本、turbo 构建图、运行形态、迁移映射、风险与验收 | 工程约束 |
-| [fact-registry.md](./fact-registry.md) | 来源 S1-S18、事实登记、双源验证、矛盾、缺口、自检门 | 事实核验 |
+| [fact-registry.md](./fact-registry.md) | 来源 S1-S24、事实登记、双源验证、矛盾、缺口、自检门 | 事实核验 |
 
 ## 组件图（两个框架 + 应用形态）
 

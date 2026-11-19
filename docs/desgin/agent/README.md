@@ -9,6 +9,7 @@
 | --- | --- | --- |
 | [plugin-system.md](./plugin-system.md) | 插件清单、工具/技能/提示词/会话/权限/MCP/模式插件、装配流程、自演化安全 | 插件系统 |
 | [tui.md](./tui.md) | OpenTUI Solid 架构、signal 桥、插件槽位、主题/快捷键、测试 | TUI |
+| [security.md](./security.md) | 安全与多租户（缺口 4+3）：威胁模型、执行隔离、egress、凭证、审计、错误模型 | 缺口补全 |
 
 ## 用例图（极简 harness 当前做什么）
 
