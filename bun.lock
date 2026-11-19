@@ -85,6 +85,14 @@
         "@zeta-agent/framework": "workspace:*",
       },
     },
+    "packages/deploy": {
+      "name": "@zeta-agent/deploy",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
     "packages/framework": {
       "name": "@zeta-agent/framework",
       "version": "0.0.0",
@@ -135,6 +143,8 @@
     "@zeta-agent/components": ["@zeta-agent/components@workspace:packages/components"],
 
     "@zeta-agent/cordis": ["@zeta-agent/cordis@workspace:packages/components/cordis"],
+
+    "@zeta-agent/deploy": ["@zeta-agent/deploy@workspace:packages/deploy"],
 
     "@zeta-agent/events": ["@zeta-agent/events@workspace:packages/components/events"],
 
