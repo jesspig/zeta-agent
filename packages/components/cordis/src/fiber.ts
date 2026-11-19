@@ -83,10 +83,11 @@ export class Fiber {
     if (sameView(target, this.target)) return;
     this.target = target;
     if (target === null) {
+      const previous = this.state;
       this.state = {
         kind: "UNLOADING",
-        dispose: NOOP,
-        committed: new Map(),
+        dispose: "dispose" in previous ? previous.dispose : NOOP,
+        committed: "committed" in previous ? previous.committed : new Map(),
       };
       this.inertia = this.unload();
     } else {

@@ -1,4 +1,5 @@
 import type { CoeffectKey, Disposer, Effect } from "@zeta-agent/framework";
+import type { AgentEvent } from "./runtime/agent";
 
 export type LayerState = "active" | "degraded" | "unsupported" | "disabled";
 
@@ -18,11 +19,6 @@ export interface EffectMeta {
 export interface RedactRule {
   readonly match: RegExp | string;
   readonly replace: string;
-}
-
-export interface AgentEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
 }
 
 export interface AgentTool<P = unknown> {
