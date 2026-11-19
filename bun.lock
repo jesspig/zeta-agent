@@ -29,6 +29,13 @@
       "name": "@zeta-agent/components",
       "version": "0.0.0",
     },
+    "packages/components/cordis": {
+      "name": "@zeta-agent/cordis",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/framework": "workspace:*",
+      },
+    },
     "packages/framework": {
       "name": "@zeta-agent/framework",
       "version": "0.0.0",
@@ -62,6 +69,8 @@
     "@zeta-agent/cli": ["@zeta-agent/cli@workspace:apps/zeta-cli"],
 
     "@zeta-agent/components": ["@zeta-agent/components@workspace:packages/components"],
+
+    "@zeta-agent/cordis": ["@zeta-agent/cordis@workspace:packages/components/cordis"],
 
     "@zeta-agent/framework": ["@zeta-agent/framework@workspace:packages/framework"],
 
