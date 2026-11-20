@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createEffectBridge,
   createLogger,
   redact,
   resolveLogSink,
@@ -68,6 +69,19 @@ describe("T-19 observability", () => {
     expect(redact(input, [{ match: "a", replace: "X" }])).toBe("X=1,X=2");
     expect(redact("sk-1 sk-2", [{ match: /sk-\d/g, replace: "[R]" }])).toBe("[R] [R]");
     expect(input).toBe("a=1,a=2");
+  });
+
+  test("effect bridge 注册/广播/撤销 handler", () => {
+    const bridge = createEffectBridge();
+    const seen: string[] = [];
+    const stop = bridge.onEffect((meta) => seen.push(meta.label));
+
+    bridge.emit({ label: "root", children: [] });
+    expect(seen).toEqual(["root"]);
+
+    stop();
+    bridge.emit({ label: "again", children: [] });
+    expect(seen).toEqual(["root"]);
   });
 
   test("OTLP 配置失败降级本地 file sink，发送抛错也降级", () => {

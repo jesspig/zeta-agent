@@ -110,6 +110,26 @@ export function createLogger(options: LoggerOptions): Logger {
   };
 }
 
+export interface EffectBridge {
+  onEffect(handler: (meta: EffectMeta) => void): Disposer;
+  emit(meta: EffectMeta): void;
+}
+
+export function createEffectBridge(): EffectBridge {
+  const handlers = new Set<(meta: EffectMeta) => void>();
+  return {
+    onEffect(handler) {
+      handlers.add(handler);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    emit(meta) {
+      for (const handler of [...handlers]) handler(meta);
+    },
+  };
+}
+
 export function spansFromEffectMeta(meta: EffectMeta): Span[] {
   const spans: Span[] = [];
 
