@@ -18,7 +18,7 @@ const facadePackages = new Set([
 
 const moduleSpecifierPattern = /["']([^"']+)["']/g;
 
-const opentuiBusinessModules = new Set(["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame.ts", "backend.ts"]);
+const opentuiBusinessModules = new Set(["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame-state.ts", "backend.ts"]);
 
 function walk(dir) {
   const result = [];

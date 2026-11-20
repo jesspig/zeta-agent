@@ -1,18 +1,29 @@
 import { expect, test } from "bun:test";
-import { testRender as renderFrame, type FrameState } from "./frame";
+import type { FrameState } from "./frame-state";
 import type { Frame, RendererBackend, TestHandle, TestRenderOptions } from "./backend";
+
+function contentFrame(frame: FrameState): string {
+  const body = [...frame.lines];
+  if (frame.hud !== undefined) body.push(frame.hud);
+  const rows: string[] = [];
+  for (let i = 0; i < frame.height; i += 1) {
+    const raw = body[i] ?? "";
+    rows.push(raw.length > frame.width ? raw.slice(0, frame.width) : raw.padEnd(frame.width, " "));
+  }
+  return rows.join("\n");
+}
 
 class FakeBackend implements RendererBackend {
   render(frame: FrameState): Frame {
-    return { snapshot: renderFrame(frame) };
+    return { snapshot: contentFrame(frame) };
   }
   async testRender(app: () => FrameState, opts: TestRenderOptions): Promise<TestHandle> {
-    let current = renderFrame(app());
+    let current = contentFrame(app());
     let destroyed = false;
     return {
       async renderOnce() {
         if (destroyed) throw new Error("destroyed");
-        current = renderFrame(app());
+        current = contentFrame(app());
       },
       captureCharFrame() {
         if (destroyed) throw new Error("destroyed");

@@ -1,4 +1,4 @@
-import { testRender as renderFrame, type FrameState } from "./frame";
+import type { FrameState } from "./frame-state";
 import { OpenTuiBackend } from "./backend-opentui";
 
 export interface Frame {
@@ -45,6 +45,3 @@ export function createTui(options: CreateTuiOptions = {}): TuiHandle {
   };
 }
 
-export function createFrameRenderer(): Pick<RendererBackend, "render"> {
-  return { render: (frame) => ({ snapshot: renderFrame(frame) }) };
-}

@@ -11,7 +11,7 @@ const facades = {
   framework: ["./types", "./package.json"],
   "agent-framework": ["./types", "./runtime/agent", "./session/surface", "./tools/pipeline"],
   agent: ["./facade", "./cli/modes", "./providers/openai"],
-  tui: ["./slots", "./signal", "./virtual", "./hud", "./frame", "./backend"],
+  tui: ["./slots", "./signal", "./virtual", "./hud", "./frame-state", "./backend", "./runtime"],
   components: [],
   "agent-components": [],
   deploy: [],
