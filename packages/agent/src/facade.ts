@@ -1,11 +1,29 @@
-import type { Disposer } from "@zeta-agent/framework";
 import {
   createEventStream,
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
   type AgentState,
+  type Capabilities,
+  type EffectMeta,
+  type RedactRule,
 } from "@zeta-agent/agent-framework";
+import type { Disposer } from "@zeta-agent/framework";
+import {
+  createEffectBridge,
+  createLogger,
+  resolveLogSink,
+  type EffectBridge,
+  type Logger,
+  type LoggerOptions,
+  type SinkOptions,
+  type SinkResolution,
+} from "@zeta-agent/observability";
+import {
+  createExecutionBackend,
+  isCriticalLayerDegraded,
+  type ExecutionBackend,
+} from "@zeta-agent/security";
 
 export type {
   AgentEvent,
@@ -130,24 +148,64 @@ function defaultContributions(): PluginContribution[] {
   return contributions;
 }
 
+export interface PluginApiSurface {
+  capabilities(): Capabilities;
+  onEffect(handler: (meta: EffectMeta) => void): () => void;
+  addRedactor(rule: RedactRule): () => void;
+}
+
+export interface AgentToolCall {
+  readonly name: string;
+  readonly execute: () => unknown | Promise<unknown>;
+}
+
+export type ToolFailure = { readonly ok: false; readonly reason: string } | { readonly ok: true; readonly value: unknown };
+
 export interface AgentStreamRequest {
   readonly messages: readonly AgentMessage[];
 }
 
 export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<string>;
 
+const ACTIVE_CAPABILITIES: Capabilities = Object.freeze({
+  isolation: "active",
+  seccomp: "active",
+  fsConfinement: "active",
+  auditSink: "active",
+  egressDefaultDeny: "active",
+});
+
+function defaultSecurityBackend(): ExecutionBackend {
+  return createExecutionBackend({
+    name: "facade-default",
+    capabilities: { ...ACTIVE_CAPABILITIES },
+    executor: () => ({ exitCode: 0, stdout: "", stderr: "", isolated: null }),
+  });
+}
+
+function defaultLoggerOptions(): LoggerOptions {
+  return { runId: "agent", sink: () => {} };
+}
+
 export interface AgentOptions {
   readonly streamFn?: AgentStreamFn;
   readonly plugins?: readonly AgentPlugin[];
   readonly includeBuiltins?: boolean;
+  readonly securityBackend?: ExecutionBackend;
+  readonly observability?: LoggerOptions;
+  readonly effectBridge?: EffectBridge;
 }
 
-export interface Agent {
+export interface Agent extends PluginApiSurface {
   prompt(text: string): Promise<readonly AgentMessage[]>;
   continue(): Promise<readonly AgentMessage[]>;
   subscribe(listener: AgentListener): Disposer;
   abort(): void;
   waitForIdle(): Promise<void>;
+  runTool(call: AgentToolCall): Promise<ToolFailure>;
+  emitEffect(meta: EffectMeta): void;
+  resolveLogSink(options: SinkOptions): SinkResolution;
+  readonly logger: Logger;
   readonly aborted: boolean;
   readonly state: AgentState;
   readonly toolNames: readonly string[];
@@ -166,6 +224,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
     .filter((item): item is Extract<PluginContribution, { kind: "tool" }> => item.kind === "tool")
     .map((item) => item.tool.name);
   const assembly = includeBuiltins ? listAssembly() : [];
+
+  const securityBackend = options.securityBackend ?? defaultSecurityBackend();
+  const logger = createLogger(options.observability ?? defaultLoggerOptions());
+  const effectBridge = options.effectBridge ?? createEffectBridge();
+  const fiberLogger = logger.forFiber("agent");
+
+  stream.subscribe((event) => {
+    const content = "message" in event ? String(event.message.content) : event.type;
+    fiberLogger.info(`${event.type} ${content}`);
+  });
 
   let aborted = false;
 
@@ -209,6 +277,24 @@ export function createAgent(options: AgentOptions = {}): Agent {
       aborted = true;
     },
     waitForIdle: () => stream.waitForIdle(),
+    capabilities: () => securityBackend.capabilities(),
+    onEffect: (handler) => effectBridge.onEffect(handler),
+    addRedactor: (rule) => logger.addRedactor(rule),
+    emitEffect: (meta) => effectBridge.emit(meta),
+    resolveLogSink: (options) => resolveLogSink(options),
+    logger,
+    async runTool(call) {
+      if (isCriticalLayerDegraded(securityBackend.capabilities())) {
+        return { ok: false, reason: "CRITICAL_LAYER_DEGRADED" };
+      }
+      try {
+        await securityBackend.run({ argv: [call.name] });
+        const value = await call.execute();
+        return { ok: true, value };
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+    },
     get aborted() {
       return aborted;
     },

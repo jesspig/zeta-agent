@@ -89,3 +89,83 @@ describe("T-25 agent facade and plugin assembly", () => {
     expect(agent.aborted).toBe(true);
   });
 });
+
+describe("T-09 createAgent PluginApiSurface 装配", () => {
+  test("createAgent 运行时可达 capabilities()/onEffect()/addRedactor()", () => {
+    const agent = facade.createAgent();
+
+    expect(typeof agent.capabilities).toBe("function");
+    expect(typeof agent.onEffect).toBe("function");
+    expect(typeof agent.addRedactor).toBe("function");
+  });
+
+  test("capabilities() 返回 security backend 的探测结果副本", () => {
+    const agent = facade.createAgent();
+    const probed = agent.capabilities();
+
+    expect(probed).toEqual({
+      isolation: "active",
+      seccomp: "active",
+      fsConfinement: "active",
+      auditSink: "active",
+      egressDefaultDeny: "active",
+    });
+    probed.isolation = "degraded";
+    expect(agent.capabilities().isolation).toBe("active");
+  });
+
+  test("onEffect() 注册 handler 并返回可撤销的 disposer", () => {
+    const agent = facade.createAgent();
+    const seen: string[] = [];
+    const stop = agent.onEffect((meta) => {
+      seen.push(meta.label);
+    });
+    expect(typeof stop).toBe("function");
+
+    agent.emitEffect({ label: "root", children: [] });
+    expect(seen).toEqual(["root"]);
+
+    stop();
+    agent.emitEffect({ label: "again", children: [] });
+    expect(seen).toEqual(["root"]);
+  });
+
+  test("addRedactor() 经 observability logger 在发送前脱敏，可撤销", () => {
+    const emitted: string[] = [];
+    const agent = facade.createAgent({
+      observability: {
+        runId: "run-1",
+        sink: (message) => emitted.push(message.message),
+      },
+    });
+    const stop = agent.addRedactor({ match: /sk-[A-Za-z0-9]+/g, replace: "[REDACTED]" });
+    expect(typeof stop).toBe("function");
+
+    agent.logger.forFiber("f").info("token sk-abc123 present");
+    expect(emitted[0]).toBe("token [REDACTED] present");
+
+    stop();
+    agent.logger.forFiber("f").info("token sk-abc123 present");
+    expect(emitted[1]).toBe("token sk-abc123 present");
+  });
+
+  test("事件日志经 logger sink 旁路输出，且脱敏在写入 sink 前生效", async () => {
+    const emitted: string[] = [];
+    const agent = facade.createAgent({
+      observability: { runId: "run-2", sink: (message) => emitted.push(message.message) },
+      streamFn: async function* () {
+        yield "token sk-xyz999 present";
+      },
+    });
+    agent.addRedactor({ match: /sk-[A-Za-z0-9]+/g, replace: "[REDACTED]" });
+
+    await agent.prompt("sk-usertoken123");
+    await agent.waitForIdle();
+
+    expect(emitted.length).toBeGreaterThan(0);
+    for (const message of emitted) {
+      expect(message.includes("sk-")).toBe(false);
+    }
+    expect(emitted.some((message) => message.includes("[REDACTED]"))).toBe(true);
+  });
+});

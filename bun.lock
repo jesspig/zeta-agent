@@ -29,6 +29,8 @@
         "@zeta-agent/agent-framework": "workspace:*",
         "@zeta-agent/capabilities": "workspace:*",
         "@zeta-agent/framework": "workspace:*",
+        "@zeta-agent/observability": "workspace:*",
+        "@zeta-agent/security": "workspace:*",
       },
     },
     "packages/agent-components": {
