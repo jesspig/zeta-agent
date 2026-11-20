@@ -34,5 +34,9 @@
       "version": "1.4.2",
       "onFail": "error"
     }
+  },
+  "dependencies": {
+    "@opentui/solid": "0.9.3",
+    "solid-js": "^1.9.16"
   }
 }

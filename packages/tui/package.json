@@ -9,7 +9,7 @@
     "@zeta-agent/framework": "workspace:*"
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir dist --target bun",
+    "build": "bun build ./src/index.ts --outdir dist --target bun --external '@opentui/*'",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test --pass-with-no-tests"
   }
