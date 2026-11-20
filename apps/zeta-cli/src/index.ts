@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 import { mkdirSync } from "node:fs";
-import { createAgent, MODES, type Agent, type AgentStreamFn } from "@zeta-agent/agent";
+import { createAgent, createOpenAiStreamFn, MODES, type Agent, type AgentStreamFn } from "@zeta-agent/agent";
 import { testRender, type FrameState } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
+import { resolveModelConfig } from "./config";
 import { resolveDataDir } from "./runtime";
 
 const VERSION = "0.1.0";
@@ -19,6 +20,12 @@ const HELP = [
   "  zeta --version             显示版本",
   "",
   "数据目录: ~/.zeta-agent/（当前仅内存态，持久化后续接入）",
+  "",
+  "模型配置（环境变量，headless 与 TUI 通用）:",
+  "  ZETA_BASE_URL   OpenAI 兼容 API 基址，如 https://host/v1",
+  "  ZETA_API_KEY    Bearer 令牌",
+  "  ZETA_MODEL      模型名，如 provider/model",
+  "  三项齐全时用真实模型；否则回退 echo（无网络）。密钥勿写入仓库。",
 ].join("\n");
 
 function echoStream(): AgentStreamFn {
@@ -29,7 +36,9 @@ function echoStream(): AgentStreamFn {
 }
 
 function makeAgent(): Agent {
-  return createAgent({ streamFn: echoStream() });
+  const config = resolveModelConfig(process.env);
+  const streamFn: AgentStreamFn = config !== null ? createOpenAiStreamFn(config) : echoStream();
+  return createAgent({ streamFn });
 }
 
 function renderMessages(messages: readonly { role: string; content: unknown }[]): string {
@@ -88,7 +97,12 @@ async function runHeadless(args: CliArgs): Promise<number> {
     lines: args.prompt !== undefined ? [args.prompt] : [],
     output: (line: string) => process.stdout.write(line + "\n"),
   };
-  return MODES[mode].run(agent, opts);
+  try {
+    return await MODES[mode].run(agent, opts);
+  } catch (error) {
+    process.stderr.write(`zeta: ${(error as Error).message}\n`);
+    return 1;
+  }
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
