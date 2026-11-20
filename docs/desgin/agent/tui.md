@@ -1,6 +1,6 @@
 # TUI 设计（OpenTUI 与 SolidJS）
 
-> **实现状态（2026-11-20 更新）**：OpenTUI 0.9.3 + SolidJS 已落地，为仓库**默认且唯一发布实现**；同时公开 `RendererBackend` seam 与 `createTui({ backend })`，供**用户自带** Ink / TermUI / REPL 后端按同一契约接入——仓库自身不提供任何替代后端，也不存在 ASCII 降级实现。native 在 CI 不可用时测试标 skip、`--print` 无头模式绕开，这不是"降级后端"。
+> **实现状态（2026-11-21 更新）**：OpenTUI 0.9.3 + SolidJS 为仓库**默认且唯一发布实现**。交互 TUI 经 `renderTui()` 用 OpenTUI 官方 `render()` 在终端原生绘制；早期自研 ASCII 字符串渲染（`frame.ts` 的 `+---+` 边框，事实上的 StringBackend）已**删除**，不再产出字符画边框。同时公开 `RendererBackend` seam 与 `createTui({ backend })`，供**用户自带** Ink / TermUI / REPL 后端按同一契约接入——仓库自身不提供任何替代后端。native 在 CI 不可用时测试标 skip、`--print` 无头模式绕开，这不是"降级后端"。
 > **文档定位**：TUI 设计（OpenTUI 与 SolidJS）（从 `07-TUI设计.md` 拆分/重命名而来，链接已按新结构重写）。
 > **所属索引**：[本目录索引](./README.md) · [总索引](../README.md)
 > **来源分级**：一手来源为 [在线论文](https://arxiv.org/abs/2608.25512v1) 与 [GitHub 源码](https://github.com/earendil-works/pi)（逐文件链接见正文）；汇总见 [事实登记](../architecture/fact-registry.md)。
@@ -88,7 +88,8 @@ function createTui(options?: { backend?: RendererBackend }): TuiHandle;
 - **唯一发布实现**：`OpenTuiBackend`（默认），用真实 `@opentui/solid@0.9.3` 官方 `testRender` 与 Solid slots；OpenTUI 调用只出现在 `backend-opentui.tsx`。
 - **seam 面向用户**：用不惯 OpenTUI 的用户可自带 Ink / TermUI / 纯 REPL 后端，经 `createTui({ backend })` 注入，遵循同一契约即可替换；仓库不发布这些替代实现。
 - **共享契约测试**：`backendContractTests(factory)` 对任意后端跑同一组断言（定宽定高、帧快照稳定、destroy 幂等），只用 `FrameState` 抽象不引用 OpenTUI 类型。
-- **边界**：业务组件（`slots/signal/virtual/hud/frame/backend`）零直接 import `@opentui/solid`，由 `scripts/guard-architecture.mjs` 静态守护。
+- **真实运行时入口**：`renderTui(options)` 用 OpenTUI 官方 `render()` + 自建 `CliRenderer` + Solid signal + `<box>/<scrollbox>/<text>/<input>` 在终端原生绘制；返回 `RuntimeTuiHandle`（`appendMessage` / `waitForExit` / `destroy`）。CLI 的交互 TUI 默认走此路径，不再有任何自研 ASCII 字符串渲染（原 `frame.ts` 的 `+---+` 边框已删除）。
+- **边界**：业务组件（`slots/signal/virtual/hud/frame-state/backend`）零直接 import `@opentui/solid`，由 `scripts/guard-architecture.mjs` 静态守护。
 
 ## 4 AgentEvent → Solid signal 映射
 
