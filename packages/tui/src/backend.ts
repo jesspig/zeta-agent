@@ -1,4 +1,5 @@
 import { testRender as renderFrame, type FrameState } from "./frame";
+import { OpenTuiBackend } from "./backend-opentui";
 
 export interface Frame {
   readonly snapshot: string;
@@ -33,6 +34,15 @@ export interface CreateTuiOptions {
 
 export function frameSnapshot(handle: TestHandle): string {
   return handle.captureCharFrame();
+}
+
+export function createTui(options: CreateTuiOptions = {}): TuiHandle {
+  const backend = options.backend ?? new OpenTuiBackend();
+  return {
+    backend,
+    render: (frame) => backend.render(frame),
+    destroy: () => backend.destroy(),
+  };
 }
 
 export function createFrameRenderer(): Pick<RendererBackend, "render"> {
