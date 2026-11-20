@@ -13,6 +13,10 @@
     "apps/zeta-cli": {
       "name": "@zeta-agent/cli",
       "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/tui": "workspace:*",
+      },
     },
     "packages/agent": {
       "name": "@zeta-agent/agent",

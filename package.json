@@ -2,6 +2,9 @@
   "name": "zeta-agent-workspace",
   "private": true,
   "type": "module",
+  "bin": {
+    "zeta": "./apps/zeta-cli/src/index.ts"
+  },
   "workspaces": [
     "packages/*",
     "packages/components/*",
@@ -13,7 +16,8 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check": "turbo run build typecheck test",
-    "dev": "turbo run dev"
+    "dev": "turbo run dev",
+    "zeta": "bun apps/zeta-cli/src/index.ts"
   },
   "packageManager": "bun@1.4.2",
   "devDependencies": {

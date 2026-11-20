@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "dependencies": {
+    "@zeta-agent/agent": "workspace:*",
+    "@zeta-agent/tui": "workspace:*"
+  },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",
     "typecheck": "tsc --noEmit -p tsconfig.json",
