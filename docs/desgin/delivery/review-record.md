@@ -52,4 +52,19 @@
 - 机械校验：32 文件 / 703 链接 / 0 断链 / 0 断锚 / 0 章节错指 / 0 旧数字残留。
 - 结论：P0 全部修复，阶段 0-1 的开工阻断已消除；P1/P2 剩余项为文档打磨，可在开发并行处理。
 
+## 6 设计漂移修复轮（2026-11-20）
+
+针对上一轮差距分析确认的 4 类漂移完成修复，文档与实现同步：
+
+| 类别 | 修复 | 验收 |
+| --- | --- | --- |
+| TUI 栈 | OpenTUI 0.9.3 + SolidJS 落地为默认且唯一发布实现；公开 `RendererBackend` seam + `createTui({ backend })` 供用户自带后端；仓库无 StringBackend/替代后端 | AC-03 / AC-04 |
+| facade 边界 | facade 包补 `exports` 子路径；架构守护脚本纳入 `bun run check`；两个聚合包从空壳填为真实出口 | AC-05 / AC-06 |
+| PluginApi 接线 | `createAgent` 装配 `capabilities/onEffect/addRedactor`（仅委托）；A21/A22 经 facade 表面可达 | AC-07 |
+| 工程收尾 | 根 README / index.ts 去除 bun init 残留；TUI 设计文档标注唯一实现 + 公开 seam；overview 标注 exports 落地状态 | AC-09 / AC-10 |
+
+- 零回归：核心语义既有测试全绿（234 → 253 pass，0 fail）；全量 `bun run build/typecheck/test` 与 `tsc --noEmit` 全绿。
+- 链接复核：`scripts/check_docs_links.mjs`（GitHub slug 规则）扫描 34 文件 / 714 链接 / 481 锚点 / 0 断链 / 0 断锚；修复了 8 处历史遗留错锚（跨文档章节号误用纯锚点）。
+- 历史归档：上一轮 `.handoff` 快照只读保留于 `.handoff/archive/2026-11-20-1659-zeta-agent-harness/`（85 文件 + manifest）。
+
 **总索引**：[README.md](../README.md)

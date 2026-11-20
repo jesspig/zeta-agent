@@ -48,7 +48,7 @@
 | P7 | **同键操作必须可交换**，顺序敏感显式声明 | [cordis-paper §7.2](../research/cordis-paper-theory.md) | 交错加载后状态依赖顺序 | [agent-framework §7](../agent-framework/tools-and-policies.md#7-顺序敏感部分中间件与提示词) |
 | P8 | **获取 vs 发射分类**：只自动撤销获取 | [cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | 错误承诺"自动回滚外部副作用" | [plugin-system §6](../agent/plugin-system.md#6-工具副作用的边界分类) |
 | P9 | **core 不依赖 provider / 持久化 / UI** | agent-core 1.0.0 的架构决定（[02](../research/pi-baseline.md)） | 上层无法替换实现 | [agent-framework §2](../agent-framework/overview.md#2-包边界与依赖) |
-| P10 | **插件 UI 用槽位贡献**，不由 core 直接画 | OpenTUI Solid plugin slots（[engineering §3.3](#33-opentui-与-solidjs)） | TUI 与插件耦合 | [doc §5](../agent/tui.md#5-插件-ui-槽位) |
+| P10 | **插件 UI 用槽位贡献**，不由 core 直接画 | OpenTUI Solid plugin slots（[engineering §3.3](./engineering.md#33-opentui-与-solidjs)） | TUI 与插件耦合 | [doc §5](../agent/tui.md#5-插件-ui-槽位) |
 
 
 ## 4 两个框架与应用形态（组件拼装模型）
@@ -159,7 +159,7 @@ flowchart TB
     AC --> AFW
 ```
 
-**workspace glob**：`["apps/*", "packages/*", "packages/components/*", "packages/agent-components/*"]`。`components/` 与 `agent-components/` 是**分组目录，自身没有 `package.json`**——这是 Turborepo 官方建议的写法（不支持嵌套包的 `**`，但支持 `packages/*` + `packages/group/*` 且 group 不建 package.json，见 [engineering §3.2](#32-turborepo)）。
+**workspace glob**：`["apps/*", "packages/*", "packages/components/*", "packages/agent-components/*"]`。`components/` 与 `agent-components/` 是**分组目录，自身没有 `package.json`**——这是 Turborepo 官方建议的写法（不支持嵌套包的 `**`，但支持 `packages/*` + `packages/group/*` 且 group 不建 package.json，见 [engineering §3.2](./engineering.md#32-turborepo)）。
 
 **精简约束**：不创建 `@zeta-agent/types`、`@zeta-agent/utils`、`@zeta-agent/config` 等公共包；类型与工具就在产生它们的组件包里导出。仅当出现真实的三处重复时才提取（YAGNI）。
 

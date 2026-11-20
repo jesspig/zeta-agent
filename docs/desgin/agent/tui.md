@@ -1,6 +1,7 @@
 # TUI 设计（OpenTUI 与 SolidJS）
 
-> **文档定位**：TUI 设计（OpenTUI 与 SolidJS）（从 `07-TUI设计.md` 拆分/重命名而来，内容保持原样，链接已按新结构重写）。
+> **实现状态（2026-11-20 更新）**：OpenTUI 0.9.3 + SolidJS 已落地，为仓库**默认且唯一发布实现**；同时公开 `RendererBackend` seam 与 `createTui({ backend })`，供**用户自带** Ink / TermUI / REPL 后端按同一契约接入——仓库自身不提供任何替代后端，也不存在 ASCII 降级实现。native 在 CI 不可用时测试标 skip、`--print` 无头模式绕开，这不是"降级后端"。
+> **文档定位**：TUI 设计（OpenTUI 与 SolidJS）（从 `07-TUI设计.md` 拆分/重命名而来，链接已按新结构重写）。
 > **所属索引**：[本目录索引](./README.md) · [总索引](../README.md)
 > **来源分级**：一手来源为 [在线论文](https://arxiv.org/abs/2608.25512v1) 与 [GitHub 源码](https://github.com/earendil-works/pi)（逐文件链接见正文）；汇总见 [事实登记](../architecture/fact-registry.md)。
 
@@ -70,6 +71,24 @@ flowchart LR
 2. **槽位注册表**：插件贡献 UI 片段（`JSX.Element`），用 OpenTUI 的 Solid slots；
 3. **根组件**：布局与终端事件处理，不含业务逻辑。
 
+
+## 3.5 渲染后端 seam（可插拔，仅服务用户扩展）
+
+`@zeta-agent/tui` 公开稳定的 `RendererBackend` 契约与 `createTui` 注入点：
+
+```ts
+interface RendererBackend {
+  render(frame: FrameState): Frame;
+  testRender(app: () => FrameState, opts: TestRenderOptions): Promise<TestHandle>;
+  destroy(): void;
+}
+function createTui(options?: { backend?: RendererBackend }): TuiHandle;
+```
+
+- **唯一发布实现**：`OpenTuiBackend`（默认），用真实 `@opentui/solid@0.9.3` 官方 `testRender` 与 Solid slots；OpenTUI 调用只出现在 `backend-opentui.tsx`。
+- **seam 面向用户**：用不惯 OpenTUI 的用户可自带 Ink / TermUI / 纯 REPL 后端，经 `createTui({ backend })` 注入，遵循同一契约即可替换；仓库不发布这些替代实现。
+- **共享契约测试**：`backendContractTests(factory)` 对任意后端跑同一组断言（定宽定高、帧快照稳定、destroy 幂等），只用 `FrameState` 抽象不引用 OpenTUI 类型。
+- **边界**：业务组件（`slots/signal/virtual/hud/frame/backend`）零直接 import `@opentui/solid`，由 `scripts/guard-architecture.mjs` 静态守护。
 
 ## 4 AgentEvent → Solid signal 映射
 
@@ -232,7 +251,7 @@ print/json/rpc 模式（[framework-model/engineering §9](../architecture/engine
 
 | 风险 | 缓解 |
 | --- | --- |
-| OpenTUI native 依赖跨平台/CI 不可用 | `testRender` 无终端测试；CI 用 `--print` 模式；文档标注平台矩阵 |
+| OpenTUI native 依赖跨平台/CI 不可用 | `testRender` 无终端测试；CI 用 `--print` 模式；native 不可用时测试标 skip（非 ASCII 降级后端）；文档标注平台矩阵 |
 | Solid 与 fiber 生命周期双轨 | `onCleanup` 与 fiber 逆统一：UI 插件一律通过 fiber 加载，cleanup 即逆 |
 | 运行时 TSX 插件加载复杂 | 按官方 `runtime-plugin-support` + module map 配置；先只支持构建期 UI 插件，运行时加载为第二阶段 |
 | 槽位 API 版本变化（0.9.x） | 锁定 `@opentui/*` 同版本；封装在 `@zeta-agent/tui` 内，上层不直接依赖 |

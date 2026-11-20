@@ -118,7 +118,7 @@
 }
 ```
 
-任务顺序由 `dependsOn: ["^build"]` 自动得到 `cordis → {events, scope, registry, store…} → {loader, hmr} → framework facade → {decision, inbox, stream} → {tools, session} → loop → agent-framework facade → {agent, tui} → cli`，与 [§5.1 依赖图](#51-组件子包清单与依赖图c-方案) 一致。`build` 产物放各包 `dist/**`；`dev` 不缓存。分组目录 `components/`、`agent-components/` 自身无 `package.json`，不产生 turbo 任务，只作为 workspace glob 的容器。
+任务顺序由 `dependsOn: ["^build"]` 自动得到 `cordis → {events, scope, registry, store…} → {loader, hmr} → framework facade → {decision, inbox, stream} → {tools, session} → loop → agent-framework facade → {agent, tui} → cli`，与 [§5.1 依赖图](./framework-model.md#51-组件子包清单与依赖图c-方案) 一致。`build` 产物放各包 `dist/**`；`dev` 不缓存。分组目录 `components/`、`agent-components/` 自身无 `package.json`，不产生 turbo 任务，只作为 workspace glob 的容器。
 
 
 ## 9 运行形态：CLI / SDK / RPC / 静默模式

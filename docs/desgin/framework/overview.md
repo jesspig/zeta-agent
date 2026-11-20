@@ -61,17 +61,14 @@ packages/
 
 ```jsonc
 "exports": {
-  ".": "./dist/index.js",
+  ".": "./src/index.ts",
   "./package.json": "./package.json",
-  "./group": "./dist/group.js",       // 组件加载器 group（components.md §8 用 @zeta-agent/framework/group）
-  "./include": "./dist/include.js",   // 外部配置 include
-  "./objects": "./dist/objects.js",   // 可选 contract/object/reference（components.md §9）
-  "./store": "./dist/store.js",       // 可选 document/tx/watch
-  "./testing": "./dist/testing.js"    // 注意：测试包名是 @zeta-agent/testing 独立包，这里仅 facade 再导出
+  "./types": "./src/types.ts"
+  // 仅声明源码真实存在的子路径；不存在的 group/include/objects/store/testing 草案路径不声明
 }
 ```
 
-> 子路径只再导出 facade 稳定契约，不暴露组件内部实现；架构守护脚本同时校验"应用不得 import `components/**` 内部实现"。
+> **实现状态（2026-11-20 更新）**：facade 包已落地 `exports`（含 `.` / `./package.json` / 实际存在的子路径，见各包 `package.json`，由 `scripts/check-facade-exports.mjs` 校验）。早期草案里的 `./group` / `./include` / `./objects` / `./store` / `./testing` 在源码中无对应稳定入口文件，按"不声明不存在的 path"裁剪；需要时先补入口文件再声明。子路径只再导出 facade 稳定契约，不暴露组件内部实现；`scripts/guard-architecture.mjs` 同时校验"应用不得 import `components/**` 内部实现"与"业务组件不得直接 import `@opentui/solid`"，已纳入 `bun run check`。聚合包 `@zeta-agent/components` / `@zeta-agent/agent-components` 已从空壳填为真实聚合出口。
 
 
 ## 文档关系

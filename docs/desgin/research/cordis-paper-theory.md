@@ -45,7 +45,7 @@ Cordis 把"插件"重新定义为一个**组件（component）**：它声明自�
 
 论文明确指出，现代 AI agent 依赖运行时 harness，组合工具套件、执行环境、权限与沙箱、会话状态与持久化、上下文与记忆、子 agent 与多 agent 工作流、用户与自动化接口；**未来的 harness 会在持续服务请求的同时生成并部署对自身组件的修改**（p.5）。若没有时间可组合性，每次自修改都要重启并丢弃进程内累积状态；若没有空间可组合性，每个模块只能临时适配依赖变化，甚至静默破坏依赖方或引入仅在重载时暴露的循环依赖。
 
-> **这是本项目的直接理论合法性来源**：我们要重构的 pi 正是一个 agent harness；论文结论章（p.82-83）把"self-evolving agent harnesses"列为未来验证的首要方向。详见 [§14](#14-与本项目目标的关系)。
+> **这是本项目的直接理论合法性来源**：我们要重构的 pi 正是一个 agent harness；论文结论章（p.82-83）把"self-evolving agent harnesses"列为未来验证的首要方向。详见 [§14](./cordis-paper-system.md#14-与本项目目标的关系)。
 
 ### 2.4 粗粒度替代方案及其代价（PDF p.5-6）
 
@@ -70,7 +70,7 @@ Cordis 把"插件"重新定义为一个**组件（component）**：它声明自�
 
 时间可组合性 ↔ 有状态 effect 必须可逆；空间可组合性 ↔ 依赖必须声明并按环境供给解析。经典 effect/coeffect 系统是**静态工具**：effect 在词法固定作用域内由编译期 handler  discharge，coeffect 注释在执行前确定的上下文上验证。动态组合要求这些保证对运行时到来/离开的组件、持续演化的上下文成立。论文的核心转向：**不是给静态类型系统加更多注释，而是把 effect/coeffect 的概念结构具体化（reify）为运行时可直接操作的实体**。
 
-> 工程转译：TS 里没有原生 algebraic effects / coeffects，只能用对象、闭包、Proxy、generator 实现；这正是 Cordis 选择 TypeScript 时的做法，见 [§10](#10-实现cordis-三层架构与十一个算法) 与 [04 开发框架层](../framework/core-semantics.md#4-核心原语-ctxeffect)。
+> 工程转译：TS 里没有原生 algebraic effects / coeffects，只能用对象、闭包、Proxy、generator 实现；这正是 Cordis 选择 TypeScript 时的做法，见 [§10](./cordis-paper-system.md#10-实现cordis-三层架构与十一个算法) 与 [04 开发框架层](../framework/core-semantics.md#4-核心原语-ctxeffect)。
 
 
 ## 4 可撤销效应（Revertible Effects）
@@ -109,7 +109,7 @@ Cordis 把"插件"重新定义为一个**组件（component）**：它声明自�
 - 迭代器是**具体化的定界续延**，直接对应主流语言的 `yield` / generator。
 - **局部时间可组合性判据**：组件施加的任意 effect 序列，其累积器恢复起始上下文；逆序回滚把每个逆交到它自己产生的状态。见论文 §3.1.3 总结（p.16）。
 
-> 工程转译：`ctx.effect(callback)` 的 callback 是一个 async generator，`yield` 出 dispose 函数；`execute()` 把每次 yield 的 dispose 前插到 `inverse` 链上，形成 LIFO。对应 [§10.1 算法 1](#101-算法-1ctxeffect-execute) 与 [04 开发框架层](../framework/core-semantics.md#5-撤销协议与-lifo-累积器)。
+> 工程转译：`ctx.effect(callback)` 的 callback 是一个 async generator，`yield` 出 dispose 函数；`execute()` 把每次 yield 的 dispose 前插到 `inverse` 链上，形成 LIFO。对应 [§10.1 算法 1](./cordis-paper-system.md#101-算法-1ctxeffect-execute) 与 [04 开发框架层](../framework/core-semantics.md#5-撤销协议与-lifo-累积器)。
 
 
 ## 5 响应式共效应（Reactive Coeffects）
@@ -137,7 +137,7 @@ Cordis 把"插件"重新定义为一个**组件（component）**：它声明自�
 - **定义 25**：`get(k): (ρ,σ) ↦ σ(ρ(k))`；`set(k,v)` 写 `σ[ρ(k)↦v]` 并给出逆；`isolate(k,r): (ρ,σ) ↦ (ρ[k↦r], σ)`（式 26）。`set` 仍是 `𝔈*Σiso`，`isolate` 不需要逆。
 - **定义 26-27（拦截）**：`Σinter ≜ ((k:K)→M k) × ((k:K)⇀(M k→V k))`，`𝔇inter ≜ (k:K)⇀M k`；每个键带元数据 monoid `(M k, ⊕k, εk)`。访问时求值 `σ(k)(d(k) ⊕k ι(k))`，即**组件声明的元数据与上下文携带元数据合并后传给 provider 函数**；合并是 right-biased，`ι(k)` 优先，使外层上下文能在不改组件的前提下约束它对 coeffect 的使用（用于 §12.3 的访问控制）。`intercept(k,ν)` 把 `ν` 合并到继承的元数据，是 derived realization，可在运行时安装/重配/移除而**不触发任何 reload**。
 
-> 工程转译：`@@store` / `@@isolate` / `@@intercept` 三个 symbol 键槽；`ctx.get/set/isolate/intercept`；Proxy 属性访问在 fiber 链上按 committed view 解析并强制声明检查。见 [§10.2](#102-算法-2-3coeffect-操作与通知) 与 [04 开发框架层](../framework/core-semantics.md#6-依赖注入与隔离)。
+> 工程转译：`@@store` / `@@isolate` / `@@intercept` 三个 symbol 键槽；`ctx.get/set/isolate/intercept`；Proxy 属性访问在 fiber 链上按 committed view 解析并强制声明检查。见 [§10.2](./cordis-paper-system.md#102-算法-2-3coeffect-操作与通知) 与 [04 开发框架层](../framework/core-semantics.md#6-依赖注入与隔离)。
 
 
 ## 6 上下文范式（Context Paradigm）
