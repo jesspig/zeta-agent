@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./facade": "./src/facade.ts",
+    "./cli/modes": "./src/cli/modes.ts",
+    "./providers/openai": "./src/providers/openai.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "@zeta-agent/agent-framework": "workspace:*",
     "@zeta-agent/capabilities": "workspace:*",
