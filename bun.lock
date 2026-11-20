@@ -36,6 +36,10 @@
     "packages/agent-components": {
       "name": "@zeta-agent/agent-components",
       "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/agent-framework": "workspace:*",
+      },
     },
     "packages/agent-framework": {
       "name": "@zeta-agent/agent-framework",
@@ -49,6 +53,14 @@
     "packages/components": {
       "name": "@zeta-agent/components",
       "version": "0.0.0",
+      "dependencies": {
+        "@zeta-agent/capabilities": "workspace:*",
+        "@zeta-agent/cordis": "workspace:*",
+        "@zeta-agent/events": "workspace:*",
+        "@zeta-agent/loader": "workspace:*",
+        "@zeta-agent/observability": "workspace:*",
+        "@zeta-agent/security": "workspace:*",
+      },
     },
     "packages/components/capabilities": {
       "name": "@zeta-agent/capabilities",
@@ -118,6 +130,7 @@
       "name": "@zeta-agent/tui",
       "version": "0.0.0",
       "dependencies": {
+        "@opentui/core": "0.9.3",
         "@zeta-agent/agent": "workspace:*",
         "@zeta-agent/framework": "workspace:*",
       },

@@ -10,11 +10,13 @@
     "./signal": "./src/signal.ts",
     "./virtual": "./src/virtual.ts",
     "./hud": "./src/hud.ts",
-    "./frame": "./src/frame.ts",
+    "./frame-state": "./src/frame-state.ts",
     "./backend": "./src/backend.ts",
+    "./runtime": "./src/runtime.tsx",
     "./package.json": "./package.json"
   },
   "dependencies": {
+    "@opentui/core": "0.9.3",
     "@zeta-agent/agent": "workspace:*",
     "@zeta-agent/framework": "workspace:*"
   },

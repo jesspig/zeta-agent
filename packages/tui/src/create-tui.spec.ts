@@ -25,7 +25,7 @@ test("createTui 可注入用户自带后端（非仓库发布实现）", () => {
 });
 
 test("业务组件零直接 import OpenTUI（守护测试）", () => {
-  const files = ["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame.ts", "backend.ts"];
+  const files = ["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame-state.ts", "backend.ts"];
   for (const file of files) {
     const text = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
     expect(text).not.toContain("@opentui");

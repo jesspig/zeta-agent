@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { mkdirSync } from "node:fs";
 import { createAgent, createOpenAiStreamFn, MODES, type Agent, type AgentStreamFn } from "@zeta-agent/agent";
-import { testRender, type FrameState } from "@zeta-agent/tui";
+import { renderTui, type RuntimeMessage } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
 import { resolveDataDir } from "./runtime";
@@ -41,50 +41,42 @@ function makeAgent(): Agent {
   return createAgent({ streamFn });
 }
 
-function renderMessages(messages: readonly { role: string; content: unknown }[]): string {
-  const lines = messages.map((message) => `${message.role}: ${String(message.content)}`);
-  const hud = `zeta v${VERSION}  |  数据: ~/.zeta-agent/ (内存)`;
-  const state: FrameState = { width: 72, height: Math.max(6, lines.length + 4), lines, hud };
-  return testRender(state);
-}
-
-async function draw(agent: Agent, clear: boolean): Promise<void> {
-  if (clear && process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
-  process.stdout.write(renderMessages(agent.state.messages) + "\n");
+function toRuntimeMessages(messages: readonly { role: string; content: unknown }[]): readonly RuntimeMessage[] {
+  return messages.map((message) => ({ role: message.role, content: message.content }));
 }
 
 async function runTui(args: CliArgs): Promise<number> {
   const agent = makeAgent();
+
+  if (!process.stdin.isTTY) {
+    process.stdout.write("(非 TTY：请用 zeta --headless \"提示词\"；交互式 TUI 需要 TTY)\n");
+    return 0;
+  }
+
+  const tui = await renderTui({
+    title: `zeta v${VERSION}`,
+    messages: toRuntimeMessages(agent.state.messages),
+    onSubmit: async (text) => {
+      await agent.prompt(text);
+      await agent.waitForIdle();
+    },
+  });
+
   const unsubscribe = agent.subscribe((event) => {
-    if (event.type === "message_end") void draw(agent, true);
+    if (event.type === "message_end") {
+      tui.appendMessage({ role: event.message.role, content: event.message.content });
+    }
   });
 
   try {
     if (args.prompt !== undefined) {
       await agent.prompt(args.prompt);
       await agent.waitForIdle();
-      await draw(agent, true);
-      return 0;
     }
-
-    if (!process.stdin.isTTY) {
-      await draw(agent, false);
-      process.stdout.write("(非 TTY：请用 zeta --headless \"提示词\" 或 zeta \"提示词\")\n");
-      return 0;
-    }
-
-    await draw(agent, true);
-    process.stdout.write("zeta TUI（输入 exit 退出）\n");
-    for await (const line of console) {
-      const text = line.trim();
-      if (text === "exit" || text === "quit") break;
-      if (text.length === 0) continue;
-      await agent.prompt(text);
-      await agent.waitForIdle();
-      await draw(agent, true);
-    }
+    await tui.waitForExit();
   } finally {
     unsubscribe();
+    await tui.destroy();
   }
   return 0;
 }

@@ -1,0 +1,111 @@
+import { CliRenderer } from "@opentui/core";
+import { render as openTuiRender, useKeyboard } from "@opentui/solid";
+import { createSignal, For } from "solid-js";
+import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
+
+export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
+
+function messageLine(message: RuntimeMessage): string {
+  return `${message.role}: ${String(message.content)}`;
+}
+
+export interface ZetaFrameProps {
+  readonly title: string;
+  readonly lines: readonly string[];
+}
+
+export function ZetaFrame(props: ZetaFrameProps) {
+  return (
+    <box flexDirection="column" width="100%" height="100%">
+      <text fg="#7ee787">{props.title}</text>
+      <box height={1} />
+      <scrollbox flexGrow={1}>
+        <For each={props.lines}>{(line) => <text>{line}</text>}</For>
+      </scrollbox>
+    </box>
+  );
+}
+
+function ZetaApp(props: {
+  readonly title: string;
+  readonly messages: readonly RuntimeMessage[];
+  readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
+  readonly onSubmit?: (text: string) => void | Promise<void>;
+  readonly onExit: () => void;
+}) {
+  const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
+  props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
+
+  useKeyboard((key) => {
+    if (key.name === "escape" || (key.ctrl && key.name === "c")) props.onExit();
+  });
+
+  function submit(value: string) {
+    const text = value.trim();
+    if (text.length === 0) return;
+    if (text === "exit" || text === "quit") {
+      props.onExit();
+      return;
+    }
+    setLines((current) => [...current, `user: ${text}`]);
+    void props.onSubmit?.(text);
+  }
+
+  return (
+    <>
+      <ZetaFrame title={props.title} lines={lines()} />
+      <input placeholder="输入消息，回车发送；exit 退出" focused={true} onSubmit={submit} />
+    </>
+  );
+}
+
+export async function renderTui(options: RuntimeTuiOptions = {}): Promise<RuntimeTuiHandle> {
+  const renderer = new CliRenderer(
+    process.stdin,
+    process.stdout,
+    process.stdout.columns || 80,
+    process.stdout.rows || 24,
+  );
+  let resolveClosed: () => void = () => {};
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  let push: (message: RuntimeMessage) => void = () => {};
+
+  const exit = () => {
+    renderer.destroy();
+    resolveClosed();
+  };
+
+  await openTuiRender(
+    () => (
+      <ZetaApp
+        title={options.title ?? "zeta"}
+        messages={options.messages ?? []}
+        onPush={(sink) => {
+          push = sink;
+        }}
+        onSubmit={options.onSubmit}
+        onExit={() => {
+          options.onExit?.();
+          exit();
+        }}
+      />
+    ),
+    renderer,
+  );
+
+  return {
+    appendMessage(message) {
+      push(message);
+    },
+    waitForExit() {
+      return closed;
+    },
+    async destroy() {
+      exit();
+      await closed;
+      await renderer.closed;
+    },
+  };
+}

@@ -1,6 +1,6 @@
 import { testRender as openTuiTestRender } from "@opentui/solid";
 import { For } from "solid-js";
-import type { FrameState } from "./frame";
+import type { FrameState } from "./frame-state";
 import type { Frame, RendererBackend, TestHandle, TestRenderOptions } from "./backend";
 
 function FrameApp(props: { frame: FrameState }) {
