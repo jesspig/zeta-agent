@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./slots": "./src/slots.ts",
+    "./signal": "./src/signal.ts",
+    "./virtual": "./src/virtual.ts",
+    "./hud": "./src/hud.ts",
+    "./frame": "./src/frame.ts",
+    "./backend": "./src/backend.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "@zeta-agent/agent": "workspace:*",
     "@zeta-agent/framework": "workspace:*"
