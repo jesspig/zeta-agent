@@ -140,14 +140,14 @@ export function createAgentSignals(source: EventSource): AgentSignals {
         pendingTools.set(nextPending);
         const nextStates = new Map(toolStates());
         const current = nextStates.get(event.toolCallId);
-        if (current) {
-          nextStates.set(event.toolCallId, {
-            ...current,
-            status: event.isError ? "error" : "done",
-            durationMs: event.durationMs,
-          });
-          toolStates.set(nextStates);
-        }
+        nextStates.set(event.toolCallId, {
+          id: event.toolCallId,
+          name: current?.name ?? event.toolName,
+          args: current?.args ?? {},
+          status: event.isError ? "error" : "done",
+          durationMs: event.durationMs,
+        });
+        toolStates.set(nextStates);
         status.set(nextPending.size > 0 ? "tool" : "streaming");
         break;
       }

@@ -3,6 +3,8 @@ import type { AgentMessage } from "@zeta-agent/agent";
 import { createAgentSignals, type EventSource } from "../signal";
 import type { RuntimeMessage } from "../runtime-types";
 import { CodeContent, MarkdownContent, markdownPlain } from "./markdown";
+import { ToolBox } from "./tool-box";
+import { ThinkingBlock } from "./thinking";
 
 export { CodeContent, MarkdownContent, markdownPlain } from "./markdown";
 
@@ -28,6 +30,7 @@ export function MessageList(props: MessageListProps) {
   const signals = createAgentSignals(props.source);
   const [streaming, setStreaming] = createSignal<string>("");
   const [messages, setMessages] = createSignal<readonly AgentMessage[]>([]);
+  const [thinking, setThinking] = createSignal<string>("");
 
   onMount(() => {
     const offStreaming = signals.streaming.subscribe((message) => {
@@ -36,9 +39,11 @@ export function MessageList(props: MessageListProps) {
     const offMessages = signals.messages.subscribe((list) => {
       setMessages([...list]);
     });
+    const offThinking = signals.thinking.subscribe(setThinking);
     onCleanup(() => {
       offStreaming();
       offMessages();
+      offThinking();
       signals.dispose();
     });
   });
@@ -51,11 +56,30 @@ export function MessageList(props: MessageListProps) {
       <Show when={hasStreaming()} fallback={<text>IDLE</text>}>
         <text>{streaming()}</text>
       </Show>
+      <Show when={thinking().length > 0}>
+        <ThinkingBlock text={thinking()} expanded={false} />
+      </Show>
       <For each={messages()}>
         {(message) => (
           <text>{`[${message.role}] ${messageText(message)}`}</text>
         )}
       </For>
+    </box>
+  );
+}
+
+export interface RichMessageListProps extends MessageListProps {
+  readonly showTools?: boolean;
+}
+
+/** 带工具盒的富消息列表：工具事件由内嵌 ToolBox 独立订阅同一事件源。 */
+export function RichMessageList(props: RichMessageListProps) {
+  return (
+    <box flexDirection="column">
+      <MessageList source={props.source} onRender={props.onRender} />
+      <Show when={props.showTools !== false}>
+        <ToolBox source={props.source} />
+      </Show>
     </box>
   );
 }

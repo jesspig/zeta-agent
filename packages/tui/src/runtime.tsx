@@ -2,7 +2,7 @@ import { CliRenderer } from "@opentui/core";
 import { render as openTuiRender, useKeyboard } from "@opentui/solid";
 import { createSignal, For, Show } from "solid-js";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
-import { MessageList } from "./components/message";
+import { RichMessageList } from "./components/message";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
@@ -57,7 +57,7 @@ function ZetaApp(props: {
   return (
     <>
       <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
-        {(source: EventSource) => <MessageList source={source} />}
+        {(source: EventSource) => <RichMessageList source={source} />}
       </Show>
       <input placeholder="输入消息，回车发送；exit 退出" focused={true} onSubmit={submit} />
     </>
