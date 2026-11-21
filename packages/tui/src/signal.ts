@@ -40,6 +40,8 @@ export interface ToolState {
   readonly args: unknown;
   readonly status: ToolStateStatus;
   readonly durationMs?: number;
+  /** 工具最终结果（T-06 预览/图片识别消费），由 tool_execution_end 填充。 */
+  readonly result?: unknown;
 }
 
 export type StatusMessage = "working" | "retry" | "compaction" | "blocked" | null;
@@ -146,6 +148,7 @@ export function createAgentSignals(source: EventSource): AgentSignals {
           args: current?.args ?? {},
           status: event.isError ? "error" : "done",
           durationMs: event.durationMs,
+          result: event.result,
         });
         toolStates.set(nextStates);
         status.set(nextPending.size > 0 ? "tool" : "streaming");

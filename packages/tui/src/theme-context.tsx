@@ -1,10 +1,18 @@
 import { createContext, createSignal, onCleanup, useContext, type Accessor, type ParentProps } from "solid-js";
-import { createThemeRegistry, type ColorToken, type ThemeName } from "./theme";
+import {
+  createThemeRegistry,
+  type ColorToken,
+  type ThemeName,
+  type ThemeRegistry,
+} from "./theme";
+import { createDebouncedThemeReloader, type TerminalPaletteInput } from "./theme-generator";
 
 export interface ThemeView {
   readonly color: (token: ColorToken) => string;
   readonly name: Accessor<string>;
   readonly setActive: (name: string) => void;
+  /** 注入终端调色板触发 system 主题重算（内部 100ms 防抖）。 */
+  readonly applyTerminalPalette: (input: TerminalPaletteInput) => void;
 }
 
 const ThemeContext = createContext<ThemeView>();
@@ -19,14 +27,29 @@ export function ThemeProvider(props: ThemeProviderProps) {
   const [name, setName] = createSignal<string>(props.initial ?? "dark");
   registry.setActive(props.initial ?? "dark");
   const off = registry.subscribe(() => setName(registry.active()));
-  onCleanup(off);
+  const reloader = createDebouncedThemeReloader(() => registry.setSystemPalette(pendingPalette ?? DEFAULT_PALETTE));
+  let pendingPalette: TerminalPaletteInput | undefined;
+  onCleanup(() => {
+    off();
+    reloader.dispose();
+  });
   const view: ThemeView = {
     color: (token) => registry.activeTheme().color(token),
     name,
     setActive: (next) => registry.setActive(next),
+    applyTerminalPalette: (input) => {
+      pendingPalette = input;
+      reloader.notify();
+    },
   };
   return <ThemeContext.Provider value={view}>{props.children}</ThemeContext.Provider>;
 }
+
+const DEFAULT_PALETTE: TerminalPaletteInput = {
+  foreground: "#c9d1d9",
+  background: "#0d1117",
+  ansi: [],
+};
 
 /** 读取当前主题 token 色；无 Provider 时回退 dark 调色板，保证组件独立可测。 */
 export function useTheme(): ThemeView {
@@ -37,5 +60,8 @@ export function useTheme(): ThemeView {
     color: (token) => fallback.theme("dark").color(token),
     name: () => "dark",
     setActive: () => {},
+    applyTerminalPalette: () => {},
   };
 }
+
+export type { ThemeRegistry };

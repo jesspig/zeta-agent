@@ -73,6 +73,18 @@ export function undoStack(): UndoStack {
   };
 }
 
+/** 大段粘贴折叠文案。 */
+export function formatPasteBlock(id: number, extraLines: number): string {
+  return `[paste #${id} +${extraLines} lines]`;
+}
+
+/** >10 行折叠为 [paste #N +X lines]，<=10 行原样保留。 */
+export function foldLargePaste(text: string, id: number): string {
+  const lines = text.split("\n");
+  if (lines.length <= 10) return text;
+  return formatPasteBlock(id, lines.length - 10);
+}
+
 export interface FoldedPaste {
   readonly text: string;
   readonly blocks: readonly { readonly id: number; readonly content: string }[];
