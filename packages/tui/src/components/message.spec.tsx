@@ -28,10 +28,9 @@ describe("T-05 消息流与流式渲染", () => {
     const { MessageList } = await loadComponents();
     const source = bus();
     const sourceAdapter = { subscribe: source.subscribe };
-    let renders = 0;
 
     const setup = await testRender(
-      () => <MessageList source={sourceAdapter} onRender={() => { renders += 1; }} />,
+      () => <MessageList source={sourceAdapter} />,
       { width: 50, height: 12 },
     );
     try {
@@ -50,11 +49,12 @@ describe("T-05 消息流与流式渲染", () => {
       await setup.waitForFrame((frame) => frame.includes("Hello world"));
       expect(setup.captureCharFrame()).not.toContain("Hello\nHello");
 
-      const beforeRenders = renders;
       source.emit({ type: "message_end", message: updated });
       await setup.waitForFrame((frame) => frame.includes("[assistant]"));
-      expect(renders).toBeGreaterThanOrEqual(beforeRenders);
-      expect(setup.captureCharFrame()).not.toContain("Hello world\n[assistant]: Hello world");
+      const finalFrame = setup.captureCharFrame();
+      expect(finalFrame).not.toContain("Hello world\n[assistant]: Hello world");
+      // 就地增量：最终文本在帧中恰好一份，不重复累积。
+      expect(finalFrame.split("Hello world").length - 1).toBe(1);
     } finally {
       setup.renderer.destroy();
     }

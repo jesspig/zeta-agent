@@ -53,7 +53,7 @@ describe("T-10 overlay 与 resize", () => {
     }
   });
 
-  test("resize 后布局帧宽度跟随 terminal dimensions", () => {
+  test("clampWidth 按终端宽度裁剪（布局适配的纯函数基础）", () => {
     expect(clampWidth(100, 40)).toBe(40);
     expect(clampWidth(20, 80)).toBe(20);
   });

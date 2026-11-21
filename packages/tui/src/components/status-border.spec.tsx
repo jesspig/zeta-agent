@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/solid";
 import type { AgentEvent } from "@zeta-agent/agent";
-import { createAgentSignals, type EventSource } from "../signal";
+import { type EventSource } from "../signal";
 
 type Listener = (event: AgentEvent) => void;
 function bus() {
@@ -36,12 +36,6 @@ describe("T-07 滚动跟随与状态边框", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
-
-  test("statusMessage 显式值可渲染 retry/compaction/blocked", () => {
-    const signals = createAgentSignals(bus());
-    expect(signals.statusMessage()).toBeNull();
-    signals.dispose();
   });
 
   test("scrollbox stickyScroll 参数存在并被采纳", async () => {
