@@ -5,6 +5,7 @@ import type { RuntimeMessage } from "../runtime-types";
 import { CodeContent, MarkdownContent, markdownPlain } from "./markdown";
 import { ToolBox } from "./tool-box";
 import { ThinkingBlock } from "./thinking";
+import { StatusBorder } from "./status-border";
 
 export { CodeContent, MarkdownContent, markdownPlain } from "./markdown";
 
@@ -52,7 +53,7 @@ export function MessageList(props: MessageListProps) {
   props.onRender?.();
 
   return (
-    <box flexDirection="column">
+    <scrollbox flexGrow={1} stickyScroll={true} stickyStart="bottom">
       <Show when={hasStreaming()} fallback={<text>IDLE</text>}>
         <text>{streaming()}</text>
       </Show>
@@ -64,7 +65,7 @@ export function MessageList(props: MessageListProps) {
           <text>{`[${message.role}] ${messageText(message)}`}</text>
         )}
       </For>
-    </box>
+    </scrollbox>
   );
 }
 
@@ -76,6 +77,7 @@ export interface RichMessageListProps extends MessageListProps {
 export function RichMessageList(props: RichMessageListProps) {
   return (
     <box flexDirection="column">
+      <StatusBorder source={props.source} />
       <MessageList source={props.source} onRender={props.onRender} />
       <Show when={props.showTools !== false}>
         <ToolBox source={props.source} />
