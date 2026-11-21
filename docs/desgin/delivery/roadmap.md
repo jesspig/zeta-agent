@@ -32,16 +32,16 @@
 
 **目标**：把当前 `bun init` 空项目变成可运行的 monorepo 骨架。
 
-- 根 `package.json`：`workspaces: ["apps/*","packages/*","packages/components/*","packages/agent-components/*"]`（**C 方案**，见 [engineering §5.1/§8](../architecture/engineering.md#8-构建任务图turbojson-草案)；分组目录自身无 `package.json`）、`devEngines` 锁 bun 1.4.2、`turbo` 脚本。
+- 根 `package.json`：`workspaces: ["apps/*","packages/*","packages/components/*","packages/agent-components/*"]`（**C 方案**，见 [engineering §5.1/§8](../architecture/engineering.md#8-构建任务图turbojson-草案)；`components/`、`agent-components/` 既是分组目录也是聚合包，各自有 `package.json`）、`devEngines` 锁 bun 1.4.2、`turbo` 脚本。
 - `turbo.json`、`tsconfig.base.json`、`bunfig.toml`（OpenTUI preload）。
-- 建两个 facade 包（`packages/framework`、`packages/agent-framework`）、两个分组目录（`packages/components/*`、`packages/agent-components/*` 的组件包）与 `apps/zeta-cli` 的最小 `package.json` / `tsconfig`。
+- 建两个 facade 包（`packages/framework`、`packages/agent-framework`）、组件子包（`packages/components/*` 下 cordis/events/capabilities/loader/observability/security 六个）与两个聚合包（`packages/components`、`packages/agent-components`）、`apps/zeta-cli` 的最小 `package.json` / `tsconfig`。
 - 安装锁定：`solid-js@^1.9.16`、`@opentui/core@0.9.3`、`@opentui/solid@0.9.3`、`turbo@<pinned>`、`esbuild`（可选 peer）。
 
 **退出条件**：`bun install` 成功；`turbo run build/typecheck/test` 空任务全绿；依赖图无环。
 
 ### 阶段 1：`@zeta-agent/framework` 内部组件（2-3 天）
 
-**目标**：ctx.effect / fiber 状态机 / coeffect / registry 可运行并通过论文判据测试。组件以 C 方案的独立 workspace 包落地（`packages/components/cordis`、`events`、`scope`、`seam`、`registry`、`health`…），facade 包只做装配。
+**目标**：ctx.effect / fiber 状态机 / coeffect / registry 可运行并通过论文判据测试。组件以 C 方案的独立 workspace 包落地（`packages/components/cordis`、`events`、`capabilities`、`loader`、`observability`、`security`；原 scope/seam/registry/health 并入 capabilities、hmr 并入 loader），facade 包只做装配。
 
 > **开工前必读校正（[cordis-source-verification.md](../research/cordis-source-verification.md)）**：阶段 1 实现须以官方源码验证后的设计为准，而非早期草案——① FiberState 是 **6 态**（PENDING/LOADING/ACTIVE/FAILED/DISPOSED/UNLOADING），不是 5 态；② Effect 接受 **4 种形态**（Disposer / 同步 iterable / Promise&lt;Disposer&gt; / 异步 iterable）；③ committed view 存 **Impl**（含 `check()` 动态能力判定与 `dependents`），不是纯 uid；④ 撤销是**两层语义**——单 effect 内严格 LIFO，fiber 卸载多 effect 时逆序启动、并发执行；⑤ 事件静态约束靠 `interface Events` 声明合并（非 @mode），`parallel` 用 `Promise.allSettled` + `AggregateError`。
 
