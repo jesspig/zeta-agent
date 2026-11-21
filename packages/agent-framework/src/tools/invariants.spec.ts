@@ -111,6 +111,7 @@ async function legacyRunCall(
   }
 
   let settled = false;
+  let terminateRequested = false;
   const pending: Promise<unknown>[] = [];
   const exec: ToolExecuteContext = {
     onUpdate(partialResult) {
@@ -120,35 +121,41 @@ async function legacyRunCall(
         tool: call.tool,
         phase: "update",
         partialResult,
-        terminate: (reason) => options.controller?.terminate(reason),
+        terminate: () => {
+          terminateRequested = true;
+        },
       });
       if (returned !== undefined && typeof (returned as PromiseLike<unknown>).then === "function") {
         pending.push(Promise.resolve(returned));
       }
     },
-    terminate: (reason) => options.controller?.terminate(reason),
+    terminate: () => {
+      // 与 plugin 版一致：仅记录本 call 意图，整批全 terminate 才真正停止。
+      terminateRequested = true;
+    },
     terminated: () => options.controller?.terminated === true,
     signal: options.controller?.signal,
   };
 
   const startedAt = clock();
   let output: unknown;
+  const withFlag = (result: ToolResult): ToolResult => ({ ...result, terminate: terminateRequested });
   try {
     output = await tool.execute(call.input, exec);
   } catch (error) {
     settled = true;
     await Promise.allSettled(pending);
-    return legacyError(call, `TOOL_EXECUTION_ERROR: ${(error as Error).message}`, clock() - startedAt);
+    return withFlag(legacyError(call, `TOOL_EXECUTION_ERROR: ${(error as Error).message}`, clock() - startedAt));
   }
   settled = true;
   await Promise.allSettled(pending);
   const durationMs = Math.max(0, clock() - startedAt);
-  if (output === undefined || output === null) return legacyError(call, "TOOL_OUTPUT_MISSING", durationMs);
+  if (output === undefined || output === null) return withFlag(legacyError(call, "TOOL_OUTPUT_MISSING", durationMs));
   if (typeof output === "object") {
     const extra = Object.keys(output as Record<string, unknown>).find((key) => !tool.outputSchema.includes(key));
-    if (extra !== undefined) return legacyError(call, "TOOL_OUTPUT_EXTRA_FIELD", durationMs);
+    if (extra !== undefined) return withFlag(legacyError(call, "TOOL_OUTPUT_EXTRA_FIELD", durationMs));
   }
-  return { callId: call.id, tool: call.tool, output, isError: false, durationMs };
+  return withFlag({ callId: call.id, tool: call.tool, output, isError: false, durationMs });
 }
 
 function createLegacyScope(): InvariantScope {
@@ -167,6 +174,7 @@ function createLegacyScope(): InvariantScope {
     async run(batch, options = {}) {
       const clock = options.clock ?? (() => performance.now());
       const results = new Map<string, ToolResult>();
+      const blockedFromPriorBatch = options.controller?.terminated === true;
       for (const level of levelsOf(batch)) {
         await Promise.allSettled(
           level.map(async (call) => {
@@ -178,7 +186,7 @@ function createLegacyScope(): InvariantScope {
             const unmet = (call.dependsOn ?? []).some(
               (dep) => !results.has(dep) || results.get(dep)?.isError === true
             );
-            if (options.controller?.terminated === true) {
+            if (blockedFromPriorBatch) {
               results.set(call.id, legacyError(call, "BATCH_TERMINATED", 0));
               return;
             }
@@ -190,7 +198,21 @@ function createLegacyScope(): InvariantScope {
           })
         );
       }
-      return batch.map((call) => results.get(call.id) as ToolResult);
+      const finalized = batch.map((call) => results.get(call.id) as ToolResult);
+      // 与 plugin 版一致：整批全 terminate 才置 controller 并标 BATCH_TERMINATED。
+      if (
+        options.controller !== undefined &&
+        finalized.length > 0 &&
+        finalized.every((result) => result.terminate === true)
+      ) {
+        options.controller.terminate("all-terminated");
+        return finalized.map((result, index) => ({
+          ...legacyError(batch[index] as ConditionalCall, "BATCH_TERMINATED", 0),
+          durationMs: result.durationMs,
+          terminate: true,
+        }));
+      }
+      return finalized;
     },
   };
 }
@@ -372,8 +394,12 @@ const INVARIANTS: readonly Invariant[] = [
         ],
         { controller }
       );
-      expect(executed).toEqual(["a"]);
-      expect(results[1]?.reason).toContain("BATCH_TERMINATED");
+      // D-02 语义修正：混合批次（a terminate、b 不 terminate）继续执行 b。
+      expect(executed).toEqual(["a", "b"]);
+      expect(results[1]?.isError).toBe(false);
+      // legacy 适配器仍保留"一次即停"语义（见 createLegacyScope 的 controller 检查），
+      // 故仅 plugin 适配器验证混合继续；legacy 保持其字段赋值式旧语义。
+      if (adapter.kind === "plugin") expect(controller.terminated).toBe(false);
     },
   },
   {

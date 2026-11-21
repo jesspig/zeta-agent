@@ -111,7 +111,8 @@ describe("T-17 conditional parallel, terminate and late updates", () => {
     expect(results[0]?.reason).toContain("TOOL_DEPENDENCY_UNSATISFIED");
   });
 
-  test("terminate aborts every not-yet-started call", async () => {
+  test("a single terminate in a mixed batch does not abort peers (#10)", async () => {
+    // 语义修正（D-02）：仅整批全 terminate 才停止；混合批次继续执行后续 call。
     const executed: string[] = [];
     const first = descriptor({
       name: "first",
@@ -139,10 +140,68 @@ describe("T-17 conditional parallel, terminate and late updates", () => {
       registry: registryWith(first, later("second"), later("third")),
       controller,
     });
+    expect(controller.terminated).toBe(false);
+    expect(executed).toEqual(["first", "second", "third"]);
+    expect(results[1]?.isError).toBe(false);
+    expect(results[2]?.isError).toBe(false);
+  });
+
+  test("mixed terminate batch continues: only all-terminate stops the batch (#10)", async () => {
+    // 设计不变量 #10：仅当整批所有 finalized result 的 terminate===true 才停止，
+    // 混合批次（a terminate、b 不 terminate）应继续执行 b。
+    const executed: string[] = [];
+    const terminating = descriptor({
+      name: "terminating",
+      execute: (_input, exec) => {
+        executed.push("a");
+        exec.terminate("halt");
+        return { ok: true };
+      },
+    });
+    const normal = descriptor({
+      name: "normal",
+      execute: () => {
+        executed.push("b");
+        return { ok: true };
+      },
+    });
+    const batch: ConditionalCall[] = [
+      { id: "a", tool: "terminating", input: {} },
+      { id: "b", tool: "normal", input: {}, dependsOn: ["a"] },
+    ];
+    const controller = createTerminationController();
+    const results = await executeConditionalBatch(batch, {
+      registry: registryWith(terminating, normal),
+      controller,
+    });
+    expect(executed).toEqual(["a", "b"]);
+    expect(results[1]?.isError).toBe(false);
+    expect(controller.terminated).toBe(false);
+  });
+
+  test("all-terminate batch stops: every result terminate=true (T-03 #10)", async () => {
+    const executed: string[] = [];
+    const make = (name: string): ToolDescriptor =>
+      descriptor({
+        name,
+        execute: (_input, exec) => {
+          executed.push(name);
+          exec.terminate("halt");
+          return { ok: true };
+        },
+      });
+    const batch: ConditionalCall[] = [
+      { id: "a", tool: "a", input: {} },
+      { id: "b", tool: "b", input: {}, dependsOn: ["a"] },
+    ];
+    const controller = createTerminationController();
+    const results = await executeConditionalBatch(batch, {
+      registry: registryWith(make("a"), make("b")),
+      controller,
+    });
+    expect(executed).toEqual(["a", "b"]);
     expect(controller.terminated).toBe(true);
-    expect(executed).toEqual(["first"]);
     expect(results[1]?.reason).toContain("BATCH_TERMINATED");
-    expect(results[2]?.reason).toContain("BATCH_TERMINATED");
   });
 
   test("late onUpdate callbacks are dropped after the batch settles", async () => {
