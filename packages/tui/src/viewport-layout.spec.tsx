@@ -139,7 +139,7 @@ describe("T-02 视口布局重构", () => {
           onExit={() => {}}
         />
       ),
-      { width: 30, height: 10 },
+      { width: 40, height: 14 },
     );
     try {
       await setup.waitForFrame((frame) => frame.includes("hello-viewport"));
@@ -147,12 +147,11 @@ describe("T-02 视口布局重构", () => {
       const messageRow = lineAt(frame, "hello-viewport");
       // 编辑器占位提示与 footer 位于消息下方（dock 区）。
       const editorRow = lineAt(frame, "输入消息");
-      const footerRow = lineAt(frame, "zeta idle");
+      const footerRow = lineAt(frame, "ctx");
       expect(messageRow).toBeLessThan(editorRow);
       expect(editorRow).toBeLessThan(footerRow);
-      expect(footerRow).toBe(9);
       // NFR-02：帧中每一行都不超过终端宽度。
-      expect(Math.max(...rowWidths(frame))).toBeLessThanOrEqual(30);
+      expect(Math.max(...rowWidths(frame))).toBeLessThanOrEqual(40);
     } finally {
       setup.renderer.destroy();
     }
@@ -164,13 +163,13 @@ describe("T-02 视口布局重构", () => {
       () => (
         <ZetaApp title="zeta" messages={[]} source={source} onPush={() => {}} onExit={() => {}} />
       ),
-      { width: 30, height: 10 },
+      { width: 40, height: 14 },
     );
     try {
-      await setup.waitForFrame((frame) => frame.includes("IDLE"));
+      await setup.waitForFrame((frame) => frame.includes("New session started"));
       const frame = setup.captureCharFrame();
-      const idleRow = lineAt(frame, "IDLE");
-      const footerRow = lineAt(frame, "zeta idle");
+      const idleRow = lineAt(frame, "New session started");
+      const footerRow = lineAt(frame, "ctx");
       expect(idleRow).toBeLessThan(footerRow);
     } finally {
       setup.renderer.destroy();

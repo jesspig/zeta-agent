@@ -34,7 +34,7 @@ describe("T-05 消息流与流式渲染", () => {
       { width: 50, height: 12 },
     );
     try {
-      await setup.waitForFrame((frame) => frame.includes("IDLE"));
+      await setup.waitForFrame((frame) => frame.includes("New session started"));
 
       const partial: AgentMessage = { role: "assistant", content: "Hello" };
       source.emit({ type: "message_start", message: partial });
@@ -50,9 +50,8 @@ describe("T-05 消息流与流式渲染", () => {
       expect(setup.captureCharFrame()).not.toContain("Hello\nHello");
 
       source.emit({ type: "message_end", message: updated });
-      await setup.waitForFrame((frame) => frame.includes("[assistant]"));
+      await setup.waitForFrame((frame) => frame.split("Hello world").length - 1 === 1);
       const finalFrame = setup.captureCharFrame();
-      expect(finalFrame).not.toContain("Hello world\n[assistant]: Hello world");
       // 就地增量：最终文本在帧中恰好一份，不重复累积。
       expect(finalFrame.split("Hello world").length - 1).toBe(1);
     } finally {

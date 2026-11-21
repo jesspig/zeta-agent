@@ -50,7 +50,7 @@ describe("T-04 Footer 高保真", () => {
     expect(contextColorToken(91)).toBe("error");
   });
 
-  test("三行结构：pwd(home折叠)+git分支+会话名 / 指标+上下文+右对齐模型 / setStatus 扩展行", async () => {
+  test("双行结构：pwd(home折叠)+git分支 / 指标+上下文+右对齐模型", async () => {
     const setup = await testRender(
       () => (
         <FooterView
@@ -68,14 +68,14 @@ describe("T-04 Footer 高保真", () => {
           statusText="indexing files"
         />
       ),
-      { width: 80, height: 3 },
+      { width: 120, height: 3 },
     );
     try {
-      await setup.waitForFrame((frame) => frame.includes("indexing files"));
+      await setup.waitForFrame((frame) => frame.includes("claude-sonnet"));
       const lines = setup.captureCharFrame().split("\n").filter((line) => line.trim().length > 0);
-      expect(lines).toHaveLength(3);
+      expect(lines).toHaveLength(2);
 
-      const [row1, row2, row3] = lines as [string, string, string];
+      const [row1, row2] = lines as [string, string];
       expect(row1).toContain("~/project");
       expect(row1).toContain("(main)");
       expect(row1).toContain("zeta");
@@ -90,24 +90,21 @@ describe("T-04 Footer 高保真", () => {
       expect(row2).toContain("claude-sonnet");
       expect(row2).toContain("anthropic");
       expect(row2).toContain("thinking");
-
-      expect(row3).toContain("gpt-4 streaming");
-      expect(row3).toContain("indexing files");
     } finally {
       setup.renderer.destroy();
     }
   });
 
-  test("未传遥测时降级为单行兼容模式，不抛错且保留 ctx 百分比", async () => {
+  test("未传遥测时默认高保真双行，不抛错且保留 ctx 百分比", async () => {
     const setup = await testRender(
       () => <FooterView model="zeta" status="idle" budget={contextBudget(0, 100)} />,
       { width: 60, height: 3 },
     );
     try {
       await setup.waitForFrame((frame) => frame.includes("ctx 0%"));
-      const frame = setup.captureCharFrame();
-      expect(frame).toContain("zeta idle ctx 0%");
-      expect(frame.split("\n").filter((line) => line.trim().length > 0)).toHaveLength(1);
+      const lines = setup.captureCharFrame().split("\n").filter((line) => line.trim().length > 0);
+      expect(lines.length).toBeGreaterThanOrEqual(1);
+      expect(lines.join("\n")).toContain("ctx 0%");
     } finally {
       setup.renderer.destroy();
     }

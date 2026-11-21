@@ -22,13 +22,20 @@ import { createAgentSignals, type AgentSignals, type EventSource } from "./signa
 import { RichMessageList } from "./components/message";
 import { ZetaEditor } from "./components/editor";
 import { ViewportLayout } from "./components/layout-view";
-import { WorkIndicator } from "./components/status-border";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 function messageLine(message: RuntimeMessage): string {
   return `${message.role}: ${String(message.content)}`;
+}
+
+/** 编辑器上方的强调色分隔线（参考终端 UI 的输入区分隔样式）。 */
+function AccentSeparator() {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const w = createMemo(() => Math.max(1, dimensions().width));
+  return <text fg={theme.color("accent")}>{"─".repeat(w())}</text>;
 }
 
 export interface ZetaFrameProps {
@@ -58,6 +65,11 @@ export function ZetaApp(props: {
   readonly onExit: () => void;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
   readonly plugins?: readonly SolidPlugin<ZetaNativeSlots>[];
+  readonly resources?: Readonly<{
+    readonly models?: readonly string[];
+    readonly prompts?: readonly string[];
+    readonly extensions?: readonly string[];
+  }>;
 }) {
   const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
   const [overlayOpen, setOverlayOpen] = createSignal(false);
@@ -164,12 +176,14 @@ export function ZetaApp(props: {
       <ViewportLayout
         transcript={
           <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
-            {(sourceAccessor: () => EventSource) => <RichMessageList source={sourceAccessor()} />}
+            {(sourceAccessor: () => EventSource) => (
+              <RichMessageList source={sourceAccessor()} resources={props.resources} />
+            )}
           </Show>
         }
         dock={
           <>
-            <WorkIndicator source={props.source} />
+            <AccentSeparator />
             <ZetaEditor
               onSubmit={(text) => {
                 if (text === "exit" || text === "quit") {
@@ -180,7 +194,7 @@ export function ZetaApp(props: {
               }}
             />
             <BoundSlot name="footer" mode="replace">
-              <FooterBridge source={props.source} />
+              <FooterBridge source={props.source} model={props.title} />
             </BoundSlot>
           </>
         }

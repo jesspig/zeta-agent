@@ -8,7 +8,7 @@
 /** 扩展后的语义 token（前 8 个为既有基础 token，其余为高保真 UI 语义色）。 */
 export const SEMANTIC_TOKENS = [
   "accent", "text", "border", "muted", "error", "info", "warning", "thinking",
-  "background", "surface", "surfaceAlt", "overlay", "selectionBg", "selectionFg",
+  "background", "surface", "surfaceAlt", "overlay", "selectionBg", "selectionFg", "userMessageBg", "userMessageText",
   "success", "danger", "link", "code", "codeBg", "heading", "subtext", "faint",
   "diffAdded", "diffRemoved", "diffAddedBg", "diffRemovedBg", "diffContext",
   "toolPending", "toolSuccess", "toolError", "toolBorder", "toolBg",
@@ -147,6 +147,8 @@ export function generateOklchPalette(input: TerminalPaletteInput): GeneratedPale
     overlay: rgbToHex(mix(bg, fg, isDark ? 0.16 : 0.12)),
     selectionBg: rgbToHex(mix(bg, blue, isDark ? 0.35 : 0.25)),
     selectionFg: rgbToHex(fg),
+    userMessageBg: rgbToHex(mix(bg, blue, isDark ? 0.3 : 0.16)),
+    userMessageText: rgbToHex(fg),
     success: tone(green),
     danger: tone(red),
     link: tone(cyan),

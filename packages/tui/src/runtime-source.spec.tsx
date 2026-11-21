@@ -35,9 +35,9 @@ test("ZetaApp 在提供 source 时正确解包 Show accessor 并渲染富消息�
     { width: 50, height: 12 },
   );
   try {
-    await setup.waitForFrame((frame) => frame.includes("IDLE"));
+    await setup.waitForFrame((frame) => frame.includes("New session started"));
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("IDLE");
+    expect(frame).toContain("New session started");
     expect(frame).not.toContain("subscribe is not a function");
   } finally {
     setup.renderer.destroy();

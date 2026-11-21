@@ -76,11 +76,24 @@ export function contextColorToken(percent: number): "muted" | "warning" | "error
   return "muted";
 }
 
-/** 是否启用高保真三行布局：显式注入任意高保真字段时启用，否则保持单行兼容 T-02 视口。 */
+/** 默认启用高保真双行布局；仅在显式要求精简（model 为特殊占位）时回退单行。 */
 function isHighFidelity(props: FooterViewProps): boolean {
-  return [props.pwd, props.branch, props.session, props.metrics, props.provider, props.modelId, props.statusText].some(
-    (value) => value !== undefined,
-  );
+  return props.model !== "__compact__";
+}
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/** 从 .git/HEAD 读取当前分支名（无子进程），失败时返回 undefined。 */
+function detectBranch(pwd: string | undefined): string | undefined {
+  if (!pwd) return undefined;
+  try {
+    const head = readFileSync(join(pwd, ".git", "HEAD"), "utf8").trim();
+    const match = /^ref: refs\/heads\/(.+)$/.exec(head);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
 }
 
 export function FooterView(props: FooterViewProps) {
@@ -88,6 +101,7 @@ export function FooterView(props: FooterViewProps) {
   const dimensions = useTerminalDimensions();
   const width = () => Math.max(20, dimensions().width);
   const hiFi = () => isHighFidelity(props);
+  const branch = () => props.branch ?? detectBranch(props.pwd);
 
   const statusLabel = () => STATUS_TEXT[props.status] ?? props.status;
 
@@ -108,9 +122,12 @@ export function FooterView(props: FooterViewProps) {
   const rightMetrics = () => {
     const parts: string[] = [];
     if (props.provider) parts.push(props.provider);
-    if (props.modelId) parts.push(props.modelId);
-    const identity = parts.join("/");
-    return props.thinking ? `${identity}${identity ? " " : ""}thinking` : identity;
+    const model = props.modelId ?? props.model;
+    if (model) parts.push(model);
+    let identity = parts.join("/");
+    if (props.status) identity += ` ${statusLabel()}`;
+    if (props.thinking) identity += " thinking";
+    return identity.trim();
   };
 
   const statusLine = () => {
@@ -132,15 +149,28 @@ export function FooterView(props: FooterViewProps) {
     );
   }
 
+  const firstLine = () => {
+    const path = foldHome(props.pwd ?? "~", props.home ?? "");
+    const b = branch();
+    let base = b ? `${path} (${b})` : path;
+    if (props.session) base += ` • ${props.session}`;
+    // 无限宽时按终端宽度截断，避免路径换行挤占停靠区高度。
+    return base.length > width() ? `${base.slice(0, Math.max(1, width() - 1))}…` : base;
+  };
+
+  const secondLine = () => {
+    const stats = leftMetrics();
+    const ctx = `ctx ${props.budget.percent}%${stats.length > 0 ? "" : " (auto)"}`;
+    const statusNote = props.retry ?? props.statusText;
+    const right = `${ctx}  ${rightMetrics()}${statusNote ? ` ${statusNote}` : ""}`.trim();
+    if (stats.length === 0) return composeRow("", right, width());
+    return composeRow(stats, right, width());
+  };
+
   return (
-    <box flexDirection="column" flexShrink={0} height={3}>
-      <text fg={theme.color("muted")}>
-        {`${foldHome(props.pwd ?? "~", props.home ?? "")} (${props.branch ?? "-"}) ${props.session ?? props.model}`}
-      </text>
-      <text fg={theme.color(contextColorToken(props.budget.percent))}>
-        {composeRow(leftMetrics(), rightMetrics(), width())}
-      </text>
-      <text fg={theme.color("accent")}>{statusLine()}</text>
+    <box flexDirection="column" flexShrink={0} height={2}>
+      <text fg={theme.color("footerText")}>{firstLine()}</text>
+      <text fg={theme.color(contextColorToken(props.budget.percent))}>{secondLine()}</text>
     </box>
   );
 }
