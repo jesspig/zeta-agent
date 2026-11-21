@@ -75,10 +75,11 @@ flowchart TB
 
     subgraph FF["通用框架 @zeta-agent/framework —— 由组件拼装"]
         subgraph FFC["内部组件（不对外暴露）"]
-            CORDIS["Cordis 兼容组件<br/>effect/coeffect · fiber · target/committed"]
-            EV["events(5-mode) · scope · seam/registry"]
-            LD["loader(profile/bundle/patch) · HMR · store/link"]
-            OBS["HealthBoard · snapshot · channel · offloader"]
+            CORDIS["cordis：effect/coeffect · fiber · target/committed"]
+            EV["events（五模式派发）"]
+            CAP["capabilities（scope/seam/registry/health 并入）"]
+            LD["loader（profile/bundle/patch · HMR 并入）"]
+            OBS["observability · security（HealthBoard 等）"]
         end
         FFA["Facade API：createContext() · defineKey() · 组件装配 · 插件加载"]
     end

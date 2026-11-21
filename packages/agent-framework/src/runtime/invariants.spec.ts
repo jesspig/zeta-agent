@@ -13,13 +13,14 @@ import {
   type LoopRuntime,
   type ToolResult,
 } from "./loop";
-import { nextAction } from "./decision";
+import { createDecisionWaterfall, nextAction } from "./decision";
 import { createInitialState, reduceState } from "./agent";
 import { executeConditionalBatch, type ConditionalCall } from "../tools/parallel";
 import {
   createTerminationController,
   createToolRegistry,
   type ToolDescriptor,
+  type ToolExecuteContext,
 } from "../tools/pipeline";
 
 /**
@@ -114,10 +115,6 @@ function pair(
   return { id, name, legacy: () => body("legacy"), plugin: () => body("plugin") };
 }
 
-const pending = (_mode: "legacy" | "plugin"): void => {
-  expect(true).toBe(true);
-};
-
 const INVARIANT_NAMES = [
   "message-end-barrier", // #1
   "completion-order-decoupled", // #2
@@ -133,7 +130,7 @@ const INVARIANT_NAMES = [
   "system-single-source", // #12
 ] as const;
 
-// 逐条断言实现，按任务填充。占位来自 pending，T-02/T-03 在此替换。
+// 12 条真实行为断言（legacy/plugin 双版共享 body），缺任一 key 即抛错（见 cases 映射）。
 const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>> = {
   // ---- T-03：3 条部分覆盖完整化（先写 RED 断言）----
   // #1 message-end 屏障：工具执行前 listener 已观察到 assistant 的 message_end。
@@ -249,12 +246,19 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(getStreamCount()).toBeGreaterThanOrEqual(1);
     expect(getStreamCount()).toBeLessThanOrEqual(4);
   },
-  // #6 hook no-throw：决策钩子必须返回安全回退值，不抛错。
-  6: (mode) => {
+  // #6 hook no-throw：决策/转换钩子必须返回安全回退值而非抛错。
+  6: async (mode) => {
     const state = createInitialState({ messages: [{ role: "assistant", content: "x" }] });
+    // 纯函数路径：nextAction 永不抛错，返回三态之一。
+    expect(() => nextAction(state)).not.toThrow();
     const decision = nextAction(state);
-    // nextAction 永不抛错，返回三态之一。
     expect(["reasoning", "acting", "exit"]).toContain(decision.kind);
+    // 管线路径：合规 hook 返回安全回退值（exit），waterfall.run 正常完成不抛错。
+    const waterfall = createDecisionWaterfall();
+    waterfall.add((_decision, next) => next({ kind: "exit", reason: "safe-fallback" }));
+    const event: AgentEvent = { type: "turn_end", message: { role: "assistant", content: "x" }, toolResults: [] };
+    const result = await waterfall.run(decision, { state, event });
+    expect(result).toEqual({ kind: "exit", reason: "safe-fallback" });
     expect(typeof mode).toBe("string");
   },
   // #7 streamFn 不抛错：失败编码为 stopReason="error"，runLoop 正常收尾。
@@ -265,6 +269,37 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     await expect(runLoop(runtime)).resolves.toBeDefined();
     expect(order).toContain("agent_end");
   },
+  // #8 迟到 onUpdate 丢弃 + durationMs 只计 execute()：
+  //     工具 settle 后的 onUpdate 必须被丢弃；durationMs 只覆盖 execute() 区间。
+  8: async (mode) => {
+    const updates: unknown[] = [];
+    let captured: ToolExecuteContext | undefined;
+    let now = 0;
+    const registry = createToolRegistry();
+    const tool: ToolDescriptor = {
+      name: "streaming",
+      inputSchema: [],
+      outputSchema: ["ok"],
+      execute: (_input, exec) => {
+        captured = exec;
+        exec.onUpdate("early");
+        now += 5; // 仅 execute() 内耗时
+        return { ok: true };
+      },
+    };
+    registry.registerTool(tool);
+    const results = await executeConditionalBatch(
+      [{ id: "s", tool: "streaming", input: {} }],
+      { registry, clock: () => now, onUpdate: (u) => updates.push(u.partialResult) }
+    );
+    expect(updates).toEqual(["early"]);
+    // settle 后迟到的 onUpdate 必须被丢弃。
+    captured?.onUpdate("late");
+    expect(updates).toEqual(["early"]);
+    // durationMs 只计 execute()（5ms），不含后续 onUpdate/归约。
+    expect(results[0]?.durationMs).toBe(5);
+    expect(typeof mode).toBe("string");
+  },
   // #9 core 无持久化/provider 依赖：runtime 模块仅依赖类型与纯函数。
   9: (_mode) => {
     // 源码级约束：runtime/*.ts 只做类型导入与纯函数，不 import 持久化/provider 包。
@@ -274,17 +309,36 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(RUN_LOOP_STEPS).not.toContain("persist");
     expect(RUN_LOOP_STEPS).not.toContain("provider");
   },
-  // #11 runToolCall 嵌套调用走同一 hooks 但不发事件/不加消息：
-  //     decision waterfall 嵌套执行不改变事件数与消息数。
+  // #11 嵌套 hook 调用走同一管线但不发事件/不加消息：
+  //     waterfall 内嵌套 run 不产生额外 AgentEvent，消息数仅由正常 message_end 追加。
   11: async (mode) => {
+    let nestedRuns = 0;
     const { runtime, order, stream } = makeRuntime(mode, {
       response: { toolCalls: [], stopReason: "stop" },
+      ...(mode === "legacy"
+        ? { finishTurnLegacy: () => ({ action: "end" } as const) }
+        : {
+            decisionPlugin: (state, turn) => {
+              // 嵌套调用同一 hooks 管线：不 emit、不改 state.messages。
+              const nested = createDecisionWaterfall();
+              nested.add((_d, next) => next({ kind: "reasoning", note: "nested" }));
+              void nested.run(nextAction(state), {
+                state,
+                event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
+              });
+              nestedRuns += 1;
+              return { kind: "exit", reason: "done" };
+            },
+          }),
     });
     const before = stream.getState().messages.length;
     await runLoop(runtime);
-    // 全流程无嵌套事件泄漏：agent_end 恰一次，turn_end 次数与轮数一致。
+    if (mode === "plugin") expect(nestedRuns).toBe(1);
+    // 嵌套 hook 调用不发事件：agent_end 与 turn_end 各恰一次。
     expect(order.filter((e) => e === "agent_end")).toHaveLength(1);
-    expect(stream.getState().messages.length).toBeGreaterThanOrEqual(before);
+    expect(order.filter((e) => e === "turn_end")).toHaveLength(1);
+    // 消息仅由正常 assistant message_end 追加一次，嵌套调用不加消息。
+    expect(stream.getState().messages.length).toBe(before + 1);
   },
   // #12 system 消息单一事实源：reduceState 对 system 消息不重复入列，声明 delta 对齐。
   12: (_mode) => {
@@ -300,7 +354,9 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
 
 const cases: readonly InvariantCase[] = INVARIANT_NAMES.map((name, index) => {
   const id = index + 1;
-  const check = CHECKS[id] ?? pending;
+  // 严格门：12 条必须全部有真实断言，禁止 pending 空壳兜底（复核修复）。
+  const check = CHECKS[id];
+  if (check === undefined) throw new Error(`agent-core 不变量 #${id} 缺少真实断言`);
   return pair(id, name, check);
 });
 

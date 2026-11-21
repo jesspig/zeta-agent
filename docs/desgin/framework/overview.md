@@ -11,9 +11,9 @@
 
 ## 1 定位与设计目标
 
-`@zeta-agent/framework` 是**通用框架**：它**由多个内部组件拼装而成**，对外暴露封装好的 facade API。Cordis 论文复刻只是其中**一个组件**（`components/cordis/`，提供 effect/coeffect/fiber 语义），**不是框架全部**——这是与早期草案的关键区别。框架的其他内部组件还包括 events（五模式派发）、scope、seam/registry、loader（配置分层）、HMR、store/link、HealthBoard 等。S12 的 `vendor/cordis/src/*` 是 `cordis` 组件的一手复刻蓝本；其 `packages/boot/*` 等是通用框架其他组件的蓝本。
+`@zeta-agent/framework` 是**通用框架**：它由 **6 个内部组件子包**拼装而成（`components/cordis`、`events`、`capabilities`、`loader`、`observability`、`security`，见 [§2](#2-包结构与导出)），对外暴露封装好的 facade API。Cordis 论文复刻只是其中**一个组件**（`components/cordis/`，提供 effect/coeffect/fiber 语义），**不是框架全部**——这是与早期草案的关键区别。scope/seam/registry/health 职责并入 `capabilities`，HMR 并入 `loader`，observability/security 分别提供观测与安全能力；store/link/objects 等数据/跨进程组件暂未实现（YAGNI）。S12 的 `vendor/cordis/src/*` 是 `cordis` 组件的一手复刻蓝本；其 `packages/boot/*` 等是通用框架其他组件的蓝本。
 
-> **依赖边界（重要）**：本组件是对论文的**自行实现**，**不引入任何上游 Cordis 包**（`cordis`、`@cordisjs/*`、`@deepseek-ai/cordis` 均不进依赖树）。`@zeta-agent/cordis`（及 C 方案下的 `packages/components/cordis/`）只是我们对该组件的命名；S12 源码仅作只读蓝本，不进入构建产物。本文出现的 `@cordisjs/group`、`@cordisjs/include`、`@cordisjs/hmr` 等名称均出自[01 论文精读](../research/cordis-paper-theory.md)对上游 Cordis 的描述，**不是我们的依赖**，对应的实现由我们的 `components/loader`、`components/hmr` 以自研方式提供。
+> **依赖边界（重要）**：本组件是对论文的**自行实现**，**不引入任何上游 Cordis 包**（`cordis`、`@cordisjs/*`、`@deepseek-ai/cordis` 均不进依赖树）。`@zeta-agent/cordis`（及 C 方案下的 `packages/components/cordis/`）只是我们对该组件的命名；S12 源码仅作只读蓝本，不进入构建产物。本文出现的 `@cordisjs/group`、`@cordisjs/include`、`@cordisjs/hmr` 等名称均出自[01 论文精读](../research/cordis-paper-theory.md)对上游 Cordis 的描述，**不是我们的依赖**，对应的实现由我们的 `components/loader`（HMR 已并入）以自研方式提供。
 
 > **API 边界**：上层应用（CLI / TUI / 未来形态）与 Agent 框架**只通过 facade** 使用本框架（`src/index.ts` 导出的 `createContext` / `defineKey` / `defineComponent` / `ctx.use` / `ctx.on` / `loader.load` 等），**不得 import `src/components/**` 内部组件**。内部组件之间可互相组合，但对内不对外。详见 [framework-model/engineering §4](../architecture/framework-model.md#4-两个框架与应用形态组件拼装模型)。
 
