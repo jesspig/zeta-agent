@@ -85,10 +85,13 @@ interface RendererBackend {
 function createTui(options?: { backend?: RendererBackend }): TuiHandle;
 ```
 
-- **唯一发布实现**：`OpenTuiBackend`（默认），用真实 `@opentui/solid@0.9.3` 官方 `testRender` 与 Solid slots；OpenTUI 调用只出现在 `backend-opentui.tsx`。
+- **唯一发布实现**：`OpenTuiBackend`（默认）；OpenTUI 原生调用集中在 `backend-opentui.tsx`（`testRender`）与 `runtime.tsx`（`renderTui`）。三条渲染路径如实区分（见下方"渲染路径"）。
 - **seam 面向用户**：用不惯 OpenTUI 的用户可自带 Ink / TermUI / 纯 REPL 后端，经 `createTui({ backend })` 注入，遵循同一契约即可替换；仓库不发布这些替代实现。
 - **共享契约测试**：`backendContractTests(factory)` 对任意后端跑同一组断言（定宽定高、帧快照稳定、destroy 幂等），只用 `FrameState` 抽象不引用 OpenTUI 类型。
-- **真实运行时入口**：`renderTui(options)` 用 OpenTUI 官方 `render()` + 自建 `CliRenderer` + Solid signal + `<box>/<scrollbox>/<text>/<input>` 在终端原生绘制；返回 `RuntimeTuiHandle`（`appendMessage` / `waitForExit` / `destroy`）。CLI 的交互 TUI 默认走此路径，不再有任何自研 ASCII 字符串渲染（原 `frame.ts` 的 `+---+` 边框已删除）。
+- **渲染路径（三条，如实定位）**：
+  - `OpenTuiBackend.render(frame)`：**无终端环境下的稳定字符串快照投影**——对 `FrameState.lines/hud` 做定宽裁剪/补齐后 `join("\n")` 得到 `Frame.snapshot`，**不调用任何 OpenTUI/native API**。供快照断言与无 TTY 场景使用，不声称是原生渲染。
+  - `OpenTuiBackend.testRender(node)`：包装 `@opentui/solid` 官方 `testRender`（`renderOnce` → `captureCharFrame` → `renderer.destroy`），用于真实帧快照稳定性测试。
+  - `renderTui(options)`：OpenTUI 官方 `render()` + 自建 `CliRenderer` + Solid signal + `<box>/<scrollbox>/<text>/<input>` 终端原生绘制；返回 `RuntimeTuiHandle`（`appendMessage` / `waitForExit` / `destroy`）。CLI 交互 TUI 默认走此路径；早期画 `+---+` 边框的 ASCII `frame.ts` 已删除。
 - **边界**：业务组件（`slots/signal/virtual/hud/frame-state/backend`）零直接 import `@opentui/solid`，由 `scripts/guard-architecture.mjs` 静态守护。
 
 ## 4 AgentEvent → Solid signal 映射
@@ -127,6 +130,8 @@ export function createAgentSignals(agent: Agent) {
 
 
 ## 5 插件 UI 槽位
+
+> **实现状态（T-09 延期结论）**：以下官方 Solid slots 代码是**目标设计/事实 API 参考**，**非当前发布实现**。当前 `packages/tui/src/slots.ts` 是自研字符串注册表（`SlotRegistry`/`createSlotRegistry`，返回 `string`），作为 facade 契约。官方 `createSolidSlotRegistry` 需要 native `CliRenderer` + `PluginContext`、返回 `JSX.Element`，与 string 契约及"业务组件零 @opentui import"守护冲突，故适配**延期**（O-2，见 D-04 延期结论）；官方 API 仅在 `renderTui()` 的 TSX 渲染路径内按需使用，不作为发布 facade。
 
 使用 OpenTUI 官方 Solid slots（事实 API）：
 
