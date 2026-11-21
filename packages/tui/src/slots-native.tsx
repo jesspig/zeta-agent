@@ -10,6 +10,7 @@ import type {
   SlotRegistry as CoreSlotRegistry,
 } from "@opentui/core";
 import type { JSX } from "@opentui/solid";
+import { useRenderer as useRendererFromSolid } from "@opentui/solid";
 import type {
   SolidPlugin,
   SolidSlotProps,
@@ -18,6 +19,22 @@ import type {
 } from "@opentui/solid";
 
 type SlotMap = Record<string, object>;
+
+/** 生产官方 Solid 槽位：插件可 replace/extend 这些 UI 区域。 */
+export interface ZetaNativeSlots {
+  readonly [key: string]: object;
+  readonly header: object;
+  readonly footer: object;
+  readonly message: object;
+  readonly tool: object;
+  readonly editor: object;
+  readonly overlay: object;
+  readonly hud: object;
+}
+
+export const ZETA_NATIVE_SLOT_NAMES: readonly (keyof ZetaNativeSlots)[] = Object.freeze([
+  "header", "footer", "message", "tool", "editor", "overlay", "hud",
+]);
 
 export type {
   SolidPlugin,
@@ -69,4 +86,17 @@ export function Slot<
   K extends keyof TSlots = keyof TSlots,
 >(props: SolidSlotProps<TSlots, K, TContext>): JSX.Element {
   return OfficialSlot<TSlots, TContext, K>(props);
+}
+
+/**
+ * 生产 App 的官方槽位绑定：基于当前 renderer 创建注册表，注册插件并返回绑定后的 Slot 组件。
+ * 插件 replace/extend 失败时官方注册表保留基础内容（closure rule）。
+ */
+export function useZetaSlots(plugins: readonly SolidPlugin<ZetaNativeSlots>[] = []) {
+  // useRenderer 必须在渲染上下文调用；此处经动态读取避免额外 import 依赖。
+  const renderer = useRendererFromSolid();
+  const registry = createSolidSlotRegistry<ZetaNativeSlots>(renderer, {});
+  for (const plugin of plugins) registry.register(plugin);
+  const BoundSlot = createSlot<ZetaNativeSlots>(registry);
+  return { registry, BoundSlot };
 }

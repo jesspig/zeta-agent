@@ -1,4 +1,6 @@
 import type { AgentSignals, EventSource } from "./signal";
+import type { SolidPlugin } from "./slots-native";
+import type { ZetaNativeSlots } from "./slots-native";
 
 export interface RuntimeMessage {
   readonly role: string;
@@ -16,6 +18,7 @@ export interface RuntimeTuiOptions {
   readonly source?: EventSource;
   readonly commands?: CommandHandler;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
+  readonly plugins?: readonly SolidPlugin<ZetaNativeSlots>[];
   readonly theme?: TuiThemeName;
   readonly mode?: "regular" | "fullscreen";
 }

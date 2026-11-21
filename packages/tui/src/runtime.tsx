@@ -9,6 +9,8 @@ import { FooterBridge } from "./components/footer-bridge";
 import { ThemeProvider, useTheme } from "./theme-context";
 import { createOscBridge } from "./osc";
 import { CommandPaletteView } from "./command-palette";
+import { useZetaSlots, type ZetaNativeSlots } from "./slots-native";
+import type { SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
@@ -47,10 +49,12 @@ export function ZetaApp(props: {
   readonly onSubmit?: (text: string) => void | Promise<void>;
   readonly onExit: () => void;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
+  readonly plugins?: readonly SolidPlugin<ZetaNativeSlots>[];
 }) {
   const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
   const [overlayOpen, setOverlayOpen] = createSignal(false);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const { BoundSlot } = useZetaSlots(props.plugins);
   props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
 
   const keymap = createKeymap();
@@ -118,7 +122,9 @@ export function ZetaApp(props: {
           return props.onSubmit?.(text);
         }}
       />
-      <FooterBridge source={props.source} />
+      <BoundSlot name="footer" mode="replace">
+        <FooterBridge source={props.source} />
+      </BoundSlot>
       <Show when={overlayOpen()}>
         <ConfirmOverlay
           message="确定退出？"
@@ -191,6 +197,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
           }}
           onSubmit={onSubmit}
           commandList={options.commandList}
+          plugins={options.plugins}
           onExit={() => {
             options.onExit?.();
             exit();
