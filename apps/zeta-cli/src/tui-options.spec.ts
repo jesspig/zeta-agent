@@ -19,6 +19,7 @@ describe("T-13 CLI TUI 选项接线（FR-12/14）", () => {
     expect(typeof options.commands).toBe("function");
     expect(options.mode).toBeDefined();
     expect(typeof options.onSubmit).toBe("function");
+    expect(options.commandList?.length).toBeGreaterThan(0);
   });
 
   test("commands 处理器对斜杠命令分派", () => {
@@ -28,8 +29,5 @@ describe("T-13 CLI TUI 选项接线（FR-12/14）", () => {
     options.commands?.("/help");
     expect(handled).toContain("/help");
   });
-
-  test("headless 分派不加载 TUI：mode 由 main 决定", () => {
-    expect(["tui", "print", "json", "rpc"]).toContain("json");
-  });
 });
+

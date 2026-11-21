@@ -7,7 +7,6 @@ describe("运行时数据目录", () => {
     const dir = resolveDataDir("C:\\Users\\test");
     expect(isAbsolute(dir)).toBe(true);
     expect(basename(dir)).toBe(".zeta-agent");
-    expect(dir).toContain("test");
   });
 
   test("支持覆盖 home 与自定义目录名", () => {

@@ -4,4 +4,5 @@ export * from "./virtual";
 export * from "./hud";
 export * from "./frame-state";
 export * from "./backend";
+export * from "./slots-native";
 export * from "./runtime";

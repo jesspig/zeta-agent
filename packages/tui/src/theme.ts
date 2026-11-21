@@ -1,7 +1,9 @@
 export type ThemeName = "system" | "dark" | "light";
-export type ColorToken = "accent" | "text" | "border" | "muted" | "error";
+export type ColorToken = "accent" | "text" | "border" | "muted" | "error" | "info" | "warning" | "thinking";
 
-const REQUIRED_TOKENS: readonly ColorToken[] = ["accent", "text", "border", "muted", "error"];
+const REQUIRED_TOKENS: readonly ColorToken[] = [
+  "accent", "text", "border", "muted", "error", "info", "warning", "thinking",
+];
 
 type Palette = Readonly<Record<ColorToken, string>>;
 
@@ -11,6 +13,9 @@ const DARK_PALETTE: Palette = {
   border: "#30363d",
   muted: "#8b949e",
   error: "#ff7b72",
+  info: "#58a6ff",
+  warning: "#d29922",
+  thinking: "#d2a8ff",
 };
 
 const LIGHT_PALETTE: Palette = {
@@ -19,6 +24,9 @@ const LIGHT_PALETTE: Palette = {
   border: "#d0d7de",
   muted: "#656d76",
   error: "#cf222e",
+  info: "#0969da",
+  warning: "#9a6700",
+  thinking: "#8250df",
 };
 
 export interface Theme {

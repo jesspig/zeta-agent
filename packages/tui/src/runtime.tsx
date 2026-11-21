@@ -5,8 +5,12 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { createKeymap } from "./keymap";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
-import { FooterView } from "./components/footer";
-import { contextBudget } from "./hud";
+import { FooterBridge } from "./components/footer-bridge";
+import { ThemeProvider, useTheme } from "./theme-context";
+import { createOscBridge } from "./osc";
+import { CommandPaletteView } from "./command-palette";
+import { useZetaSlots, type ZetaNativeSlots } from "./slots-native";
+import type { SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
@@ -25,9 +29,10 @@ export interface ZetaFrameProps {
 }
 
 export function ZetaFrame(props: ZetaFrameProps) {
+  const theme = useTheme();
   return (
     <box flexDirection="column" width="100%" height="100%">
-      <text fg="#7ee787">{props.title}</text>
+      <text fg={theme.color("accent")}>{props.title}</text>
       <box height={1} />
       <scrollbox flexGrow={1}>
         <For each={props.lines}>{(line) => <text>{line}</text>}</For>
@@ -43,26 +48,52 @@ export function ZetaApp(props: {
   readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
   readonly onSubmit?: (text: string) => void | Promise<void>;
   readonly onExit: () => void;
+  readonly commandList?: readonly { readonly id: string; readonly title: string }[];
+  readonly plugins?: readonly SolidPlugin<ZetaNativeSlots>[];
 }) {
   const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
   const [overlayOpen, setOverlayOpen] = createSignal(false);
+  const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const { BoundSlot } = useZetaSlots(props.plugins);
   props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
 
   const keymap = createKeymap();
   keymap.register({ combo: "escape", action: "overlay", layer: "tui" });
   keymap.register({ combo: "ctrl+c", action: "exit", layer: "tui" });
-  keymap.register({ combo: "ctrl+k", action: "confirm", layer: "app" });
+  // pi 语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
+  keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
+  keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
 
   const dimensions = useTerminalDimensions();
   const width = createMemo(() => clampWidth(100, dimensions().width));
 
   useKeyboard((key) => {
+    if (key.eventType === "release") return;
     const combo = key.ctrl ? `ctrl+${key.name}` : key.name;
     const action = keymap.resolve(combo)?.action;
     if (action === "exit") {
       props.onExit();
-    } else if (action === "overlay" || action === "confirm") {
+      return;
+    }
+    if (action === "overlay") {
+      // Esc 只负责取消/关闭，避免与 toggle 重复导致 overlay 关不掉。
+      setOverlayOpen(false);
+      return;
+    }
+    if (action === "confirm") {
       setOverlayOpen((open) => !open);
+      return;
+    }
+    if (action === "palette") {
+      setPaletteOpen((open) => !open);
+      return;
+    }
+    // overlay 打开时按 pi 语义处理：Enter 确认。
+    if (overlayOpen() && key.name === "return") {
+      key.preventDefault();
+      key.stopPropagation();
+      setOverlayOpen(false);
+      props.onExit();
     }
   });
 
@@ -91,7 +122,9 @@ export function ZetaApp(props: {
           return props.onSubmit?.(text);
         }}
       />
-      <FooterView model="zeta" status="ready" budget={contextBudget(0, 1)} />
+      <BoundSlot name="footer" mode="replace">
+        <FooterBridge source={props.source} />
+      </BoundSlot>
       <Show when={overlayOpen()}>
         <ConfirmOverlay
           message="确定退出？"
@@ -100,6 +133,16 @@ export function ZetaApp(props: {
             props.onExit();
           }}
           onCancel={() => setOverlayOpen(false)}
+        />
+      </Show>
+      <Show when={paletteOpen()}>
+        <CommandPaletteView
+          commands={props.commandList ?? []}
+          onRun={(command) => {
+            setPaletteOpen(false);
+            void props.onSubmit?.(`/${command.id}`);
+          }}
+          onCancel={() => setPaletteOpen(false)}
         />
       </Show>
     </>
@@ -123,6 +166,10 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const signals: AgentSignals | undefined = options.source
     ? createAgentSignals(options.source)
     : undefined;
+  // OSC 7501/9;4：向终端上报工作状态与进度；退出时复位为 done。
+  const releaseOsc = signals
+    ? createOscBridge(signals, (sequence) => process.stdout.write(sequence))
+    : undefined;
 
   const onSubmit = (text: string): void | Promise<void> => {
     if (options.commands && text.startsWith("/")) {
@@ -132,6 +179,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   };
 
   const exit = () => {
+    releaseOsc?.();
     signals?.dispose();
     renderer.destroy();
     resolveClosed();
@@ -139,19 +187,23 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
 
   await openTuiRender(
     () => (
-      <ZetaApp
-        title={options.title ?? "zeta"}
-        messages={options.messages ?? []}
-        source={options.source}
-        onPush={(sink) => {
-          push = sink;
-        }}
-        onSubmit={onSubmit}
-        onExit={() => {
-          options.onExit?.();
-          exit();
-        }}
-      />
+      <ThemeProvider initial={options.theme ?? "dark"}>
+        <ZetaApp
+          title={options.title ?? "zeta"}
+          messages={options.messages ?? []}
+          source={options.source}
+          onPush={(sink) => {
+            push = sink;
+          }}
+          onSubmit={onSubmit}
+          commandList={options.commandList}
+          plugins={options.plugins}
+          onExit={() => {
+            options.onExit?.();
+            exit();
+          }}
+        />
+      </ThemeProvider>
     ),
     renderer,
   );

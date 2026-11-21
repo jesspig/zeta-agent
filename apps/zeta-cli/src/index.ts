@@ -37,8 +37,16 @@ function echoStream(): AgentStreamFn {
 }
 
 function makeAgent(): Agent {
-  const config = resolveModelConfig(process.env);
-  const streamFn: AgentStreamFn = config !== null ? createOpenAiStreamFn(config) : echoStream();
+  const resolution = resolveModelConfig(process.env);
+  let streamFn: AgentStreamFn;
+  if (resolution.kind === "configured") {
+    streamFn = createOpenAiStreamFn(resolution.config);
+  } else {
+    process.stderr.write(
+      `zeta: 模型配置缺失 ${resolution.missing.join(", ")}，回退 echo（无网络）。设置这三项以连接真实模型。\n`,
+    );
+    streamFn = echoStream();
+  }
   return createAgent({ streamFn });
 }
 
