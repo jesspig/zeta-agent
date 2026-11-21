@@ -9,7 +9,7 @@ const CONTEXT_LIMIT = 128000;
 export interface FooterBridgeProps {
   readonly source?: EventSource;
   readonly model?: string;
-  /** 高保真扩展：真实 token/成本来自 Agent 后由此注入；当前缺省登记为占位。 */
+  /** 遥测覆盖：真实 token/成本/分支来自宿主时由此注入。 */
   readonly telemetry?: {
     readonly pwd?: string;
     readonly home?: string;
@@ -29,7 +29,14 @@ const STATUS_LABEL: Readonly<Record<string, string>> = {
   blocked: "blocked",
 };
 
-/** 把 AgentSignals 桥接为真实状态栏：status/statusMessage 来自事件，budget 由消息数估算。 */
+/** 从进程环境推断默认路径信息，使默认界面即呈现双行高保真 footer。 */
+function defaultTelemetry() {
+  const pwd = typeof process !== "undefined" ? process.cwd() : "";
+  const home = typeof process !== "undefined" ? (process.env.USERPROFILE ?? process.env.HOME ?? "") : "";
+  return { pwd, home };
+}
+
+/** 把 AgentSignals 桥接为真实状态栏：默认即双行高保真布局。 */
 export function FooterBridge(props: FooterBridgeProps) {
   const [status, setStatus] = createSignal<AgentStatus>("idle");
   const [statusMessage, setStatusMessage] = createSignal<StatusMessage>(null);
@@ -51,6 +58,7 @@ export function FooterBridge(props: FooterBridgeProps) {
   const budget = (): ContextBudget =>
     contextBudget(messageCount() * ESTIMATED_TOKENS_PER_MESSAGE, CONTEXT_LIMIT);
 
+  const defaults = defaultTelemetry();
   const telemetry = props.telemetry;
 
   return (
@@ -60,13 +68,13 @@ export function FooterBridge(props: FooterBridgeProps) {
       budget={budget()}
       retry={STATUS_LABEL[statusMessage() ?? ""] || undefined}
       statusText={telemetry ? STATUS_LABEL[statusMessage() ?? ""] || undefined : undefined}
-      pwd={telemetry?.pwd}
-      home={telemetry?.home}
+      pwd={telemetry?.pwd ?? defaults.pwd}
+      home={telemetry?.home ?? defaults.home}
       branch={telemetry?.branch}
       session={telemetry?.session}
       metrics={telemetry?.metrics}
       provider={telemetry?.provider}
-      modelId={telemetry?.modelId}
+      modelId={telemetry?.modelId ?? props.model}
       thinking={telemetry?.thinking}
     />
   );

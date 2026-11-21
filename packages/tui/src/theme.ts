@@ -16,6 +16,8 @@ const DARK_BASE: Partial<Palette> = {
   info: "#58a6ff",
   warning: "#d29922",
   thinking: "#d2a8ff",
+  userMessageBg: "#1f3a54",
+  userMessageText: "#d7e6f5",
 };
 
 const LIGHT_BASE: Partial<Palette> = {
@@ -27,6 +29,8 @@ const LIGHT_BASE: Partial<Palette> = {
   info: "#0969da",
   warning: "#9a6700",
   thinking: "#8250df",
+  userMessageBg: "#d9e7f5",
+  userMessageText: "#1f2328",
 };
 
 const DEFAULT_DARK_INPUT: TerminalPaletteInput = {

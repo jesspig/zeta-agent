@@ -12,7 +12,7 @@ test("U-06 DiffView 通过 RichMessageList.diffs 接入消息流", async () => {
         diffs={[{ before: "the quick fox\nshared", after: "the slow fox\nshared" }]}
       />
     ),
-    { width: 50, height: 20 },
+    { width: 50, height: 30 },
   );
   try {
     await setup.waitForFrame((frame) => frame.includes("+ the slow fox"));

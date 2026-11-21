@@ -14,7 +14,7 @@ const setup = await testRender(() => <MessageList source={source as never} />, {
 try {
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  if (!frame.includes("IDLE")) throw new Error(`UNEXPECTED_FRAME: ${frame}`);
+  if (!frame.includes("New session started")) throw new Error(`UNEXPECTED_FRAME: ${frame}`);
   console.log("RENDER_OK");
 } finally {
   setup.renderer.destroy();
