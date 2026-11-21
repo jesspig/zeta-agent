@@ -131,8 +131,10 @@
       "version": "0.0.0",
       "dependencies": {
         "@opentui/core": "0.9.3",
+        "@opentui/solid": "0.9.3",
         "@zeta-agent/agent": "workspace:*",
         "@zeta-agent/framework": "workspace:*",
+        "solid-js": "^1.9.16",
       },
     },
   },
