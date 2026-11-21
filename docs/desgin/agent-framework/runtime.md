@@ -29,9 +29,11 @@ export type AgentEvent =
   | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError: boolean; durationMs?: number };
 ```
 
-> **P0 修订（[10 CORE-1](../research/dsh-optimizations.md#3-核心运行时优化core)）**：事件**派发模式是一等契约**，不再默认全部按序 await。定义 `DispatchMode = 'emit'|'parallel'|'serial'|'bail'|'waterfall'`。建议映射：`message_end`/`tool_execution_end`→`emit`（快速通知）、`beforeToolCall`/`afterToolCall`/`prepareRequest`→`waterfall`（around + `next()`，缺 next 短路）、`agent_end` 屏障→`serial`（依次 await）。
+> **派发模式定位（澄清）**：**agent runtime 固定串行派发**——`createEventStream().dispatch` 按 listener 注册顺序逐个 `await`（实现见 `packages/agent-framework/src/runtime/agent.ts`），`AgentEvent` 不携带 `DispatchMode` 字段，`agent_end` 后 `waitForIdle` 等待全部 listener 完成。这是 agent-core 的确定性屏障语义（[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单)），不可配置。
 >
-> **来源校正（[cordis 源码验证](../research/cordis-source-verification.md)）**：五模式本身是 cordis 官方事实（`packages/core/src/events.ts`）；但**`@mode` 装饰器是 deepseek-harness 变体的做法，官方不存在**。官方静态约束来自 `interface Events` 的 TypeScript 声明合并 + `@ts-expect-error` 类型测试。我们采用声明合并方案，`@mode` 仅作变体参考。`parallel` 模式须用 `Promise.allSettled` 聚合成 `AggregateError`（官方行为），不要简单 `Promise.all`。
+> **五模式的适用范围**：`DispatchMode = 'emit'|'parallel'|'serial'|'bail'|'waterfall'` 是 [cordis 官方事件总线](https://github.com/earendil-works/cordis)（`packages/core/src/events.ts`）的能力，**仅在 framework 的通用事件组件中提供**，供需要非串行派发的场景使用；它**不是 agent runtime 的契约**，不接线到 agent 的 `AgentEvent` 派发。决策见 D-03（`.handoff/discussions/2026-11-21-dispatch-and-unload.md`，默认不接线；如用户确需接线另行裁决）。
+>
+> **来源校正（[cordis 源码验证](../research/cordis-source-verification.md)）**：五模式本身是 cordis 官方事实；但**`@mode` 装饰器是 deepseek-harness 变体的做法，官方不存在**。官方静态约束来自 `interface Events` 的 TypeScript 声明合并 + `@ts-expect-error` 类型测试。我们采用声明合并方案，`@mode` 仅作变体参考。`parallel` 模式须用 `Promise.allSettled` 聚合成 `AggregateError`（官方行为），不要简单 `Promise.all`。`@mode` 作为变体参考的历史注记保留，但不表示 agent 事件支持该字段。
 
 保持两条铁律（[pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单)）：
 
