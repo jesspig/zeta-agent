@@ -1,12 +1,20 @@
 import {
   createEventStream,
+  createInbox,
+  runLoop,
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
   type AgentState,
+  type AssistantMessageEvent,
+  type AssistantResult,
   type Capabilities,
   type EffectMeta,
+  type Inbox,
+  type LoopRuntime,
   type RedactRule,
+  type ToolCall,
+  type ToolResult,
 } from "@zeta-agent/agent-framework";
 import type { Disposer } from "@zeta-agent/framework";
 import {
@@ -237,32 +245,118 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   let aborted = false;
 
+  // 模型在纯文本流中用该标记请求工具调用（stub 期间尚无结构化 tool-call 通道）。
+  const TOOL_MARKER_RE = /@@TOOL:([A-Za-z0-9_.:-]+):(.*?)@@/g;
+  // 与 runLoop 的默认终局判断相反：无工具调用的单轮也应结束，而非显式续跑。
+  const TURN_END_DECISION = { action: "end" } as const;
+  // 工具结果仅回传本地执行信息，不重新进入模型（避免 stub 下的无限续跑）。
+  const NO_TOOL_RESULT = "";
+
+  /** 把已拼接的文本投影为 message_update 所需的流式部分快照。 */
+  function textSnapshot(content: string): AssistantMessageEvent {
+    return { type: "text_delta", delta: content };
+  }
+
   async function runTurn(userText?: string): Promise<readonly AgentMessage[]> {
     if (aborted) return stream.getState().messages;
     await stream.emit({ type: "agent_start" });
-    await stream.emit({ type: "turn_start" });
 
-    if (userText !== undefined) {
-      const message: AgentMessage = { role: "user", content: userText };
-      await stream.emit({ type: "message_start", message });
-      await stream.emit({ type: "message_end", message });
+    const inbox: Inbox = createInbox();
+    if (userText !== undefined) inbox.steer({ role: "user", content: userText });
+
+    const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>>();
+    for (const item of contributions) {
+      if (item.kind !== "tool") continue;
+      const tool = item.tool;
+      toolRegistry.set(tool.name, () => (tool.execute as (input: never) => unknown)(undefined as never));
     }
 
-    if (streamFn !== undefined) {
-      let content = "";
-      for await (const chunk of streamFn({ messages: stream.getState().messages })) {
-        content += chunk;
-      }
-      const message: AgentMessage = { role: "assistant", content };
-      await stream.emit({ type: "message_start", message });
-      await stream.emit({ type: "message_end", message });
-    }
+    const runtime: LoopRuntime = {
+      inbox,
+      emit: (event) => stream.emit(event),
+      getState: () => stream.getState(),
 
-    const last = stream.getState().messages.at(-1);
-    if (last !== undefined) {
-      await stream.emit({ type: "turn_end", message: last, toolResults: [] });
-    }
-    await stream.emit({ type: "agent_end", messages: stream.getState().messages });
+      async streamAssistant(): Promise<AssistantResult> {
+        const updates: AssistantMessageEvent[] = [];
+        let content = "";
+        if (streamFn !== undefined) {
+          for await (const chunk of streamFn({ messages: stream.getState().messages })) {
+            if (aborted) {
+              return {
+                message: { role: "assistant", content },
+                toolCalls: [],
+                stopReason: "aborted",
+                updates,
+              };
+            }
+            content += chunk;
+            updates.push(textSnapshot(content));
+          }
+        }
+
+        const toolCalls: ToolCall[] = [];
+        if (!aborted) {
+          for (const match of content.matchAll(TOOL_MARKER_RE)) {
+            const name = match[1];
+            if (name === undefined) continue;
+            let args: unknown = {};
+            try {
+              args = JSON.parse(match[2] ?? "{}") as unknown;
+            } catch {
+              // 参数非法时按空对象处理，由工具实现决定如何拒绝。
+            }
+            toolCalls.push({ id: `call-${toolCalls.length + 1}`, name, args });
+          }
+        }
+
+        return {
+          message: { role: "assistant", content: content.replace(TOOL_MARKER_RE, "") },
+          toolCalls,
+          stopReason: aborted ? "aborted" : "stop",
+          updates,
+        };
+      },
+
+      async executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]> {
+        const results: ToolResult[] = [];
+        for (const [index, call] of calls.entries()) {
+          const updates = [{ partialResult: `executing ${call.name}` }];
+          const execute = toolRegistry.get(call.name);
+          let isError = false;
+          let output: unknown = NO_TOOL_RESULT;
+          if (execute === undefined) {
+            isError = true;
+            output = "TOOL_NOT_FOUND";
+          } else if (aborted) {
+            isError = true;
+            output = "ABORTED";
+          } else {
+            try {
+              const value = await execute(
+                typeof call.args === "object" && call.args !== null
+                  ? (call.args as Readonly<Record<string, unknown>>)
+                  : {}
+              );
+              output = value === undefined ? NO_TOOL_RESULT : value;
+            } catch (error) {
+              isError = true;
+              output = error instanceof Error ? error.message : String(error);
+            }
+          }
+          results.push({
+            callId: call.id || `call-${index + 1}`,
+            message: { role: "toolResult", content: output },
+            isError,
+            updates,
+          });
+        }
+        return results;
+      },
+
+      finishTurn: () => TURN_END_DECISION,
+    };
+
+    await runLoop(runtime);
     return stream.getState().messages;
   }
 
