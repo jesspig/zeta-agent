@@ -2,10 +2,12 @@ import { spawnSync } from "node:child_process";
 
 const argPass = process.argv.find((a) => a.startsWith("--pass="));
 const argFiles = process.argv.find((a) => a.startsWith("--files="));
+// T-12 收口基线：2026-11-21 全量验证 283 pass / 0 fail / 51 files。
+// 下限保护：当前通过数/文件数不得低于基线，确保新增测试不掩盖回归。
 const BASELINE = {
-  pass: argPass ? Number(argPass.split("=")[1]) : 234,
+  pass: argPass ? Number(argPass.split("=")[1]) : 283,
   fail: 0,
-  files: argFiles ? Number(argFiles.split("=")[1]) : 44,
+  files: argFiles ? Number(argFiles.split("=")[1]) : 51,
 };
 const CORE_PACKAGES = [
   "@zeta-agent/cordis",
