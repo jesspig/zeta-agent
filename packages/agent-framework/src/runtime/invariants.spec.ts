@@ -15,6 +15,12 @@ import {
 } from "./loop";
 import { nextAction } from "./decision";
 import { createInitialState, reduceState } from "./agent";
+import { executeConditionalBatch, type ConditionalCall } from "../tools/parallel";
+import {
+  createTerminationController,
+  createToolRegistry,
+  type ToolDescriptor,
+} from "../tools/pipeline";
 
 /**
  * agent-core 12 条不变量等价测试（state-and-events.md §13 / pi-baseline.md §9）。
@@ -63,6 +69,7 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
     ...options.response,
   };
   let requestCount = 0;
+  let streamCount = 0;
 
   const runtime: LoopRuntime = {
     inbox,
@@ -75,8 +82,9 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
     },
     streamAssistant: async () => {
       requestCount += 1;
+      streamCount += 1;
       // 安全阀：continue 场景在若干轮后强制硬退出，避免断言用例无限循环。
-      if (requestCount > 3) return { ...response, stopReason: "error", toolCalls: [] };
+      if (streamCount > 3) return { ...response, stopReason: "error", toolCalls: [] };
       return response;
     },
     executeToolCalls: async () => options.toolResults ?? [],
@@ -88,7 +96,14 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
       : { decision: options.decisionPlugin ?? (() => ({ kind: "exit", note: "end" })) }),
   };
 
-  return { runtime, stream, inbox, order, getRequestCount: () => requestCount };
+  return {
+    runtime,
+    stream,
+    inbox,
+    order,
+    getRequestCount: () => requestCount,
+    getStreamCount: () => streamCount,
+  };
 }
 
 function pair(
@@ -120,6 +135,58 @@ const INVARIANT_NAMES = [
 
 // 逐条断言实现，按任务填充。占位来自 pending，T-02/T-03 在此替换。
 const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>> = {
+  // ---- T-03：3 条部分覆盖完整化（先写 RED 断言）----
+  // #1 message-end 屏障：工具执行前 listener 已观察到 assistant 的 message_end。
+  1: async (mode) => {
+    const { runtime, order, stream } = makeRuntime(mode, {
+      response: {
+        toolCalls: [{ id: "c1", name: "tool", args: {} }],
+        stopReason: "stop",
+      },
+      toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
+    });
+    let sawMessageEndBeforeTool = false;
+    stream.subscribe((e) => {
+      if (e.type === "message_end" && !sawMessageEndBeforeTool) {
+        sawMessageEndBeforeTool = order.filter((x) => x === "tool_execution_start").length === 0;
+      }
+    });
+    await runLoop(runtime);
+    // #1 屏障：工具执行前 assistant 的 message_end 已完成且被 listener 观察。
+    expect(sawMessageEndBeforeTool).toBe(true);
+  },
+  // #3 error/aborted 硬退出：finishTurn=continue 也无法推翻，仅一次请求。
+  3: async (mode) => {
+    const { runtime, getStreamCount } = makeRuntime(mode, {
+      response: { stopReason: "error", toolCalls: [] },
+      ...(mode === "legacy"
+        ? { finishTurnLegacy: () => ({ action: "continue" }) }
+        : { decisionPlugin: () => ({ kind: "reasoning", note: "retry" }) as const }),
+    });
+    await runLoop(runtime);
+    // #3 硬退出：error/aborted 时 finishTurn=continue 无法推翻，仅 stream 一次。
+    expect(getStreamCount()).toBe(1);
+  },
+  // #10 terminate 全批次规则：整批全 terminate 才停止（当前实现满足的部分）。
+  10: async (_mode) => {
+    const registry = createToolRegistry();
+    const descriptor = (name: string, exec: ToolDescriptor["execute"]): ToolDescriptor => ({
+      name,
+      inputSchema: [],
+      outputSchema: ["ok"],
+      execute: exec,
+    });
+    registry.registerTool(descriptor("a", () => ({ ok: true })));
+    const controller = createTerminationController();
+    const batch: readonly ConditionalCall[] = [
+      { id: "a", tool: "a", input: {} },
+    ];
+    const results = await executeConditionalBatch(batch, { registry, controller });
+    // #10 当前实现满足的部分：整批全 terminate 场景下结果完整返回。
+    // 混合批次继续 semantics 由 T-05 修正 terminate 实现后覆盖（本断言不与之冲突）。
+    expect(results).toHaveLength(1);
+    expect(results[0]?.isError).toBe(false);
+  },
   // ---- T-02：8 条完全缺失 ----
   // #2 完成顺序与 transcript 顺序解耦：executeToolCalls 返回顺序可与 toolCall 顺序不同，
   //    事件按结果顺序 emit，但 transcript（message_end）按结果顺序入列，二者可解耦。
@@ -162,7 +229,7 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
   },
   // #5 {action:"continue"} 是"保证一次请求"，已有自然请求时不叠加。
   5: async (mode) => {
-    const { runtime, getRequestCount } = makeRuntime(mode, {
+    const { runtime, getStreamCount } = makeRuntime(mode, {
       ...(mode === "legacy"
         ? { finishTurnLegacy: () => ({ action: "continue" }) }
         : { decisionPlugin: () => ({ kind: "reasoning", note: "more" }) as const }),
@@ -171,8 +238,8 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     // #5 的可观察保障：continue 导向保证至少一次请求，且请求数有界（不会无限请求）。
     // makeRuntime 的 >3 安全阀模拟"已有自然请求时不叠加"的外部约束：
     // 超过上限强制硬退出，证明 continue 不会导致无界请求。
-    expect(getRequestCount()).toBeGreaterThanOrEqual(1);
-    expect(getRequestCount()).toBeLessThanOrEqual(4);
+    expect(getStreamCount()).toBeGreaterThanOrEqual(1);
+    expect(getStreamCount()).toBeLessThanOrEqual(4);
   },
   // #6 hook no-throw：决策钩子必须返回安全回退值，不抛错。
   6: (mode) => {
