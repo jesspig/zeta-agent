@@ -3,6 +3,7 @@ import { render as openTuiRender, useKeyboard } from "@opentui/solid";
 import { createSignal, For, Show } from "solid-js";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
+import { ZetaEditor } from "./components/editor";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
@@ -59,7 +60,15 @@ function ZetaApp(props: {
       <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
         {(source: EventSource) => <RichMessageList source={source} />}
       </Show>
-      <input placeholder="输入消息，回车发送；exit 退出" focused={true} onSubmit={submit} />
+      <ZetaEditor
+        onSubmit={(text) => {
+          if (text === "exit" || text === "quit") {
+            props.onExit();
+            return;
+          }
+          return props.onSubmit?.(text);
+        }}
+      />
     </>
   );
 }
