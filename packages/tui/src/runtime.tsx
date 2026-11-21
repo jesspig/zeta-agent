@@ -51,18 +51,35 @@ export function ZetaApp(props: {
   const keymap = createKeymap();
   keymap.register({ combo: "escape", action: "overlay", layer: "tui" });
   keymap.register({ combo: "ctrl+c", action: "exit", layer: "tui" });
-  keymap.register({ combo: "ctrl+k", action: "confirm", layer: "app" });
+  // pi 语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
+  keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
 
   const dimensions = useTerminalDimensions();
   const width = createMemo(() => clampWidth(100, dimensions().width));
 
   useKeyboard((key) => {
+    if (key.eventType === "release") return;
     const combo = key.ctrl ? `ctrl+${key.name}` : key.name;
     const action = keymap.resolve(combo)?.action;
     if (action === "exit") {
       props.onExit();
-    } else if (action === "overlay" || action === "confirm") {
+      return;
+    }
+    if (action === "overlay") {
+      // Esc 只负责取消/关闭，避免与 toggle 重复导致 overlay 关不掉。
+      setOverlayOpen(false);
+      return;
+    }
+    if (action === "confirm") {
       setOverlayOpen((open) => !open);
+      return;
+    }
+    // overlay 打开时按 pi 语义处理：Enter 确认。
+    if (overlayOpen() && key.name === "return") {
+      key.preventDefault();
+      key.stopPropagation();
+      setOverlayOpen(false);
+      props.onExit();
     }
   });
 
