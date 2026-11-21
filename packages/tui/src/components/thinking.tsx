@@ -8,7 +8,7 @@ export interface ThinkingBlockProps {
 }
 
 /**
- * Thinking 块：默认折叠为摘要行，Ctrl+T（pi 语义）切换展开/折叠全文。
+ * Thinking 块：默认折叠为摘要行，Ctrl+T 切换展开/折叠全文。
  * expanded prop 作为初值；此后由内部状态管理，使交互闭环。
  */
 export function ThinkingBlock(props: ThinkingBlockProps) {

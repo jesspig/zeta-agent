@@ -361,10 +361,10 @@ describe("T-10 完整 AgentPluginApi 契约", () => {
     expect(agent.toolNames).toEqual([]);
   });
 
-  test("pi/durable 兼容门面贡献的 tool/hook 在运行时可达", async () => {
-    const { definePiExtension, defineDurableExtension } = await import("./facade");
+  test("兼容门面贡献的 tool/hook 在运行时可达", async () => {
+    const { defineCompatExtension, defineDurableExtension } = await import("./facade");
     let hookCount = 0;
-    const plugin = definePiExtension("compat:pi", (api) => {
+    const plugin = defineCompatExtension("compat:legacy", (api) => {
       api.registerTool(PING);
       api.on("agent_start", () => {
         hookCount += 1;

@@ -6,8 +6,8 @@ describe("T-25 agent facade and plugin assembly", () => {
     expect(Object.keys(facade).sort()).toEqual([
       "DEFAULT_ASSEMBLY",
       "createAgent",
+      "defineCompatExtension",
       "defineDurableExtension",
-      "definePiExtension",
       "listAssembly",
     ]);
   });
@@ -29,11 +29,11 @@ describe("T-25 agent facade and plugin assembly", () => {
     }
   });
 
-  test("pi and durable extension facades normalize to the same AgentPlugin shape", () => {
+  test("compat and durable extension facades normalize to the same AgentPlugin shape", () => {
     const tool = { name: "echo", execute: (input: string) => input };
     const handler = () => {};
 
-    const fromPi = facade.definePiExtension("ext:pi", (api) => {
+    const fromCompat = facade.defineCompatExtension("ext:compat", (api) => {
       api.registerTool(tool);
       api.on("agent_start", handler);
     });
@@ -42,11 +42,11 @@ describe("T-25 agent facade and plugin assembly", () => {
       hooks: [{ event: "agent_start", handler }],
     });
 
-    expect(fromPi.kind).toBe("AgentPlugin");
+    expect(fromCompat.kind).toBe("AgentPlugin");
     expect(fromDurable.kind).toBe("AgentPlugin");
-    expect(fromPi.contributions.map((item) => item.kind).sort()).toEqual(["hook", "tool"]);
+    expect(fromCompat.contributions.map((item) => item.kind).sort()).toEqual(["hook", "tool"]);
     expect(fromDurable.contributions.map((item) => item.kind).sort()).toEqual(["hook", "tool"]);
-    expect(fromPi.contributions.find((item) => item.kind === "tool")).toEqual({
+    expect(fromCompat.contributions.find((item) => item.kind === "tool")).toEqual({
       kind: "tool",
       tool,
     });
