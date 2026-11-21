@@ -13,6 +13,7 @@
     "./frame-state": "./src/frame-state.ts",
     "./backend": "./src/backend.ts",
     "./runtime": "./src/runtime.tsx",
+    "./selectors": "./src/components/selectors/selectors.tsx",
     "./package.json": "./package.json"
   },
   "dependencies": {
