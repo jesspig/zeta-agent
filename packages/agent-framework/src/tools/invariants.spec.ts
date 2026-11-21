@@ -415,10 +415,11 @@ const INVARIANTS: readonly Invariant[] = [
 ];
 
 for (const adapter of ADAPTERS) {
-  describe(`T-17 invariants (${adapter.kind})`, () => {
+  // 工具流水线 12 条不变量：命名前缀 inv-tool-，与 agent-core 组 inv-core- 区分。
+  describe(`inv-tool-invariants (${adapter.kind})`, () => {
     expect(INVARIANTS).toHaveLength(12);
     for (const invariant of INVARIANTS) {
-      test(`I${invariant.id} ${invariant.name}`, async () => {
+      test(`inv-tool-I${invariant.id} ${invariant.name}`, async () => {
         await invariant.check(adapter);
       });
     }

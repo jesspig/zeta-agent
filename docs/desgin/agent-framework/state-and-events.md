@@ -44,6 +44,13 @@
 
 **先于实现**：为 [pi-baseline §9](../research/pi-baseline.md#9-重构必须保留的不变量清单) 的 12 条每条写两个测试——`legacy` 版（字段赋值）与 `plugin` 版（管线），断言事件序列与状态一致。
 
+**两组 12 条的命名区分（勿混淆）**：
+
+- **agent-core 12 条**（本节清单，pi-baseline §9）：实现于 `packages/agent-framework/src/runtime/invariants.spec.ts`，测试名前缀 `inv-core-`，对应 roadmap A6。
+- **工具流水线 12 条**（权限/依赖/终止等工具执行不变量）：实现于 `packages/agent-framework/src/tools/invariants.spec.ts`，测试名前缀 `inv-tool-`。
+
+两组各有 12 条 × legacy/plugin = 24 个测试，但语义完全不同，A6 仅指 agent-core 组。
+
 | # | 不变量 | 测试要点 |
 | --- | --- | --- |
 | 1 | assistant message_end 屏障 | preflight 前 listener 已完成 |
