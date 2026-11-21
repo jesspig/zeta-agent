@@ -36,7 +36,7 @@ export function ZetaFrame(props: ZetaFrameProps) {
   );
 }
 
-function ZetaApp(props: {
+export function ZetaApp(props: {
   readonly title: string;
   readonly messages: readonly RuntimeMessage[];
   readonly source?: EventSource;
@@ -80,7 +80,7 @@ function ZetaApp(props: {
   return (
     <>
       <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
-        {(source: EventSource) => <RichMessageList source={source} />}
+        {(sourceAccessor: () => EventSource) => <RichMessageList source={sourceAccessor()} />}
       </Show>
       <ZetaEditor
         onSubmit={(text) => {
