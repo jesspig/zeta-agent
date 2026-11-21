@@ -46,7 +46,7 @@ interface RuntimeOptions {
   readonly response?: Partial<AssistantResult>;
   readonly toolResults?: readonly ToolResult[];
   readonly finishTurnLegacy?: (turn: LastTurn) => { action: "continue" | "end" };
-  readonly decisionPlugin?: Parameters<NonNullable<LoopRuntime["decision"]>>;
+  readonly decisionPlugin?: NonNullable<LoopRuntime["decision"]>;
   readonly prepareNextTurnCalls?: { count: number };
   readonly onRequest?: (request: unknown) => void;
 }
@@ -93,7 +93,7 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
     },
     ...(mode === "legacy"
       ? { finishTurn: options.finishTurnLegacy ?? (() => ({ action: "continue" })) }
-      : { decision: options.decisionPlugin ?? (() => ({ kind: "exit", note: "end" })) }),
+      : { decision: options.decisionPlugin ?? (() => ({ kind: "exit", reason: "end" })) }),
   };
 
   return {
@@ -176,16 +176,24 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
       outputSchema: ["ok"],
       execute: exec,
     });
-    registry.registerTool(descriptor("a", () => ({ ok: true })));
+    // 混合批次：a 请求 terminate、b 不请求 → 两者都执行，controller 未终止（设计 #10）。
+    registry.registerTool(
+      descriptor("a", (_input, exec) => {
+        exec.terminate();
+        return { ok: true };
+      })
+    );
+    registry.registerTool(descriptor("b", () => ({ ok: true })));
     const controller = createTerminationController();
     const batch: readonly ConditionalCall[] = [
       { id: "a", tool: "a", input: {} },
+      { id: "b", tool: "b", input: {}, dependsOn: ["a"] },
     ];
     const results = await executeConditionalBatch(batch, { registry, controller });
-    // #10 当前实现满足的部分：整批全 terminate 场景下结果完整返回。
-    // 混合批次继续 semantics 由 T-05 修正 terminate 实现后覆盖（本断言不与之冲突）。
-    expect(results).toHaveLength(1);
-    expect(results[0]?.isError).toBe(false);
+    // T-05 修正后：混合批次继续执行，controller 未终止。
+    expect(results).toHaveLength(2);
+    expect(results[1]?.isError).toBe(false);
+    expect(controller.terminated).toBe(false);
   },
   // ---- T-02：8 条完全缺失 ----
   // #2 完成顺序与 transcript 顺序解耦：executeToolCalls 返回顺序可与 toolCall 顺序不同，
@@ -218,7 +226,7 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
       prepareNextTurnCalls: prepare,
       ...(mode === "legacy"
         ? { finishTurnLegacy: () => ({ action: "end" }) }
-        : { decisionPlugin: () => ({ kind: "exit", note: "end" }) as const }),
+        : { decisionPlugin: () => ({ kind: "exit", reason: "end" }) as const }),
     });
     inbox.followUp({ role: "user", content: "queued" });
     await runLoop(runtime);

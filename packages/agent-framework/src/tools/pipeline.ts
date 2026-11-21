@@ -134,6 +134,8 @@ export interface ToolResult {
   readonly isError: boolean;
   readonly durationMs: number;
   readonly reason?: string;
+  /** 该工具调用是否请求终止批次（不变量 #10：仅整批全 true 才真正停止）。 */
+  readonly terminate?: boolean;
 }
 
 export interface BatchContext {
@@ -190,11 +192,9 @@ export async function executeCall(call: ToolCall, ctx: BatchContext): Promise<To
   if (verdict.behavior === "ASK") {
     return errorResult(call, `TOOL_PERMISSION_ASK: ${verdict.reason ?? "confirmation required"}`, clock(), clock());
   }
-  if (ctx.controller?.terminated === true) {
-    return errorResult(call, "BATCH_TERMINATED", clock(), clock());
-  }
 
   let settled = false;
+  let terminateRequested = false;
   const pending: Promise<unknown>[] = [];
   const exec: ToolExecuteContext = {
     onUpdate(partialResult) {
@@ -204,14 +204,22 @@ export async function executeCall(call: ToolCall, ctx: BatchContext): Promise<To
         tool: call.tool,
         phase: "update",
         partialResult,
-        terminate: (reason) => ctx.controller?.terminate(reason),
+        terminate: () => {
+          // 同 exec.terminate：仅记录本 call 意图，不即时中止同批。
+          terminateRequested = true;
+        },
       };
       const returned = ctx.onUpdate?.(update);
       if (returned !== undefined && typeof (returned as PromiseLike<unknown>).then === "function") {
         pending.push(Promise.resolve(returned));
       }
     },
-    terminate: (reason) => ctx.controller?.terminate(reason),
+    terminate: (reason) => {
+      // 不在调用瞬间中止同批：先记录本 call 的终止意图（不变量 #10）。
+      // 整批全 terminate 时才由 executeConditionalBatch 真正置 controller。
+      terminateRequested = true;
+      void reason;
+    },
     terminated: () => ctx.controller?.terminated === true,
     signal: ctx.controller?.signal,
   };
@@ -223,21 +231,21 @@ export async function executeCall(call: ToolCall, ctx: BatchContext): Promise<To
   } catch (error) {
     settled = true;
     await Promise.allSettled(pending);
-    return errorResult(call, `TOOL_EXECUTION_ERROR: ${errorMessage(error)}`, startedAt, clock());
+    return { ...errorResult(call, `TOOL_EXECUTION_ERROR: ${errorMessage(error)}`, startedAt, clock()), terminate: terminateRequested };
   }
   settled = true;
   await Promise.allSettled(pending);
   const durationMs = Math.max(0, clock() - startedAt);
 
   if (output === undefined || output === null) {
-    return errorResult(call, "TOOL_OUTPUT_MISSING", startedAt, startedAt + durationMs);
+    return { ...errorResult(call, "TOOL_OUTPUT_MISSING", startedAt, startedAt + durationMs), terminate: terminateRequested };
   }
   if (typeof output === "object") {
     const extra = Object.keys(output as Record<string, unknown>).find(
       (key) => !tool.outputSchema.includes(key)
     );
     if (extra !== undefined) {
-      return errorResult(call, `TOOL_OUTPUT_EXTRA_FIELD: ${extra}`, startedAt, startedAt + durationMs);
+      return { ...errorResult(call, `TOOL_OUTPUT_EXTRA_FIELD: ${extra}`, startedAt, startedAt + durationMs), terminate: terminateRequested };
     }
   }
 
@@ -247,6 +255,7 @@ export async function executeCall(call: ToolCall, ctx: BatchContext): Promise<To
     output,
     isError: false,
     durationMs,
+    terminate: terminateRequested,
   };
 }
 

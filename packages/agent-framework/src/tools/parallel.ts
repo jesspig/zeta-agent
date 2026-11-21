@@ -23,6 +23,8 @@ export async function executeConditionalBatch(
 ): Promise<readonly ToolResult[]> {
   const results = new Map<string, ToolResult>();
   const remaining = new Map(batch.map((call) => [call.id, call]));
+  // 批次开始时若已被上一批终止，整批阻塞；批次内部不因单个 terminate 阻塞同批。
+  const blockedFromPriorBatch = ctx.controller?.terminated === true;
 
   while (remaining.size > 0) {
     const level: ConditionalCall[] = [];
@@ -34,7 +36,7 @@ export async function executeConditionalBatch(
 
     await Promise.allSettled(
       level.map(async (call) => {
-        if (ctx.controller?.terminated === true) {
+        if (blockedFromPriorBatch) {
           results.set(call.id, blockedResult(call, "BATCH_TERMINATED"));
           return;
         }
@@ -50,5 +52,20 @@ export async function executeConditionalBatch(
     );
   }
 
-  return batch.map((call) => results.get(call.id) as ToolResult);
+  const finalized = batch.map((call) => results.get(call.id) as ToolResult);
+  // 不变量 #10：仅当整批每个 finalized result 都 terminate===true 才真正停止。
+  // 混合批次保持未终止，后续批次可继续执行。
+  if (
+    ctx.controller !== undefined &&
+    finalized.length > 0 &&
+    finalized.every((result) => result.terminate === true)
+  ) {
+    ctx.controller.terminate("all-terminated");
+    return finalized.map((result, index) => ({
+      ...blockedResult(batch[index] as ConditionalCall, "BATCH_TERMINATED"),
+      terminate: true,
+      durationMs: result.durationMs,
+    }));
+  }
+  return finalized;
 }
