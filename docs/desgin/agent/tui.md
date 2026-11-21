@@ -307,8 +307,27 @@ print/json/rpc 模式（[framework-model/engineering §9](../architecture/engine
 
 **已知偏差/边界**（非阻塞）：
 - pi 本身用 jiti + 命令式 `ctx.ui` + 自研 TUI，非 OpenTUI slots；zeta 的官方 Solid slots seam 是结合目标栈的自研设计，仅借鉴 pi 的行为语义（命令式替换 + 失败回退）。
-- 词级 diff 为同位置改写的近似标记，未做完整词级 LCS（低优先项）。
-- markdown 在 tree-sitter 不可用的测试环境使用纯文本投影，生产环境由 OpenTUI 原生渲染。
+- ~~词级 diff 为同位置改写的近似标记，未做完整词级 LCS~~ 已在第二轮深度复刻中升级为真正的词级 LCS（`diffWords`），并接入 `RichMessageList.diffs` seam。
+- ~~markdown 在测试环境用纯文本投影、生产由 OpenTUI 原生渲染~~ 该表述与源码不符，已修正：`MarkdownContent` 正文始终用稳定投影，围栏代码块显示语言标签；OpenTUI 原生 `<markdown>` 在测试环境无 `syntaxStyle` 时渲染空白，`<code>` 需 `syntaxStyle` 才能类型正确地高亮，故本轮不启用原生渲染，避免空白/类型风险（详见第二轮范围方案文档）。
+
+## 13.1 第二轮深度复刻（生产接线）增补
+
+上一轮 §13 多项标注 ✅ 但生产路径未接线；第二轮已把下列能力真正接入 `renderTui()` 并用真实事件/键盘测试验证（证据见 `.handoff/` 本轮 STATE）：
+
+| 能力 | 本轮接线 | 证据 |
+| --- | --- | --- |
+| 编辑器交互（Enter 提交/Shift+Enter 换行/Ctrl+K kill/历史/yank/undo/paste） | `ZetaEditor` 用 useKeyboard/usePaste 接 `createEditorState`；Ctrl+K 从 overlay 归还编辑器 | editor-wiring.spec / runtime-keymap.spec |
+| overlay 闭环 | Ctrl+G 打开、Enter 确认、Esc 取消 | runtime-keymap.spec |
+| 真实状态栏 | `FooterBridge` 订阅 signals，status/statusMessage 来自事件，budget 由消息数估算；修复响应式 prop 被缓存的 bug | footer-bridge.spec |
+| 主题切换 | `ThemeProvider`/`useTheme` 消费 `options.theme`，token 色接入组件，热切换不重建 | theme-context.spec |
+| OSC 上报 | `createOscBridge` 把 status/messages 桥接到 OSC 7501/9;4，退出复位 | osc.spec |
+| thinking 折叠 | Ctrl+T 展开/收起全文 | thinking.spec |
+| 命令面板 | Ctrl+P 打开，搜索/导航/执行；`RuntimeTuiOptions.commandList` | command-palette.spec / runtime-keymap.spec |
+| 生产插件槽位（万物皆插件） | `useZetaSlots` 经 slots-native seam 挂官方 Solid slots，插件可 replace footer 等；`RuntimeTuiOptions.plugins` | runtime-plugin-integration.spec |
+| headless 配置诊断 | 缺 ZETA_BASE_URL 等变量时 stderr 明确提示，stdout 零回归 | config.spec / 本地 fake SSE 端到端 |
+
+- headless/print/json/rpc 三模式第二轮回回归均 exit 0。
+- 已知边界（非阻塞）：完整 markdown 结构化渲染（列表/表格/链接/LaTeX/mermaid）与鼠标文本选择、全屏搜索、follow-up 队列属第二阶段候选；pi 的 jiti+命令式路线与 zeta 的声明式路线无法 API 级 1:1。
 
 **返回索引**：[00 索引与交叉验证](../README.md)
 
