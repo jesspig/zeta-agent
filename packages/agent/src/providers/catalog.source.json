@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "providers": [
+    { "id": "openai", "name": "OpenAI", "defaultBaseUrl": "https://api.openai.com/v1", "api": "openai-chat" },
+    { "id": "anthropic", "name": "Anthropic", "defaultBaseUrl": "https://api.anthropic.com/v1", "api": "anthropic-messages" },
+    { "id": "google", "name": "Google", "defaultBaseUrl": "https://generativelanguage.googleapis.com/v1beta", "api": "google-generate" },
+    { "id": "bedrock", "name": "AWS Bedrock", "defaultBaseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com", "api": "bedrock-invoke" },
+    { "id": "openrouter", "name": "OpenRouter", "defaultBaseUrl": "https://openrouter.ai/api/v1", "api": "openai-chat" },
+    { "id": "groq", "name": "Groq", "defaultBaseUrl": "https://api.groq.com/openai/v1", "api": "openai-chat" },
+    { "id": "deepseek", "name": "DeepSeek", "defaultBaseUrl": "https://api.deepseek.com/v1", "api": "openai-chat" }
+  ],
+  "models": [
+    { "id": "openai/gpt-4o", "provider": "openai", "name": "gpt-4o", "aliases": [], "contextWindow": 128000, "maxOutput": 16384, "input": ["text", "image"], "api": "openai-chat" },
+    { "id": "openai/gpt-4o-mini", "provider": "openai", "name": "gpt-4o-mini", "aliases": ["mini"], "contextWindow": 128000, "maxOutput": 16384, "input": ["text", "image"], "api": "openai-chat" },
+    { "id": "anthropic/claude-sonnet-4-5", "provider": "anthropic", "name": "claude-sonnet-4-5", "aliases": ["sonnet"], "contextWindow": 200000, "maxOutput": 16384, "input": ["text", "image"], "api": "anthropic-messages" },
+    { "id": "anthropic/claude-opus-4-1", "provider": "anthropic", "name": "claude-opus-4-1", "aliases": ["opus"], "contextWindow": 200000, "maxOutput": 16384, "input": ["text", "image"], "api": "anthropic-messages" },
+    { "id": "google/gemini-2.5-pro", "provider": "google", "name": "gemini-2.5-pro", "aliases": ["pro"], "contextWindow": 1048576, "maxOutput": 65536, "input": ["text", "image"], "api": "google-generate" },
+    { "id": "google/gemini-2.5-flash", "provider": "google", "name": "gemini-2.5-flash", "aliases": ["flash"], "contextWindow": 1048576, "maxOutput": 65536, "input": ["text", "image"], "api": "google-generate" },
+    { "id": "bedrock/anthropic.claude-3-5-sonnet", "provider": "bedrock", "name": "anthropic.claude-3-5-sonnet", "aliases": ["bedrock-sonnet"], "contextWindow": 200000, "maxOutput": 8192, "input": ["text", "image"], "api": "bedrock-invoke" },
+    { "id": "bedrock/amazon.nova-pro-v1:0", "provider": "bedrock", "name": "amazon.nova-pro-v1:0", "aliases": ["nova"], "contextWindow": 300000, "maxOutput": 5120, "input": ["text", "image"], "api": "bedrock-invoke" },
+    { "id": "openrouter/auto", "provider": "openrouter", "name": "openrouter/auto", "aliases": ["or-auto"], "contextWindow": 200000, "maxOutput": 16384, "input": ["text"], "api": "openai-chat" },
+    { "id": "openrouter/deepseek/deepseek-r1", "provider": "openrouter", "name": "deepseek/deepseek-r1", "aliases": ["or-r1"], "contextWindow": 128000, "maxOutput": 16384, "input": ["text"], "api": "openai-chat" },
+    { "id": "groq/llama-3.3-70b-versatile", "provider": "groq", "name": "llama-3.3-70b-versatile", "aliases": ["llama"], "contextWindow": 131072, "maxOutput": 32768, "input": ["text"], "api": "openai-chat" },
+    { "id": "groq/mixtral-8x7b-32768", "provider": "groq", "name": "mixtral-8x7b-32768", "aliases": ["mixtral"], "contextWindow": 32768, "maxOutput": 8192, "input": ["text"], "api": "openai-chat" },
+    { "id": "deepseek/deepseek-chat", "provider": "deepseek", "name": "deepseek-chat", "aliases": ["chat"], "contextWindow": 65536, "maxOutput": 8192, "input": ["text"], "api": "openai-chat" },
+    { "id": "deepseek/deepseek-reasoner", "provider": "deepseek", "name": "deepseek-reasoner", "aliases": ["r1"], "contextWindow": 65536, "maxOutput": 8192, "input": ["text"], "api": "openai-chat" }
+  ]
+}

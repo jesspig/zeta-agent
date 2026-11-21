@@ -9,6 +9,11 @@
     "./facade": "./src/facade.ts",
     "./cli/modes": "./src/cli/modes.ts",
     "./providers/openai": "./src/providers/openai.ts",
+    "./providers/catalog": "./src/providers/catalog.generated.ts",
+    "./providers/registry": "./src/providers/registry.ts",
+    "./providers/dispatch": "./src/providers/dispatch.ts",
+    "./providers/oauth": "./src/providers/oauth.ts",
+    "./providers/image": "./src/providers/image.ts",
     "./package.json": "./package.json"
   },
   "dependencies": {
