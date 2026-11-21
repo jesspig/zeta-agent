@@ -1,6 +1,10 @@
 import { CliRenderer } from "@opentui/core";
 import { render as openTuiRender, useKeyboard } from "@opentui/solid";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Show, createMemo } from "solid-js";
+import { useTerminalDimensions } from "@opentui/solid";
+import { createKeymap } from "./keymap";
+import { ConfirmOverlay } from "./components/overlay";
+import { clampWidth } from "./components/layout";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
 import { ZetaEditor } from "./components/editor";
@@ -38,10 +42,25 @@ function ZetaApp(props: {
   readonly onExit: () => void;
 }) {
   const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
+  const [overlayOpen, setOverlayOpen] = createSignal(false);
   props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
 
+  const keymap = createKeymap();
+  keymap.register({ combo: "escape", action: "overlay", layer: "tui" });
+  keymap.register({ combo: "ctrl+c", action: "exit", layer: "tui" });
+  keymap.register({ combo: "ctrl+k", action: "confirm", layer: "app" });
+
+  const dimensions = useTerminalDimensions();
+  const width = createMemo(() => clampWidth(100, dimensions().width));
+
   useKeyboard((key) => {
-    if (key.name === "escape" || (key.ctrl && key.name === "c")) props.onExit();
+    const combo = key.ctrl ? `ctrl+${key.name}` : key.name;
+    const action = keymap.resolve(combo)?.action;
+    if (action === "exit") {
+      props.onExit();
+    } else if (action === "overlay" || action === "confirm") {
+      setOverlayOpen((open) => !open);
+    }
   });
 
   function submit(value: string) {
@@ -69,6 +88,16 @@ function ZetaApp(props: {
           return props.onSubmit?.(text);
         }}
       />
+      <Show when={overlayOpen()}>
+        <ConfirmOverlay
+          message="确定退出？"
+          onConfirm={() => {
+            setOverlayOpen(false);
+            props.onExit();
+          }}
+          onCancel={() => setOverlayOpen(false)}
+        />
+      </Show>
     </>
   );
 }
