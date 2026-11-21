@@ -5,6 +5,7 @@ import { renderTui, type RuntimeMessage } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
 import { resolveDataDir } from "./runtime";
+import { buildTuiOptions } from "./tui-options";
 
 const VERSION = "0.1.0";
 const HELP = [
@@ -54,12 +55,11 @@ async function runTui(args: CliArgs): Promise<number> {
   }
 
   const tui = await renderTui({
-    title: `zeta v${VERSION}`,
-    messages: toRuntimeMessages(agent.state.messages),
-    onSubmit: async (text) => {
+    ...buildTuiOptions(agent, VERSION, async (text) => {
       await agent.prompt(text);
       await agent.waitForIdle();
-    },
+    }),
+    messages: toRuntimeMessages(agent.state.messages),
   });
 
   const unsubscribe = agent.subscribe((event) => {
