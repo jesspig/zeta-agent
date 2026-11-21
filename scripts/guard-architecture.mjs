@@ -20,6 +20,10 @@ const moduleSpecifierPattern = /["']([^"']+)["']/g;
 
 const opentuiBusinessModules = new Set(["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame-state.ts", "backend.ts"]);
 
+// 受控 seam：仅这两个文件允许直接 import @opentui/*（运行时插件加载与官方 Solid slots 适配）。
+// facade string 槽位契约（slots.ts）与业务组件仍禁止直接依赖 OpenTUI。
+const opentuiSeamAllowlist = new Set(["runtime-plugin-loader.tsx", "slots-native.tsx"]);
+
 function walk(dir) {
   const result = [];
   if (!existsSync(dir)) return result;
@@ -67,6 +71,15 @@ for (const { dir, opentuiBusinessCheck } of scanTargets) {
         }
         if (isBusinessModule && (spec === "@opentui/solid" || spec.startsWith("@opentui/solid/"))) {
           violations.push(`${rel}:${index + 1}: 业务组件禁止直接 import "${spec}"（须经 RendererBackend seam）`);
+        }
+        // 运行时插件 API 仅允许在受控 seam 文件中直接 import，隔离加载失败风险。
+        if (
+          opentuiBusinessCheck &&
+          (spec.startsWith("@opentui/core/runtime-plugin") ||
+            spec.startsWith("@opentui/solid/runtime-plugin-support")) &&
+          !opentuiSeamAllowlist.has(file.split(sep).pop())
+        ) {
+          violations.push(`${rel}:${index + 1}: 运行时插件 API 仅允许在受控 seam（${[...opentuiSeamAllowlist].join(", ")}）中直接 import`);
         }
       }
     });
