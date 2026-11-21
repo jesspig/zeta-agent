@@ -5,8 +5,7 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { createKeymap } from "./keymap";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
-import { FooterView } from "./components/footer";
-import { contextBudget } from "./hud";
+import { FooterBridge } from "./components/footer-bridge";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
@@ -108,7 +107,7 @@ export function ZetaApp(props: {
           return props.onSubmit?.(text);
         }}
       />
-      <FooterView model="zeta" status="ready" budget={contextBudget(0, 1)} />
+      <FooterBridge source={props.source} />
       <Show when={overlayOpen()}>
         <ConfirmOverlay
           message="确定退出？"
