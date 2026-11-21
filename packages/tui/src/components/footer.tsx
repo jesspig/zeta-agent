@@ -1,5 +1,6 @@
 import { Show } from "solid-js";
 import type { ContextBudget } from "../hud";
+import { useTheme } from "../theme-context";
 
 export interface FooterViewProps {
   readonly model: string;
@@ -15,16 +16,17 @@ const STATUS_TEXT: Readonly<Record<string, string>> = {
 };
 
 export function FooterView(props: FooterViewProps) {
+  const theme = useTheme();
   return (
     <box flexDirection="row" height={1}>
-      <text fg="#7ee787">{props.model}</text>
+      <text fg={theme.color("accent")}>{props.model}</text>
       <text> </text>
-      <text fg="#58a6ff">{STATUS_TEXT[props.status] ?? props.status}</text>
+      <text fg={theme.color("info")}>{STATUS_TEXT[props.status] ?? props.status}</text>
       <Show when={props.retry}>
-        <text fg="#d29922"> {props.retry}</text>
+        <text fg={theme.color("warning")}> {props.retry}</text>
       </Show>
       <text> </text>
-      <text fg={props.budget.level === "critical" ? "#ff7b72" : "#8b949e"}>
+      <text fg={props.budget.level === "critical" ? theme.color("error") : theme.color("muted")}>
         {`ctx ${props.budget.percent}%`}
       </text>
     </box>

@@ -1,3 +1,5 @@
+import { useTheme } from "../theme-context";
+
 export type DiffOp = "add" | "remove" | "context";
 
 export interface WordDiff {
@@ -81,6 +83,7 @@ const DIFF_COLORS = {
 } as const;
 
 export function DiffView(props: { readonly before: string; readonly after: string }) {
+  const theme = useTheme();
   const lines = () => diffLines(props.before, props.after);
   return (
     <box flexDirection="column">
@@ -90,7 +93,7 @@ export function DiffView(props: { readonly before: string; readonly after: strin
         </text>
       ))}
       {lines().some((line) => line.wordDiff?.kind === "replace") ? (
-        <text fg="#d2a8ff">[diff]</text>
+        <text fg={theme.color("thinking")}>[diff]</text>
       ) : null}
     </box>
   );

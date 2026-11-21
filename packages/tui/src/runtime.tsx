@@ -6,6 +6,7 @@ import { createKeymap } from "./keymap";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
+import { ThemeProvider, useTheme } from "./theme-context";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
@@ -24,9 +25,10 @@ export interface ZetaFrameProps {
 }
 
 export function ZetaFrame(props: ZetaFrameProps) {
+  const theme = useTheme();
   return (
     <box flexDirection="column" width="100%" height="100%">
-      <text fg="#7ee787">{props.title}</text>
+      <text fg={theme.color("accent")}>{props.title}</text>
       <box height={1} />
       <scrollbox flexGrow={1}>
         <For each={props.lines}>{(line) => <text>{line}</text>}</For>
@@ -155,19 +157,21 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
 
   await openTuiRender(
     () => (
-      <ZetaApp
-        title={options.title ?? "zeta"}
-        messages={options.messages ?? []}
-        source={options.source}
-        onPush={(sink) => {
-          push = sink;
-        }}
-        onSubmit={onSubmit}
-        onExit={() => {
-          options.onExit?.();
-          exit();
-        }}
-      />
+      <ThemeProvider initial={options.theme ?? "dark"}>
+        <ZetaApp
+          title={options.title ?? "zeta"}
+          messages={options.messages ?? []}
+          source={options.source}
+          onPush={(sink) => {
+            push = sink;
+          }}
+          onSubmit={onSubmit}
+          onExit={() => {
+            options.onExit?.();
+            exit();
+          }}
+        />
+      </ThemeProvider>
     ),
     renderer,
   );

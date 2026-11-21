@@ -1,4 +1,5 @@
 import { For, createSignal, createMemo, onCleanup, onMount } from "solid-js";
+import { useTheme } from "../theme-context";
 import type { AgentEvent } from "@zeta-agent/agent";
 import {
   createAgentSignals,
@@ -56,6 +57,7 @@ export interface ToolBoxProps {
 }
 
 export function ToolBox(props: ToolBoxProps) {
+  const theme = useTheme();
   const signals = createAgentSignals(props.source);
   const controller = props.controller ?? createToolBoxController();
   const [states, setStates] = createSignal<readonly ToolState[]>([]);
@@ -81,13 +83,13 @@ export function ToolBox(props: ToolBoxProps) {
             <text fg={STATUS_COLOR[state.status]}>
               {`${state.name} ${STATUS_LABEL[state.status]}`}
             </text>
-            {renderArgs(state) ? <text fg="#8b949e">{renderArgs(state)}</text> : null}
+            {renderArgs(state) ? <text fg={theme.color("muted")}>{renderArgs(state)}</text> : null}
           </box>
         )}
       </For>
       {(() => {
         const thinking = signals.thinking();
-        return thinking ? <text fg="#d2a8ff">thinking</text> : null;
+        return thinking ? <text fg={theme.color("thinking")}>thinking</text> : null;
       })()}
     </box>
   );
