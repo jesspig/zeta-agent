@@ -71,7 +71,7 @@ export interface AgentPlugin {
   install(): Disposer;
 }
 
-export interface PiExtensionApi {
+export interface CompatExtensionApi {
   registerTool<P>(tool: PluginTool<P>): void;
   on(event: string, handler: (event: AgentEvent) => void): void;
   addSection(text: string): void;
@@ -116,13 +116,13 @@ function defineAgentPlugin(name: string, contributions: readonly PluginContribut
   };
 }
 
-export function definePiExtension(
+export function defineCompatExtension(
   name: string,
-  define: (api: PiExtensionApi) => void
+  define: (api: CompatExtensionApi) => void
 ): AgentPlugin {
-  if (typeof define !== "function") throw new Error("pi extension: expected a builder");
+  if (typeof define !== "function") throw new Error("compat extension: expected a builder");
   const contributions: PluginContribution[] = [];
-  const api: PiExtensionApi = {
+  const api: CompatExtensionApi = {
     registerTool(tool) {
       contributions.push({ kind: "tool", tool });
     },

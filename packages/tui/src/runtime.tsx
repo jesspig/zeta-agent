@@ -96,7 +96,7 @@ export function ZetaApp(props: {
   const keymap = createKeymap();
   keymap.register({ combo: "escape", action: "overlay", layer: "tui" });
   keymap.register({ combo: "ctrl+c", action: "exit", layer: "tui" });
-  // pi 语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
+  // 沿用常见编辑语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
   keymap.register({ combo: "ctrl+o", action: "model-selector", layer: "app" });
@@ -139,7 +139,7 @@ export function ZetaApp(props: {
       setSelectorOpen((kind) => (kind === "settings" ? undefined : "settings"));
       return;
     }
-    // overlay 打开时按 pi 语义处理：Enter 确认。
+    // overlay 打开时按常见交互语义处理：Enter 确认。
     if (overlayOpen() && key.name === "return") {
       key.preventDefault();
       key.stopPropagation();

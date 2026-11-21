@@ -24,7 +24,7 @@ import {
 } from "../tools/pipeline";
 
 /**
- * agent-core 12 条不变量等价测试（state-and-events.md §13 / pi-baseline.md §9）。
+ * agent-core 12 条不变量等价测试（state-and-events.md §13 / 基线约定 §9）。
  *
  * 与 tools/invariants.spec.ts 的工具流水线 12 条（inv-tool-）严格区分：
  * 本文件覆盖 agent-core 的 12 条，测试名统一使用 inv-core- 前缀。
