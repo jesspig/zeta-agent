@@ -5,18 +5,29 @@ import {
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
+  type AgentPluginApi,
   type AgentState,
   type AssistantMessageEvent,
   type AssistantResult,
   type Capabilities,
+  type ContextTransform,
+  type Converter,
+  type CoreContextLike,
   type EffectMeta,
+  type EventBus,
+  type FinishTurn,
   type Inbox,
   type LoopRuntime,
+  type PrepareNextTurn,
+  type PrepareRequest,
+  type QueueSource,
   type RedactRule,
+  type StreamFn,
   type ToolCall,
   type ToolResult,
 } from "@zeta-agent/agent-framework";
 import type { Disposer } from "@zeta-agent/framework";
+import { builtinToolDefinitions, type ToolDefinition } from "./tools/builtins";
 import {
   createEffectBridge,
   createLogger,
@@ -141,25 +152,37 @@ export function defineDurableExtension(name: string, spec: DurableExtensionSpec)
   return defineAgentPlugin(name, contributions);
 }
 
-function builtinTools(): PluginTool[] {
-  return ["read", "bash", "edit", "write"].map((name) => ({
-    name,
-    execute: () => ({ ok: true, tool: name }),
-  }));
+function builtinTools(options: {
+  readonly securityBackend: ExecutionBackend;
+  readonly allowedDirectories: readonly string[];
+}): ToolDefinition[] {
+  return [...builtinToolDefinitions(options)];
 }
 
-function defaultContributions(): PluginContribution[] {
-  const contributions: PluginContribution[] = [];
-  for (const tool of builtinTools()) contributions.push({ kind: "tool", tool });
-  contributions.push({ kind: "service", name: "skills:registry" });
-  contributions.push({ kind: "service", name: "session:store" });
-  return contributions;
+export interface PluginApiSurface extends AgentPluginApi {
+  /** 按 LIFO 撤销所有经 api 注册的贡献（含兼容门面贡献的 hook）。 */
+  disposeAll(): void;
 }
 
-export interface PluginApiSurface {
-  capabilities(): Capabilities;
-  onEffect(handler: (meta: EffectMeta) => void): () => void;
-  addRedactor(rule: RedactRule): () => void;
+/** 插件间共享的轻量事件总线；按注册顺序同步派发。 */
+function createEventBus(): EventBus {
+  const listeners = new Map<string, Set<(event: AgentEvent) => void>>();
+  return {
+    on(name, listener) {
+      let bucket = listeners.get(name);
+      if (bucket === undefined) {
+        bucket = new Set();
+        listeners.set(name, bucket);
+      }
+      bucket.add(listener);
+      return () => {
+        bucket?.delete(listener);
+      };
+    },
+    emit(name, event) {
+      for (const listener of [...(listeners.get(name) ?? [])]) listener(event);
+    },
+  };
 }
 
 export interface AgentToolCall {
@@ -202,6 +225,8 @@ export interface AgentOptions {
   readonly securityBackend?: ExecutionBackend;
   readonly observability?: LoggerOptions;
   readonly effectBridge?: EffectBridge;
+  readonly coreContext?: CoreContextLike;
+  readonly allowedDirectories?: readonly string[];
 }
 
 export interface Agent extends PluginApiSurface {
@@ -213,27 +238,34 @@ export interface Agent extends PluginApiSurface {
   runTool(call: AgentToolCall): Promise<ToolFailure>;
   emitEffect(meta: EffectMeta): void;
   resolveLogSink(options: SinkOptions): SinkResolution;
+  readonly api: PluginApiSurface;
   readonly logger: Logger;
   readonly aborted: boolean;
   readonly state: AgentState;
   readonly toolNames: readonly string[];
+  readonly toolDefinitions: readonly ToolDefinition[];
   readonly assembly: readonly string[];
 }
 
 export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
-  const streamFn = options.streamFn;
+  const baseStreamFn = options.streamFn;
   const includeBuiltins = options.includeBuiltins !== false;
   const plugins = options.plugins ?? [];
-  const contributions: PluginContribution[] = includeBuiltins ? defaultContributions() : [];
+  const securityBackend = options.securityBackend ?? defaultSecurityBackend();
+  const allowedDirectories = options.allowedDirectories ?? [];
+  const toolDefinitions = includeBuiltins
+    ? builtinTools({ securityBackend, allowedDirectories })
+    : [];
+  const contributions: PluginContribution[] = includeBuiltins
+    ? toolDefinitions.map((tool) => ({ kind: "tool", tool }))
+    : [];
+  contributions.push({ kind: "service", name: "skills:registry" });
+  contributions.push({ kind: "service", name: "session:store" });
   for (const plugin of plugins) contributions.push(...plugin.contributions);
 
-  const toolNames = contributions
-    .filter((item): item is Extract<PluginContribution, { kind: "tool" }> => item.kind === "tool")
-    .map((item) => item.tool.name);
   const assembly = includeBuiltins ? listAssembly() : [];
 
-  const securityBackend = options.securityBackend ?? defaultSecurityBackend();
   const logger = createLogger(options.observability ?? defaultLoggerOptions());
   const effectBridge = options.effectBridge ?? createEffectBridge();
   const fiberLogger = logger.forFiber("agent");
@@ -244,6 +276,129 @@ export function createAgent(options: AgentOptions = {}): Agent {
   });
 
   let aborted = false;
+
+  // 插件 API 的可变注册集合。每个 add* 返回幂等 disposer；disposeAll 按 LIFO 撤销。
+  const pluginTools = new Map<string, { readonly tool: PluginTool; readonly dispose: () => void }>();
+  const declaredLoadout = new Map<string, PluginTool>();
+  const converters: Converter[] = [];
+  const contextTransforms: ContextTransform[] = [];
+  const beforeToolCalls: Array<(event: AgentEvent) => void | Promise<void>> = [];
+  const afterToolCalls: Array<(event: AgentEvent) => void | Promise<void>> = [];
+  const turnBoundaries: FinishTurn[] = [];
+  const prepareRequestFns: PrepareRequest[] = [];
+  const prepareNextTurnFns: PrepareNextTurn[] = [];
+  const steeringSources: QueueSource[] = [];
+  const followUpSources: QueueSource[] = [];
+  const streamFnProviders: StreamFn[] = [];
+  const disposers: Array<() => void> = [];
+  const events = createEventBus();
+
+  function addDisposer(dispose: () => void): () => void {
+    let active = true;
+    const wrapped = (): void => {
+      if (!active) return;
+      active = false;
+      dispose();
+      const index = disposers.indexOf(wrapped);
+      if (index >= 0) disposers.splice(index, 1);
+    };
+    disposers.push(wrapped);
+    return wrapped;
+  }
+
+  function addToList<T>(list: T[], fn: T): () => void {
+    list.push(fn);
+    return addDisposer(() => {
+      const index = list.indexOf(fn);
+      if (index >= 0) list.splice(index, 1);
+    });
+  }
+
+  function activeStreamFn(): AgentStreamFn | undefined {
+    const provider = streamFnProviders[streamFnProviders.length - 1];
+    if (provider !== undefined) {
+      return (request: AgentStreamRequest) => provider(request) as AsyncIterable<string>;
+    }
+    return baseStreamFn;
+  }
+
+  function toolNamesSnapshot(): readonly string[] {
+    const names = new Set<string>();
+    for (const item of contributions) {
+      if (item.kind === "tool") names.add(item.tool.name);
+    }
+    for (const name of pluginTools.keys()) names.add(name);
+    for (const name of declaredLoadout.keys()) names.add(name);
+    return [...names];
+  }
+
+  const api: PluginApiSurface = {
+    registerTool(tool) {
+      const name = tool.name;
+      if (typeof name !== "string" || name.length === 0) throw new Error("api.registerTool: name required");
+      const existing = pluginTools.get(name);
+      existing?.dispose();
+      const dispose = addDisposer(() => {
+        pluginTools.delete(name);
+      });
+      pluginTools.set(name, { tool, dispose });
+      return dispose;
+    },
+    onEvent(handler) {
+      return addDisposer(stream.subscribe(handler));
+    },
+    addConverter(fn) {
+      return addToList(converters, fn);
+    },
+    addContextTransform(fn) {
+      return addToList(contextTransforms, fn);
+    },
+    addBeforeToolCall(fn) {
+      return addToList(beforeToolCalls, fn);
+    },
+    addAfterToolCall(fn) {
+      return addToList(afterToolCalls, fn);
+    },
+    addTurnBoundary(fn) {
+      return addToList(turnBoundaries, fn);
+    },
+    addPrepareRequest(fn) {
+      return addToList(prepareRequestFns, fn);
+    },
+    addPrepareNextTurn(fn) {
+      return addToList(prepareNextTurnFns, fn);
+    },
+    provideSteering(source) {
+      return addToList(steeringSources, source);
+    },
+    provideFollowUp(source) {
+      return addToList(followUpSources, source);
+    },
+    provideStreamFn(fn) {
+      return addToList(streamFnProviders, fn);
+    },
+    declareToolLoadout(tools) {
+      declaredLoadout.clear();
+      for (const tool of tools) declaredLoadout.set(tool.name, tool);
+    },
+    useContext: () => options.coreContext,
+    events,
+    capabilities: () => securityBackend.capabilities(),
+    onEffect: (handler) => effectBridge.onEffect(handler),
+    addRedactor: (rule) => logger.addRedactor(rule),
+    disposeAll() {
+      for (const dispose of [...disposers].reverse()) dispose();
+    },
+  };
+
+  // 兼容门面贡献的 hook 同样纳入 api 生命周期，由 disposeAll 撤销。
+  for (const item of contributions) {
+    if (item.kind !== "hook") continue;
+    const handler: (event: AgentEvent) => void = item.handler;
+    addDisposer(stream.subscribe((event) => {
+      if (event.type === item.event) handler(event);
+    }));
+  }
 
   // 模型在纯文本流中用该标记请求工具调用（stub 期间尚无结构化 tool-call 通道）。
   const TOOL_MARKER_RE = /@@TOOL:([A-Za-z0-9_.:-]+):(.*?)@@/g;
@@ -263,24 +418,56 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
     const inbox: Inbox = createInbox();
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
+    for (const source of steeringSources) {
+      inbox.steer(source.next() as AgentMessage);
+    }
+    for (const source of followUpSources) {
+      inbox.followUp(source.next() as AgentMessage);
+    }
 
     const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>>();
     for (const item of contributions) {
       if (item.kind !== "tool") continue;
       const tool = item.tool;
-      toolRegistry.set(tool.name, () => (tool.execute as (input: never) => unknown)(undefined as never));
+      toolRegistry.set(tool.name, (args) => (tool.execute as (input: never) => unknown)(args as never));
     }
+    for (const [name, entry] of pluginTools) toolRegistry.set(name, (args) => (entry.tool.execute as (input: never) => unknown)(args as never));
+    for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args) => (tool.execute as (input: never) => unknown)(args as never));
+
+    const effectiveStreamFn = activeStreamFn();
+    const emitConverted = (input: unknown): void => {
+      for (const converter of converters) {
+        const event = converter(input);
+        if (event !== undefined) void stream.emit(event);
+      }
+    };
 
     const runtime: LoopRuntime = {
       inbox,
       emit: (event) => stream.emit(event),
       getState: () => stream.getState(),
+      prepareNextTurn: () => {
+        for (const fn of prepareNextTurnFns) fn(stream.getState());
+      },
+      prepareRequest: (request) => {
+        let result: unknown = request;
+        for (const transform of contextTransforms) result = transform(result);
+        for (const fn of prepareRequestFns) result = fn(result);
+        return result;
+      },
+      pollFollowUp: () => inbox.poll("nextTurn").map((item) => item.body),
+      finishTurn: (turn) => {
+        const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
+        for (const fn of turnBoundaries) fn(event);
+        return TURN_END_DECISION;
+      },
 
-      async streamAssistant(): Promise<AssistantResult> {
+      async streamAssistant(request: unknown): Promise<AssistantResult> {
         const updates: AssistantMessageEvent[] = [];
         let content = "";
-        if (streamFn !== undefined) {
-          for await (const chunk of streamFn({ messages: stream.getState().messages })) {
+        if (effectiveStreamFn !== undefined) {
+          for await (const chunk of effectiveStreamFn(request as AgentStreamRequest)) {
+            emitConverted(chunk);
             if (aborted) {
               return {
                 message: { role: "assistant", content },
@@ -332,15 +519,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
             output = "ABORTED";
           } else {
             try {
-              const value = await execute(
-                typeof call.args === "object" && call.args !== null
-                  ? (call.args as Readonly<Record<string, unknown>>)
-                  : {}
-              );
+              const args = typeof call.args === "object" && call.args !== null
+                ? (call.args as Readonly<Record<string, unknown>>)
+                : {};
+              for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
+              const value = await execute(args);
+              for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: false });
               output = value === undefined ? NO_TOOL_RESULT : value;
             } catch (error) {
               isError = true;
-              output = error instanceof Error ? error.message : String(error);
+              output = { ok: false, error: error instanceof Error ? error.message : String(error) };
             }
           }
           results.push({
@@ -353,7 +541,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
         return results;
       },
 
-      finishTurn: () => TURN_END_DECISION,
     };
 
     await runLoop(runtime);
@@ -371,9 +558,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       aborted = true;
     },
     waitForIdle: () => stream.waitForIdle(),
-    capabilities: () => securityBackend.capabilities(),
-    onEffect: (handler) => effectBridge.onEffect(handler),
-    addRedactor: (rule) => logger.addRedactor(rule),
+    ...api,
+    api,
     emitEffect: (meta) => effectBridge.emit(meta),
     resolveLogSink: (options) => resolveLogSink(options),
     logger,
@@ -395,7 +581,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
     get state() {
       return stream.getState();
     },
-    toolNames,
+    get toolNames() {
+      return toolNamesSnapshot();
+    },
+    toolDefinitions,
     assembly,
   };
 }
