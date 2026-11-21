@@ -15,6 +15,8 @@ import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
 import { ZetaEditor } from "./components/editor";
+import { ViewportLayout } from "./components/layout-view";
+import { WorkIndicator } from "./components/status-border";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
@@ -34,7 +36,7 @@ export function ZetaFrame(props: ZetaFrameProps) {
     <box flexDirection="column" width="100%" height="100%">
       <text fg={theme.color("accent")}>{props.title}</text>
       <box height={1} />
-      <scrollbox flexGrow={1}>
+      <scrollbox flexGrow={1} stickyScroll={true} stickyStart="bottom">
         <For each={props.lines}>{(line) => <text>{line}</text>}</For>
       </scrollbox>
     </box>
@@ -110,21 +112,30 @@ export function ZetaApp(props: {
 
   return (
     <>
-      <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
-        {(sourceAccessor: () => EventSource) => <RichMessageList source={sourceAccessor()} />}
-      </Show>
-      <ZetaEditor
-        onSubmit={(text) => {
-          if (text === "exit" || text === "quit") {
-            props.onExit();
-            return;
-          }
-          return props.onSubmit?.(text);
-        }}
+      <ViewportLayout
+        transcript={
+          <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
+            {(sourceAccessor: () => EventSource) => <RichMessageList source={sourceAccessor()} />}
+          </Show>
+        }
+        dock={
+          <>
+            <WorkIndicator source={props.source} />
+            <ZetaEditor
+              onSubmit={(text) => {
+                if (text === "exit" || text === "quit") {
+                  props.onExit();
+                  return;
+                }
+                return props.onSubmit?.(text);
+              }}
+            />
+            <BoundSlot name="footer" mode="replace">
+              <FooterBridge source={props.source} />
+            </BoundSlot>
+          </>
+        }
       />
-      <BoundSlot name="footer" mode="replace">
-        <FooterBridge source={props.source} />
-      </BoundSlot>
       <Show when={overlayOpen()}>
         <ConfirmOverlay
           message="确定退出？"
