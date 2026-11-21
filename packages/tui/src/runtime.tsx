@@ -1,6 +1,7 @@
 import { CliRenderer } from "@opentui/core";
 import { render as openTuiRender, useKeyboard } from "@opentui/solid";
 import { createSignal, For } from "solid-js";
+import { createAgentSignals, type AgentSignals } from "./signal";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
@@ -72,7 +73,19 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   });
   let push: (message: RuntimeMessage) => void = () => {};
 
+  const signals: AgentSignals | undefined = options.source
+    ? createAgentSignals(options.source)
+    : undefined;
+
+  const onSubmit = (text: string): void | Promise<void> => {
+    if (options.commands && text.startsWith("/")) {
+      return options.commands(text);
+    }
+    return options.onSubmit?.(text);
+  };
+
   const exit = () => {
+    signals?.dispose();
     renderer.destroy();
     resolveClosed();
   };
@@ -85,7 +98,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
         onPush={(sink) => {
           push = sink;
         }}
-        onSubmit={options.onSubmit}
+        onSubmit={onSubmit}
         onExit={() => {
           options.onExit?.();
           exit();
@@ -101,6 +114,9 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     },
     waitForExit() {
       return closed;
+    },
+    getSignals() {
+      return signals;
     },
     async destroy() {
       exit();
