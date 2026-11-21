@@ -6,6 +6,9 @@ export interface WordDiff {
   readonly kind: "replace" | "same";
   readonly before?: string;
   readonly after?: string;
+  /** 词级 LCS 结果：被删除/新增的词序列，供逐词反显渲染。 */
+  readonly removedWords?: readonly string[];
+  readonly addedWords?: readonly string[];
 }
 
 export interface DiffLine {
@@ -18,21 +21,51 @@ function splitWords(line: string): string[] {
   return line.match(/\S+|\s+/g) ?? [];
 }
 
-function firstDifference(a: string, b: string): number {
-  const length = Math.min(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    if (a[index] !== b[index]) return index;
+/** 真正的词级 LCS：返回未匹配（删除/新增）的词序列，支持插入、删除与多词重排。 */
+export function diffWords(before: string, after: string): {
+  readonly removedWords: readonly string[];
+  readonly addedWords: readonly string[];
+} {
+  const a = splitWords(before).filter((token) => token.trim().length > 0);
+  const b = splitWords(after).filter((token) => token.trim().length > 0);
+  const table: number[][] = Array.from({ length: a.length + 1 }, () =>
+    Array<number>(b.length + 1).fill(0),
+  );
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      table[i]![j] = a[i] === b[j]
+        ? table[i + 1]![j + 1]! + 1
+        : Math.max(table[i + 1]![j]!, table[i]![j + 1]!);
+    }
   }
-  return length;
+  const removedWords: string[] = [];
+  const addedWords: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      i += 1;
+      j += 1;
+    } else if (j < b.length && (i >= a.length || table[i]![j + 1]! >= table[i + 1]![j]!)) {
+      addedWords.push(b[j]!);
+      j += 1;
+    } else {
+      removedWords.push(a[i]!);
+      i += 1;
+    }
+  }
+  return { removedWords, addedWords };
 }
 
 function wordDiff(before: string, after: string): WordDiff | undefined {
   if (before === after) return undefined;
-  const at = firstDifference(before, after);
+  const { removedWords, addedWords } = diffWords(before, after);
   return {
     kind: "replace",
-    before: before.slice(Math.max(0, at - 2), at + 4),
-    after: after.slice(Math.max(0, at - 2), at + 4),
+    before,
+    after,
+    removedWords,
+    addedWords,
   };
 }
 

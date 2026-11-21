@@ -6,6 +6,7 @@ import { CodeContent, MarkdownContent, markdownPlain } from "./markdown";
 import { ToolBox } from "./tool-box";
 import { ThinkingBlock } from "./thinking";
 import { StatusBorder } from "./status-border";
+import { DiffView } from "./diff-view";
 
 export { CodeContent, MarkdownContent, markdownPlain } from "./markdown";
 
@@ -71,6 +72,7 @@ export function MessageList(props: MessageListProps) {
 
 export interface RichMessageListProps extends MessageListProps {
   readonly showTools?: boolean;
+  readonly diffs?: readonly { readonly before: string; readonly after: string }[];
 }
 
 /** 带工具盒的富消息列表：工具事件由内嵌 ToolBox 独立订阅同一事件源。 */
@@ -79,6 +81,11 @@ export function RichMessageList(props: RichMessageListProps) {
     <box flexDirection="column">
       <StatusBorder source={props.source} />
       <MessageList source={props.source} onRender={props.onRender} />
+      <Show when={props.diffs && props.diffs.length > 0}>
+        <For each={props.diffs}>
+          {(diff) => <DiffView before={diff.before} after={diff.after} />}
+        </For>
+      </Show>
       <Show when={props.showTools !== false}>
         <ToolBox source={props.source} />
       </Show>
