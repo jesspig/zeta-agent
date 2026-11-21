@@ -1,7 +1,8 @@
 import { CliRenderer } from "@opentui/core";
 import { render as openTuiRender, useKeyboard } from "@opentui/solid";
-import { createSignal, For } from "solid-js";
-import { createAgentSignals, type AgentSignals } from "./signal";
+import { createSignal, For, Show } from "solid-js";
+import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
+import { RichMessageList } from "./components/message";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
@@ -30,6 +31,7 @@ export function ZetaFrame(props: ZetaFrameProps) {
 function ZetaApp(props: {
   readonly title: string;
   readonly messages: readonly RuntimeMessage[];
+  readonly source?: EventSource;
   readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
   readonly onSubmit?: (text: string) => void | Promise<void>;
   readonly onExit: () => void;
@@ -54,7 +56,9 @@ function ZetaApp(props: {
 
   return (
     <>
-      <ZetaFrame title={props.title} lines={lines()} />
+      <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
+        {(source: EventSource) => <RichMessageList source={source} />}
+      </Show>
       <input placeholder="输入消息，回车发送；exit 退出" focused={true} onSubmit={submit} />
     </>
   );
@@ -95,6 +99,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
       <ZetaApp
         title={options.title ?? "zeta"}
         messages={options.messages ?? []}
+        source={options.source}
         onPush={(sink) => {
           push = sink;
         }}
