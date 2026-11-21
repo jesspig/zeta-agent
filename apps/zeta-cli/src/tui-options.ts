@@ -11,6 +11,10 @@ export function buildTuiOptions(
     title: `zeta v${version}`,
     source: { subscribe: (listener) => agent.subscribe(listener) },
     commands: (text) => handleCommand(text),
+    commandList: [
+      { id: "help", title: "显示帮助" },
+      { id: "clear", title: "清空当前会话" },
+    ],
     mode: "fullscreen",
     onSubmit: (text) => handleCommand(text),
   };

@@ -8,6 +8,7 @@ import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
 import { ThemeProvider, useTheme } from "./theme-context";
 import { createOscBridge } from "./osc";
+import { CommandPaletteView } from "./command-palette";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
@@ -45,9 +46,11 @@ export function ZetaApp(props: {
   readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
   readonly onSubmit?: (text: string) => void | Promise<void>;
   readonly onExit: () => void;
+  readonly commandList?: readonly { readonly id: string; readonly title: string }[];
 }) {
   const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
   const [overlayOpen, setOverlayOpen] = createSignal(false);
+  const [paletteOpen, setPaletteOpen] = createSignal(false);
   props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
 
   const keymap = createKeymap();
@@ -55,6 +58,7 @@ export function ZetaApp(props: {
   keymap.register({ combo: "ctrl+c", action: "exit", layer: "tui" });
   // pi 语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
+  keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
 
   const dimensions = useTerminalDimensions();
   const width = createMemo(() => clampWidth(100, dimensions().width));
@@ -74,6 +78,10 @@ export function ZetaApp(props: {
     }
     if (action === "confirm") {
       setOverlayOpen((open) => !open);
+      return;
+    }
+    if (action === "palette") {
+      setPaletteOpen((open) => !open);
       return;
     }
     // overlay 打开时按 pi 语义处理：Enter 确认。
@@ -119,6 +127,16 @@ export function ZetaApp(props: {
             props.onExit();
           }}
           onCancel={() => setOverlayOpen(false)}
+        />
+      </Show>
+      <Show when={paletteOpen()}>
+        <CommandPaletteView
+          commands={props.commandList ?? []}
+          onRun={(command) => {
+            setPaletteOpen(false);
+            void props.onSubmit?.(`/${command.id}`);
+          }}
+          onCancel={() => setPaletteOpen(false)}
         />
       </Show>
     </>
@@ -172,6 +190,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
             push = sink;
           }}
           onSubmit={onSubmit}
+          commandList={options.commandList}
           onExit={() => {
             options.onExit?.();
             exit();

@@ -15,6 +15,7 @@ export interface RuntimeTuiOptions {
   readonly onExit?: () => void;
   readonly source?: EventSource;
   readonly commands?: CommandHandler;
+  readonly commandList?: readonly { readonly id: string; readonly title: string }[];
   readonly theme?: TuiThemeName;
   readonly mode?: "regular" | "fullscreen";
 }
