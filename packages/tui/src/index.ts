@@ -1,4 +1,6 @@
 export * from "./slots";
+export * from "./hot-reload";
+export * from "./command-palette";
 export * from "./signal";
 export * from "./virtual";
 export * from "./hud";

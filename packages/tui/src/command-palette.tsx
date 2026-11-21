@@ -7,6 +7,18 @@ export interface Command {
   readonly title: string;
 }
 
+/** 命令规格的展示视图（与 @zeta-agent/agent 的 CommandSpec 解耦，避免 UI 依赖具体结构）。 */
+export interface CommandSpecView {
+  readonly name: string;
+  readonly description: string;
+  readonly category: string;
+}
+
+/** 把命令注册表规格映射为命令面板条目：id=命令名，title=描述。 */
+export function toPaletteCommands(specs: readonly CommandSpecView[]): readonly Command[] {
+  return specs.map((spec) => ({ id: spec.name, title: spec.description }));
+}
+
 export interface CommandPalette {
   filter(query: string): readonly Command[];
   select(id: string): Command | undefined;
