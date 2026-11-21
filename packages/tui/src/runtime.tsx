@@ -8,7 +8,13 @@ import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
 import { ThemeProvider, useTheme } from "./theme-context";
 import { createOscBridge } from "./osc";
-import { CommandPaletteView } from "./command-palette";
+import { CommandPaletteView, type Command } from "./command-palette";
+import {
+  ModelSelector,
+  SettingsSelector,
+  ThemeSelector,
+  type SelectOption,
+} from "./components/selectors/selectors";
 import { useZetaSlots, type ZetaNativeSlots } from "./slots-native";
 import type { SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
@@ -56,7 +62,35 @@ export function ZetaApp(props: {
   const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
   const [overlayOpen, setOverlayOpen] = createSignal(false);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  type SelectorKind = "model" | "theme" | "settings";
+  const [selectorOpen, setSelectorOpen] = createSignal<SelectorKind | undefined>(undefined);
   const { BoundSlot } = useZetaSlots(props.plugins);
+
+  const DEMO_OPTIONS: Readonly<Record<SelectorKind, readonly SelectOption[]>> = {
+    model: [
+      { value: "gpt-4o", label: "GPT-4o" },
+      { value: "claude-sonnet", label: "Claude Sonnet" },
+    ],
+    theme: [
+      { value: "dark", label: "dark" },
+      { value: "light", label: "light" },
+    ],
+    settings: [
+      { value: "editor", label: "编辑器" },
+      { value: "keymap", label: "快捷键" },
+    ],
+  };
+  const SELECTOR_TITLES: Readonly<Record<SelectorKind, string>> = {
+    model: "选择模型",
+    theme: "主题",
+    settings: "设置",
+  };
+  const paletteCommands = (): readonly Command[] => [
+    ...(props.commandList ?? []),
+    { id: "model", title: SELECTOR_TITLES.model },
+    { id: "theme", title: SELECTOR_TITLES.theme },
+    { id: "settings", title: SELECTOR_TITLES.settings },
+  ];
   props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
 
   const keymap = createKeymap();
@@ -65,6 +99,9 @@ export function ZetaApp(props: {
   // pi 语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
+  keymap.register({ combo: "ctrl+o", action: "model-selector", layer: "app" });
+  keymap.register({ combo: "ctrl+t", action: "theme-selector", layer: "app" });
+  keymap.register({ combo: "ctrl+s", action: "settings-selector", layer: "app" });
 
   const dimensions = useTerminalDimensions();
   const width = createMemo(() => clampWidth(100, dimensions().width));
@@ -88,6 +125,18 @@ export function ZetaApp(props: {
     }
     if (action === "palette") {
       setPaletteOpen((open) => !open);
+      return;
+    }
+    if (action === "model-selector") {
+      setSelectorOpen((kind) => (kind === "model" ? undefined : "model"));
+      return;
+    }
+    if (action === "theme-selector") {
+      setSelectorOpen((kind) => (kind === "theme" ? undefined : "theme"));
+      return;
+    }
+    if (action === "settings-selector") {
+      setSelectorOpen((kind) => (kind === "settings" ? undefined : "settings"));
       return;
     }
     // overlay 打开时按 pi 语义处理：Enter 确认。
@@ -148,13 +197,34 @@ export function ZetaApp(props: {
       </Show>
       <Show when={paletteOpen()}>
         <CommandPaletteView
-          commands={props.commandList ?? []}
-          onRun={(command) => {
+          commands={paletteCommands()}
+          onRun={(command: Command) => {
             setPaletteOpen(false);
+            const known: SelectorKind[] = ["model", "theme", "settings"];
+            if ((known as readonly string[]).includes(command.id)) {
+              setSelectorOpen(command.id as SelectorKind);
+              return;
+            }
             void props.onSubmit?.(`/${command.id}`);
           }}
           onCancel={() => setPaletteOpen(false)}
         />
+      </Show>
+      <Show when={selectorOpen() !== undefined}>
+        {() => {
+          const kind = selectorOpen() as SelectorKind;
+          const shared = {
+            options: DEMO_OPTIONS[kind],
+            onSelect: (option: SelectOption) => {
+              setSelectorOpen(undefined);
+              void props.onSubmit?.(`/${kind}:${option.value}`);
+            },
+            onCancel: () => setSelectorOpen(undefined),
+          };
+          if (kind === "model") return <ModelSelector {...shared} title={SELECTOR_TITLES[kind]} />;
+          if (kind === "theme") return <ThemeSelector {...shared} title={SELECTOR_TITLES[kind]} />;
+          return <SettingsSelector {...shared} title={SELECTOR_TITLES[kind]} />;
+        }}
       </Show>
     </>
   );

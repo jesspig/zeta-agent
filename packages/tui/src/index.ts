@@ -5,4 +5,5 @@ export * from "./hud";
 export * from "./frame-state";
 export * from "./backend";
 export * from "./slots-native";
+export * from "./components/selectors/selectors";
 export * from "./runtime";
