@@ -21,11 +21,11 @@ flowchart TB
     end
     subgraph FF["@zeta-agent/framework"]
         FFI["facade API"]
-        FCC["components/: cordis · events · scope · seam · loader · hmr · store · links · health"]
+        FCC["components/: cordis · events · capabilities · loader · observability · security（6 子包 + 聚合包）"]
     end
     subgraph AF["@zeta-agent/agent-framework"]
         AFI["facade API"]
-        ACC["agent-components/: loop · inbox · tools · decision · session · stream"]
+        ACC["agent-framework 内: runtime · tools · session（agent-components 为聚合出口）"]
     end
     CLI --> FFI
     CLI --> AFI
@@ -47,11 +47,11 @@ flowchart LR
         TU["tui"]
     end
     subgraph W2["packages/components/*"]
-        C1["cordis · events · scope · seam · registry · health"]
-        C2["loader · hmr · store · links · objects · testing"]
+        C1["cordis · events · capabilities"]
+        C2["loader · observability · security"]
     end
     subgraph W3["packages/agent-components/*"]
-        D1["decision · inbox · stream · tools · session · loop"]
+        D1["聚合出口（Agent 组件在 agent-framework 内）"]
     end
     subgraph W4["apps/*"]
         CLI["zeta-cli"]

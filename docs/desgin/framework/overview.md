@@ -40,19 +40,15 @@ packages/
   framework/            # @zeta-agent/framework —— facade 包（唯一公开出口）
     package.json        # exports: "." / "./package.json" / 显式子路径（见下）
     src/index.ts        # createContext / defineKey / defineComponent / use / on / loader.load ...
-  components/           # 分组目录（无 package.json），每个子目录是独立 workspace 包
+  components/           # 聚合包 @zeta-agent/components + 6 个组件子包（实际落地）
     cordis/             # @zeta-agent/cordis —— effect/coeffect/fiber/context（论文复刻组件）
     events/             # @zeta-agent/events —— 五模式派发 + Events 声明合并约束
-    scope/              # @zeta-agent/scope —— Scoped<T> 与范围路由
-    seam/               # @zeta-agent/seam —— Service Definition / Provider / Consumer
-    registry/           # @zeta-agent/registry —— defineRegistry / compose / accepts
-    loader/             # @zeta-agent/loader —— entry 对账 / patch 分层
-    hmr/                # @zeta-agent/hmr —— 单队列 HMR + readiness
-    health/             # @zeta-agent/health —— HealthBoard 单写者断言
-    store/              # @zeta-agent/store —— documents / transactions / watch
-    links/              # @zeta-agent/links —— memory / ipc / ws
-    objects/            # @zeta-agent/objects —— contract / object / reference
-    testing/            # @zeta-agent/testing —— fake context / 断言 / 汇合性测试
+    capabilities/       # @zeta-agent/capabilities —— scope/seam/registry/health 职责并入
+    loader/             # @zeta-agent/loader —— entry 对账 / patch 分层 / HMR（hmr 并入）
+    observability/      # @zeta-agent/observability —— effect 元树→span / 脱敏 / HealthBoard
+    security/           # @zeta-agent/security —— 能力探测 / 隔离 / egress 默认拒绝
+  testing/              # @zeta-agent/testing —— 独立测试工具包（非组件子包）
+  agent-components/     # @zeta-agent/agent-components —— Agent 侧聚合出口
 ```
 
 `framework` facade 包只依赖组件包做装配与统一出口。应用（agent/tui/cli）**只依赖 facade 包**，不依赖任何组件子包（架构守护脚本强制，见 [framework-model §6.1](../architecture/framework-model.md#61-packagejson-依赖方向静态可检查)）。组件包可独立单测与替换实现。

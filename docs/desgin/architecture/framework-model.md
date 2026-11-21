@@ -19,8 +19,8 @@
 
 交付**两个框架 + 应用形态**（当前模型，详见 [§4](./framework-model.md#4-两个框架与应用形态组件拼装模型)；早期"四层"是迁移视角的历史表述，已废弃）：
 
-1. **通用框架 `@zeta-agent/framework`**（复刻 Cordis 论文的 core library + component loader）：由多个内部组件拼装——cordis（effect/fiber/coeffect）、events、scope、seam、registry、loader、hmr、store、links、health、objects 与 observability；对上层只暴露 facade。
-2. **Agent 框架 `@zeta-agent/agent-framework`**（类 pi-agent-core）：由 loop/inbox/tools/decision/session/stream 组件拼装，在通用框架 facade 之上提供 agent loop、工具流水线、事件协议、状态机、可替换 hook——**核心保持极简，工具/模型/策略全部外置**，对上层只暴露 facade。
+1. **通用框架 `@zeta-agent/framework`**（复刻 Cordis 论文的 core library + component loader）：由 6 个内部组件子包拼装——cordis（effect/fiber/coeffect）、events、capabilities（含 scope/seam/registry/health 职责）、loader（含 hmr）、observability、security；对上层只暴露 facade。
+2. **Agent 框架 `@zeta-agent/agent-framework`**（类 pi-agent-core）：在 `@zeta-agent/agent-framework` 聚合包内以源码模块提供 agent loop、inbox、工具流水线、事件协议、状态机、可替换 hook（`src/runtime`/`src/tools`/`src/session`）——**核心保持极简，工具/模型/策略全部外置**，对上层只暴露 facade。
 3. **应用形态层**：`@zeta-agent/agent`（插件装配出的极简 harness）、`@zeta-agent/tui`（OpenTUI 与 SolidJS，UI 片段作为插件贡献）、`apps/zeta-cli`（装配与入口）——都只调用两个框架的 facade，不深入组件。
 
 ### 1.2 明确不做
@@ -94,14 +94,15 @@ flowchart TB
 
 ### 4.1 通用框架 `@zeta-agent/framework`
 
-**定位**：由多个内部组件拼装成的通用运行时框架。Cordis 论文复刻是其中**一个组件**（提供 effect/coeffect/fiber 语义），不是框架全部；其余组件包括事件系统、scope、seam/registry、loader、HMR、store/link、HealthBoard 等。
+**定位**：由 6 个内部组件子包拼装成的通用运行时框架。Cordis 论文复刻是其中**一个组件**（提供 effect/coeffect/fiber 语义），不是框架全部；其余组件为事件系统、能力登记、加载器、可观测与安全。
 
-**内部组件**（对外不可见，见 [04](../framework/overview.md)）：
+**内部组件子包**（实际 6 个，对外不可见，见 [04](../framework/overview.md)）：
 - `cordis/`：`ctx.effect` / `get/set/isolate/intercept` / fiber 状态机（论文 §5.1 的复刻）
 - `events/`：五种派发模式 + `interface Events` 声明合并做静态约束（非 @mode 装饰器）
-- `scope/`、`seam/`、`registry/`：能力登记与范围路由
-- `loader/`、`patch/`、`hmr/`：配置分层、entry 对账、运行时热替换（论文 §5.2 的复刻）
-- `store/`、`links/`、`objects/`：可选数据/跨进程组件
+- `capabilities/`：能力登记与范围路由（scope/seam/registry/health 职责并入）
+- `loader/`：配置分层、entry 对账、运行时热替换（hmr 职责并入，论文 §5.2 的复刻）
+- `observability/`：effect 元树→span、脱敏、HealthBoard
+- `security/`：能力探测、隔离/seccomp、egress 默认拒绝
 
 **对外 facade API**（应用与各框架使用的唯一入口）：
 `createContext()`、`defineKey()`、`defineComponent()`、`ctx.use()`、`ctx.provide()`、`ctx.on()`、`loader.load(profile)`、`ctx.hmr.watch()` 等。**应用不 import 内部组件**。
@@ -145,12 +146,12 @@ flowchart TB
         AG["agent/<br/>src/index.ts · plugins/ · prompts/"]
         TU["tui/<br/>src/index.ts · App.tsx · signals.ts · slots.ts · components/"]
     end
-    subgraph COMP["components/ 分组目录（无 package.json）"]
-        C1["cordis · events · scope · seam · registry · health"]
-        C2["loader · hmr · store · links · objects · testing"]
+    subgraph COMP["components/ 聚合包 + 6 组件子包"]
+        C1["cordis · events · capabilities"]
+        C2["loader · observability · security"]
     end
-    subgraph AC["agent-components/ 分组目录（无 package.json）"]
-        D1["loop · inbox · tools · decision · session · stream"]
+    subgraph AC["agent-components/ 聚合包（Agent 组件以源码模块形式在 agent-framework 内）"]
+        D1["runtime · tools · session（agent-framework 聚合包）"]
     end
     PKG --> PKGB
     PKG --> COMP
@@ -159,7 +160,7 @@ flowchart TB
     AC --> AFW
 ```
 
-**workspace glob**：`["apps/*", "packages/*", "packages/components/*", "packages/agent-components/*"]`。`components/` 与 `agent-components/` 是**分组目录，自身没有 `package.json`**——这是 Turborepo 官方建议的写法（不支持嵌套包的 `**`，但支持 `packages/*` + `packages/group/*` 且 group 不建 package.json，见 [engineering §3.2](./engineering.md#32-turborepo)）。
+**workspace glob**：`["apps/*", "packages/*", "packages/components/*", "packages/agent-components/*"]`。`components/` 与 `agent-components/` 既是**分组目录**，也各自是**聚合包**（`@zeta-agent/components`、`@zeta-agent/agent-components`，含 `package.json`，汇总子包导出）。Turborepo 通过 `packages/*` + `packages/group/*` 两个 glob 覆盖子包（不支持嵌套包的 `**`，见 [engineering §3.2](./engineering.md#32-turborepo)）。
 
 **精简约束**：不创建 `@zeta-agent/types`、`@zeta-agent/utils`、`@zeta-agent/config` 等公共包；类型与工具就在产生它们的组件包里导出。仅当出现真实的三处重复时才提取（YAGNI）。
 
@@ -167,53 +168,40 @@ flowchart TB
 
 > 决策记录：采用"facade 包 + 内部组件子包 + 分组目录"的混合方案（用户裁决）。参照 dsh 的 `packages/*/*` 组织方式；分组目录规避 Turborepo 的嵌套包限制。
 
-**通用框架组件（`packages/components/*`）**：
+**通用框架组件（`packages/components/*`，实际 6 个子包）**：
 
 | 包 | 职责 | 依赖的其他组件 |
 | --- | --- | --- |
 | `@zeta-agent/cordis` | effect/coeffect/fiber、context、target/committed、guard（论文复刻） | 无（最底层） |
 | `@zeta-agent/events` | emit/parallel/serial/bail/waterfall、声明合并静态约束 | cordis（listener 注册=effect） |
-| `@zeta-agent/scope` | `ScopeKey`/`Scoped<T>`、范围路由、双路径 teardown | cordis |
-| `@zeta-agent/seam` | Seam 三段式登记、能力图、单一写入者断言 | cordis、scope |
-| `@zeta-agent/registry` | `defineRegistry`/compose/accepts、contribution | cordis、seam |
-| `@zeta-agent/loader` | profile/bundle/patch 分层、entry 对账、realm 重分配 | cordis、seam、registry |
-| `@zeta-agent/hmr` | 运行时热替换、单队列、readiness、digest | loader、cordis |
-| `@zeta-agent/health` | HealthBoard 单写者断言 | cordis |
-| `@zeta-agent/store` | document/transaction/watch、Snapshot 链 | cordis、scope |
-| `@zeta-agent/links` | memory/ipc/ws link、codec | store |
-| `@zeta-agent/objects` | contract/object/reference（可选） | store、links |
-| `@zeta-agent/testing` | fake context、断言、汇合性测试工具 | 全部组件（仅测试期） |
+| `@zeta-agent/capabilities` | 能力登记/范围路由/单一写入者断言（原 scope/seam/registry/health 职责并入） | cordis |
+| `@zeta-agent/loader` | profile/bundle/patch 分层、entry 对账、热替换（原 hmr 职责并入） | cordis、capabilities |
+| `@zeta-agent/observability` | effect 元树→span、脱敏、HealthBoard | cordis、capabilities |
+| `@zeta-agent/security` | 能力探测、隔离/seccomp、egress 默认拒绝 | cordis、capabilities |
 
-**Agent 框架组件（`packages/agent-components/*`）**：
+> **包结构对齐说明**：原设计列出的 `@zeta-agent/scope`/`seam`/`registry`/`health`/`hmr`/`store`/`links`/`objects` 并未作为独立子包落地——其职责并入 `capabilities`/`loader`/`observability`，数据/跨进程组件（store/links/objects）暂未实现（YAGNI）。`@zeta-agent/testing` 是独立测试工具包（`packages/testing`，不属于组件子包）。聚合包 `@zeta-agent/components` 汇总上述组件。
 
-| 包 | 职责 | 依赖 |
-| --- | --- | --- |
-| `@zeta-agent/loop` | runLoop、turn/step 状态机、HITL | decision、inbox、stream |
-| `@zeta-agent/inbox` | next-turn/next-step 双队列、`inject()` | cordis（facade） |
-| `@zeta-agent/decision` | Decision union、单调 guard、reason/act/exit | events（facade） |
-| `@zeta-agent/tools` | 工具流水线、schemas allowlist、guardrail、结构化失败 | decision、scope（facade） |
-| `@zeta-agent/session` | surface append/replace、message projection、replay | cordis/store（facade） |
-| `@zeta-agent/stream` | AgentEvent 映射、块级流式、interrupt | events（facade） |
+**Agent 框架（聚合包 `@zeta-agent/agent-framework`）**：
+
+runLoop、turn/step 状态机、inbox 双队列、decision 单调 guard、工具流水线、session surface、流式映射等**均在 `@zeta-agent/agent-framework` 包内实现**（`src/runtime`、`src/tools`、`src/session`），未拆为独立子包。原设计列出的 `@zeta-agent/loop`/`inbox`/`decision`/`tools`/`session`/`stream` 独立包未落地；聚合包 `@zeta-agent/agent-components` 汇总 Agent 侧组件贡献（当前以源码模块形式存在）。
 
 ```mermaid
 flowchart TB
     subgraph FW["@zeta-agent/framework（facade 包）"]
         FFI["src/index.ts"]
     end
-    subgraph CC["packages/components/*（通用框架组件）"]
+    subgraph CC["packages/components/*（通用框架组件，实际 6 子包）"]
         C1["cordis"]
-        C2["events · scope · seam · registry · health"]
-        C3["loader · hmr"]
-        C4["store · links · objects"]
-        C5["testing"]
+        C2["events"]
+        C3["capabilities（scope/seam/registry/health 并入）"]
+        C4["loader（hmr 并入）"]
+        C5["observability · security"]
     end
     subgraph AFW["@zeta-agent/agent-framework（facade 包）"]
         AFI["src/index.ts"]
     end
-    subgraph AC["packages/agent-components/*（Agent 框架组件）"]
-        D1["decision · inbox · stream"]
-        D2["tools · session"]
-        D3["loop"]
+    subgraph AC["agent-framework 聚合包内源码模块（原 agent-components 子包未落地）"]
+        D1["runtime · tools · session"]
     end
     APP["@zeta-agent/agent · @zeta-agent/tui · apps/zeta-cli"]
 
@@ -221,7 +209,7 @@ flowchart TB
     C1 --> C4 --> C3
     C2 --> C5
     C3 & C4 --> FFI
-    D1 --> D2 --> D3 --> AFI
+    D1 --> AFI
     FFI --> AFI
     AFI --> APP
 ```
@@ -323,14 +311,12 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    C1[cordis] --> C2[events · scope · registry · health]
-    C2 --> C3[loader · hmr]
-    C1 --> C4[store]
-    C4 --> C5[links · objects]
-    C3 & C5 --> FW[framework facade]
-    D1[decision · inbox · stream] --> D2[tools · session]
-    D2 --> D3[loop]
-    D3 --> AF[agent-framework facade]
+    C1[cordis] --> C2[events]
+    C1 --> C3[capabilities]
+    C1 --> C4[loader]
+    C2 & C3 & C4 --> C5[observability · security]
+    C3 & C4 & C5 --> FW[framework facade]
+    D1[runtime · tools · session] --> AF[agent-framework facade]
     FW --> AF
 ```
 
