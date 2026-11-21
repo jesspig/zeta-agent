@@ -131,6 +131,8 @@ export function createAgentSignals(agent: Agent) {
 
 ## 5 插件 UI 槽位
 
+> **实现状态（T-09 延期结论）**：以下官方 Solid slots 代码是**目标设计/事实 API 参考**，**非当前发布实现**。当前 `packages/tui/src/slots.ts` 是自研字符串注册表（`SlotRegistry`/`createSlotRegistry`，返回 `string`），作为 facade 契约。官方 `createSolidSlotRegistry` 需要 native `CliRenderer` + `PluginContext`、返回 `JSX.Element`，与 string 契约及"业务组件零 @opentui import"守护冲突，故适配**延期**（O-2，见 D-04 延期结论）；官方 API 仅在 `renderTui()` 的 TSX 渲染路径内按需使用，不作为发布 facade。
+
 使用 OpenTUI 官方 Solid slots（事实 API）：
 
 ```ts
