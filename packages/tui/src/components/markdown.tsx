@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
+import { useTheme } from "../theme-context";
 
-/** 纯字符串 markdown 投影：在测试环境（tree-sitter 不可用）提供稳定可读的降级文本。 */
+/** 稳定 markdown 投影：标题/粗体/行内代码做可读降级，无 tree-sitter 依赖。 */
 export function markdownPlain(source: string): string {
   return source
     .split("\n")
@@ -15,12 +16,27 @@ export interface MarkdownContentProps {
   readonly width?: number | string;
 }
 
-/** 生产渲染：优先官方 markdown，流式/测试环境用纯文本投影辅助。 */
+/**
+ * Markdown 正文：用稳定投影渲染（流式安全）。
+ * 围栏代码块走 CodeContent；CodeContent 在语法高亮不可用时降级纯文本。
+ */
 export function MarkdownContent(props: MarkdownContentProps) {
+  const segments = () => props.content.split(/```/);
   return (
-    <box>
+    <box flexDirection="column">
       <Show when={props.content.length > 0} fallback={<text> </text>}>
-        <text>{markdownPlain(props.content)}</text>
+        {segments().map((segment, index) =>
+          index % 2 === 1 ? (
+            <CodeContent
+              content={segment.replace(/^[a-zA-Z0-9+#_-]+\n/, "")}
+              filetype={segment.match(/^([a-zA-Z0-9+#_-]+)\n/)?.[1]}
+            />
+          ) : (
+            <Show when={segment.trim().length > 0}>
+              <text>{markdownPlain(segment)}</text>
+            </Show>
+          ),
+        )}
       </Show>
     </box>
   );
@@ -31,11 +47,15 @@ export interface CodeContentProps {
   readonly filetype?: string;
 }
 
+/** 代码块渲染：带语言标签的稳定文本投影（高亮能力由宿主渲染器决定）。 */
 export function CodeContent(props: CodeContentProps) {
+  const theme = useTheme();
   return (
-    <box>
-      <text>...</text>
-      <text>{props.content}</text>
+    <box flexDirection="column">
+      <Show when={props.filetype}>
+        <text fg={theme.color("thinking")}>{`[${props.filetype}]`}</text>
+      </Show>
+      <text>{props.content.trimEnd()}</text>
     </box>
   );
 }
