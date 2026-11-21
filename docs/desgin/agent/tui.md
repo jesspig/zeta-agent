@@ -280,6 +280,36 @@ print/json/rpc 模式（[framework-model/engineering §9](../architecture/engine
 | 无 TUI 模式 | [framework-model/engineering §9](../architecture/engineering.md#9-运行形态cli-sdk-rpc-静默模式) | CI 冒烟 |
 | 迁移阶段 | [08](../delivery/roadmap.md) | 阶段验收 |
 
+## 13 pi 要素对照清单（T-13/T-14 执行阶段生成）
+
+下表逐项核对 pi 交互式 TUI 的关键体验要素与 zeta 实现的对应关系（体验等价，非像素/API 级 1:1）。证据见 `.handoff/evidence/T-01..T-14/`。
+
+| pi 要素 | zeta 实现 | 达成 | 证据 |
+| --- | --- | --- | --- |
+| 消息流/流式增量 | `components/message.tsx` 就地更新，partial 快照在 await 前更新 | ✅ | T-05 frames.log / T-03 green.log |
+| markdown/code 渲染 | `components/markdown.tsx` 投影 + `<code>`，tree-sitter 不可用时降级 | ✅ | T-05 frames.log |
+| 工具盒三态+折叠 | `components/tool-box.tsx` running/done/error + 折叠控制器 | ✅ | T-06 frames.log |
+| 行级/词级 diff | `components/diff-view.tsx` LCS 行级 + 词级标记 | ✅ | T-06 frames.log |
+| thinking 折叠 | `components/thinking.tsx` 摘要/全文 | ✅ | T-06 frames.log |
+| 编辑历史+草稿 | `editor-history.ts` IF-10，100 条+草稿 | ✅ | T-08 green.log |
+| CJK/grapheme/kill-ring/undo/paste | `paste.ts` Intl.Segmenter + killRing + undoStack + bracketed paste 折叠 | ✅ | T-08 green.log |
+| 文件/slash/provider 补全+防陈旧 | `completion.ts` IF-09，按来源 generation 守卫 | ✅ | T-09 green.log |
+| 命令面板 | `command-palette.tsx` 过滤/选中 | ✅ | T-09 green.log |
+| 三层键位+冲突检测 | `keymap.ts` IF-07，user>app>tui + KEYMAP_CONFLICT | ✅ | T-10 green.log |
+| overlay 确认+resize | `components/overlay.tsx` + useTerminalDimensions 裁剪 | ✅ | T-10 green.log |
+| 滚动跟随+状态边框 | `components/status-border.tsx` stickyScroll + working/retry/compaction/blocked | ✅ | T-07 frames.log |
+| 主题 system/dark/light+热重载 | `theme.ts` IF-08，token 化、不重启 fiber | ✅ | T-11 frames.log |
+| 状态栏+hud+OSC | `components/footer.tsx` + hud.ts + osc.ts（7501/9;4） | ✅ | T-12 frames.log |
+| regular/fullscreen 双模式 | `dual-mode.ts` screenMode 映射，O-12 实测可行 | ✅ | T-12 dual-mode-spike.log |
+| 运行时插件 UI 替换（万物皆插件） | `runtime-plugin-loader.tsx` + `slots-native.tsx` 受控 seam，closure rule | ✅ | T-01 green.log |
+| 事件顺序不变量 | partial 在 await 前更新；工具完成顺序与 transcript 顺序解耦 | ✅ | T-03 green.log |
+| CLI 共用 options | `apps/zeta-cli/src/tui-options.ts` source/commands/mode 契约 | ✅ | T-13 green.log |
+
+**已知偏差/边界**（非阻塞）：
+- pi 本身用 jiti + 命令式 `ctx.ui` + 自研 TUI，非 OpenTUI slots；zeta 的官方 Solid slots seam 是结合目标栈的自研设计，仅借鉴 pi 的行为语义（命令式替换 + 失败回退）。
+- 词级 diff 为同位置改写的近似标记，未做完整词级 LCS（低优先项）。
+- markdown 在 tree-sitter 不可用的测试环境使用纯文本投影，生产环境由 OpenTUI 原生渲染。
+
 **返回索引**：[00 索引与交叉验证](../README.md)
 
 
