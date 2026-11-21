@@ -12,6 +12,8 @@ export function oscSequence(kind: OscKind, value: string | number): string {
   return `\x1b]${OSC_9_4};${state}\x1b\\`;
 }
 
+import type { AgentSignals } from "./signal";
+
 export interface OscReporter {
   reportProgress(percent: number): void;
   reportStatus(status: string): void;
@@ -26,5 +28,21 @@ export function createOscReporter(write: (sequence: string) => void): OscReporte
     reportStatus(status) {
       write(oscSequence("status", status));
     },
+  };
+}
+
+/** 把 agent 状态桥接到 OSC：status 变化时上报工作状态，消息增长时上报粗略进度。返回解除订阅函数。 */
+export function createOscBridge(signals: AgentSignals, write: (sequence: string) => void): () => void {
+  const reporter = createOscReporter(write);
+  const offStatus = signals.status.subscribe((status) => {
+    reporter.reportStatus(status === "idle" ? "done" : "working");
+  });
+  const offMessages = signals.messages.subscribe((messages) => {
+    reporter.reportProgress(Math.min(100, messages.length * 2));
+  });
+  return () => {
+    offStatus();
+    offMessages();
+    reporter.reportStatus("done");
   };
 }

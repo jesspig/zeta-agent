@@ -7,6 +7,7 @@ import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
 import { ThemeProvider, useTheme } from "./theme-context";
+import { createOscBridge } from "./osc";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
@@ -141,6 +142,10 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const signals: AgentSignals | undefined = options.source
     ? createAgentSignals(options.source)
     : undefined;
+  // OSC 7501/9;4：向终端上报工作状态与进度；退出时复位为 done。
+  const releaseOsc = signals
+    ? createOscBridge(signals, (sequence) => process.stdout.write(sequence))
+    : undefined;
 
   const onSubmit = (text: string): void | Promise<void> => {
     if (options.commands && text.startsWith("/")) {
@@ -150,6 +155,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   };
 
   const exit = () => {
+    releaseOsc?.();
     signals?.dispose();
     renderer.destroy();
     resolveClosed();
