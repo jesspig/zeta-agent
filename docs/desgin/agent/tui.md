@@ -1,6 +1,6 @@
 # TUI 设计（OpenTUI 与 SolidJS）
 
-> **实现状态（2026-11-21 更新）**：OpenTUI 0.9.3 + SolidJS 为仓库**默认且唯一发布实现**。交互 TUI 经 `renderTui()` 用 OpenTUI 官方 `render()` 在终端原生绘制；早期自研 ASCII 字符串渲染（`frame.ts` 的 `+---+` 边框，事实上的 StringBackend）已**删除**，不再产出字符画边框。同时公开 `RendererBackend` seam 与 `createTui({ backend })`，供**用户自带** Ink / TermUI / REPL 后端按同一契约接入——仓库自身不提供任何替代后端。native 在 CI 不可用时测试标 skip、`--print` 无头模式绕开，这不是"降级后端"。
+> **实现状态（2026-11-21 更新）**：OpenTUI 0.9.3 + SolidJS 为仓库**默认且唯一发布实现**。交互 TUI 经 `renderTui()` 用 OpenTUI 官方 `render()` 在终端原生绘制；早期自研 ASCII 字符串渲染（`frame.ts` 的 `+---+` 边框，事实上的 StringBackend）已**删除**，不再产出字符画边框。同时公开 `RendererBackend` seam 与 `createTui({ backend })`，供**用户自带** Ink / TermUI / REPL 后端按同一契约接入——仓库自身不提供任何替代后端。native 在 CI 不可用时测试标 skip、`--print` 无头模式绕开，这不是"降级后端"。2026-11-21 增补：运行时 TSX 插件加载与官方 Solid slots 已实测通过（T-01/T-02），以受控 seam（`runtime-plugin-loader.tsx`/`slots-native.tsx`）承载，facade string 槽位契约保持不变。
 > **文档定位**：TUI 设计（OpenTUI 与 SolidJS）（从 `07-TUI设计.md` 拆分/重命名而来，链接已按新结构重写）。
 > **所属索引**：[本目录索引](./README.md) · [总索引](../README.md)
 > **来源分级**：一手来源为 [在线论文](https://arxiv.org/abs/2608.25512v1) 与 [GitHub 源码](https://github.com/earendil-works/pi)（逐文件链接见正文）；汇总见 [事实登记](../architecture/fact-registry.md)。
@@ -92,7 +92,7 @@ function createTui(options?: { backend?: RendererBackend }): TuiHandle;
   - `OpenTuiBackend.render(frame)`：**无终端环境下的稳定字符串快照投影**——对 `FrameState.lines/hud` 做定宽裁剪/补齐后 `join("\n")` 得到 `Frame.snapshot`，**不调用任何 OpenTUI/native API**。供快照断言与无 TTY 场景使用，不声称是原生渲染。
   - `OpenTuiBackend.testRender(node)`：包装 `@opentui/solid` 官方 `testRender`（`renderOnce` → `captureCharFrame` → `renderer.destroy`），用于真实帧快照稳定性测试。
   - `renderTui(options)`：OpenTUI 官方 `render()` + 自建 `CliRenderer` + Solid signal + `<box>/<scrollbox>/<text>/<input>` 终端原生绘制；返回 `RuntimeTuiHandle`（`appendMessage` / `waitForExit` / `destroy`）。CLI 交互 TUI 默认走此路径；早期画 `+---+` 边框的 ASCII `frame.ts` 已删除。
-- **边界**：业务组件（`slots/signal/virtual/hud/frame-state/backend`）零直接 import `@opentui/solid`，由 `scripts/guard-architecture.mjs` 静态守护。
+- **边界**：业务组件（`slots/signal/virtual/hud/frame-state/backend`）零直接 import `@opentui/solid`，由 `scripts/guard-architecture.mjs` 静态守护。运行时插件 API（`@opentui/core/runtime-plugin`、`@opentui/solid/runtime-plugin-support`）仅允许在受控 seam 文件 `runtime-plugin-loader.tsx`/`slots-native.tsx` 中直接 import，已列入守护白名单（T-02）。
 
 ## 4 AgentEvent → Solid signal 映射
 
@@ -131,7 +131,7 @@ export function createAgentSignals(agent: Agent) {
 
 ## 5 插件 UI 槽位
 
-> **实现状态（T-09 延期结论）**：以下官方 Solid slots 代码是**目标设计/事实 API 参考**，**非当前发布实现**。当前 `packages/tui/src/slots.ts` 是自研字符串注册表（`SlotRegistry`/`createSlotRegistry`，返回 `string`），作为 facade 契约。官方 `createSolidSlotRegistry` 需要 native `CliRenderer` + `PluginContext`、返回 `JSX.Element`，与 string 契约及"业务组件零 @opentui import"守护冲突，故适配**延期**（O-2，见 D-04 延期结论）；官方 API 仅在 `renderTui()` 的 TSX 渲染路径内按需使用，不作为发布 facade。
+> **实现状态（2026-11-21 更新，T-01/T-02）**：运行时 TSX 插件加载与官方 Solid slots 已在本轮**实测通过**（AC-01）：`packages/tui/src/runtime-plugin-loader.tsx` 封装 `ensureRuntimePluginSupport`/`createRuntimePlugin`/`loadRuntimePlugin`，`packages/tui/src/slots-native.tsx` 包装官方 `createSolidSlotRegistry`/`createSlot`/`Slot`。测试证明插件加载后 Slot UI 可见、热卸载后恢复、坏插件渲染失败时旧 UI 保留（closure rule）。这两个文件是唯一允许直接 import 运行时插件 API 的**受控 seam**，已列入 `scripts/guard-architecture.mjs` 白名单；业务文件仍零直接 `@opentui` import。facade 的 string 槽位契约（`slots.ts` 的 `createSlotRegistry()`，IF-05）**保持不变**，官方 Solid slots（IF-03）作为受控 seam 并存，二者不冲突。D-04/O-11 原"延期"结论已由实测收敛为"本轮验证通过"。
 
 使用 OpenTUI 官方 Solid slots（事实 API）：
 
@@ -259,12 +259,12 @@ print/json/rpc 模式（[framework-model/engineering §9](../architecture/engine
 | --- | --- |
 | OpenTUI native 依赖跨平台/CI 不可用 | `testRender` 无终端测试；CI 用 `--print` 模式；native 不可用时测试标 skip（非 ASCII 降级后端）；文档标注平台矩阵 |
 | Solid 与 fiber 生命周期双轨 | `onCleanup` 与 fiber 逆统一：UI 插件一律通过 fiber 加载，cleanup 即逆 |
-| 运行时 TSX 插件加载复杂 | 按官方 `runtime-plugin-support` + module map 配置；先只支持构建期 UI 插件，运行时加载为第二阶段 |
+| 运行时 TSX 插件加载复杂 | 已验证可行：Bun 下动态导入 TSX + 官方 `runtime-plugin-support` + Solid slots 均可用，封装于受控 seam（T-01/T-02）；pi 采用 jiti + 命令式 UI 的不同路线，仅作行为语义参考 |
 | 槽位 API 版本变化（0.9.x） | 锁定 `@opentui/*` 同版本；封装在 `@zeta-agent/tui` 内，上层不直接依赖 |
 | 主题/语言插件切换引发整树重绘 | 用 signal 精细更新；实测帧差异 |
 
 **开放问题**：
-- O-11：UI 插件是否允许运行时加载 TSX（需要 `runtime-plugin-support`），还是仅构建期？建议第一阶段仅构建期。
+- O-11（已收敛，T-01）：UI 插件允许运行时加载 TSX——实测 `loadRuntimePlugin` 动态导入 `.tsx` 插件并注入官方 Solid Slot 成功，热卸载与失败保留旧 UI 均通过；实现位于受控 seam，不影响 facade string 契约。
 - O-12：是否保留 pi 的 alt-screen 模式？OpenTUI 的默认渲染模型不同，需实测决定；initial 只实现主屏幕模式。
 
 
