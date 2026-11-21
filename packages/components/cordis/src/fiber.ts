@@ -1,5 +1,5 @@
 import type { CoeffectKey, Disposer, Effect, Impl, LifecycleState, View } from "@zeta-agent/framework";
-import { effect, execute, NOOP, toIterator, type EffectHost } from "./effect";
+import { effect, execute, NOOP, toIterator, unloadHost, type EffectHost } from "./effect";
 
 export function key<T = unknown>(name: string): CoeffectKey<T> {
   return { namespace: "@zeta-agent/testing", name, symbol: Symbol(name) } as CoeffectKey<T>;
@@ -139,7 +139,14 @@ export class Fiber {
       if (!stillActive) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    if (this.state.kind === "UNLOADING") await this.state.dispose();
+    if (this.state.kind === "UNLOADING") {
+      // 统一回收：state.dispose（apply yield 的逆）+ host.effects（多次顶层 ctx.effect 的逆）。
+      // unloadHost 逆序启动 top-level 逆并并发执行；effect 内部 LIFO 与 armed 门控避免重复回收。
+      await this.state.dispose();
+      await unloadHost(this.host);
+      // 清空已回收的顶层逆，避免 reload 后 host.effects 跨生命周期累积。
+      (this.host.effects as Disposer[]).length = 0;
+    }
     for (const name of this.spec.inject) {
       this.system.providerOf(name, this.uid)?.dependents.delete(this);
     }

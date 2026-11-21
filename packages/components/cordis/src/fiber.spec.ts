@@ -81,4 +81,40 @@ describe("Fiber 六态状态机", () => {
     expect(kinds).toHaveLength(6);
     expect(kinds).not.toContain("INACTIVE");
   });
+
+  test("unload 回收 apply 内多次 ctx.effect 的全部逆（unloadHost）", async () => {
+    // 审计项 D：apply 内多次 ctx.effect，卸载时所有逆须被统一回收。
+    // 当前 unload 只 await state.dispose，多次 effect 中未被 yield 的逆残留 → RED。
+    const system = new FiberSystem();
+    const inverseOrder: number[] = [];
+    const provider = system.create(spec({ uid: "provider", provide: [dep] }));
+    const consumer = system.create(
+      spec({
+        uid: "consumer-multi-effect",
+        inject: [dep],
+        apply: (ctx) => {
+          ctx.effect(() => () => {
+            inverseOrder.push(1);
+          });
+          ctx.effect(() => () => {
+            inverseOrder.push(2);
+          });
+          return NOOP;
+        },
+      })
+    );
+    await provider.refresh();
+    await consumer.refresh();
+    expect(consumer.state.kind).toBe("ACTIVE");
+
+    // 撤回 provider 触发 consumer 卸载（进入 UNLOADING → unload()）。
+    provider.remove();
+    const unloading = consumer.refresh();
+    expect(consumer.state.kind).toBe("UNLOADING");
+    await unloading;
+    expect(consumer.state.kind).toBe("PENDING");
+
+    // 两个逆都应各调用一次；unloadHost 逆序 → 先 2 后 1
+    expect(inverseOrder).toEqual([2, 1]);
+  });
 });
