@@ -16,6 +16,7 @@ export interface RuntimeTuiOptions {
   readonly source?: EventSource;
   readonly commands?: CommandHandler;
   readonly theme?: TuiThemeName;
+  readonly mode?: "regular" | "fullscreen";
 }
 
 export interface RuntimeTuiHandle {

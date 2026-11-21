@@ -5,6 +5,9 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { createKeymap } from "./keymap";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
+import { FooterView } from "./components/footer";
+import { contextBudget } from "./hud";
+import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { RichMessageList } from "./components/message";
 import { ZetaEditor } from "./components/editor";
@@ -88,6 +91,7 @@ function ZetaApp(props: {
           return props.onSubmit?.(text);
         }}
       />
+      <FooterView model="zeta" status="ready" budget={contextBudget(0, 1)} />
       <Show when={overlayOpen()}>
         <ConfirmOverlay
           message="确定退出？"
@@ -108,6 +112,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     process.stdout,
     process.stdout.columns || 80,
     process.stdout.rows || 24,
+    { screenMode: resolveDualMode(options.mode).screenMode },
   );
   let resolveClosed: () => void = () => {};
   const closed = new Promise<void>((resolve) => {
