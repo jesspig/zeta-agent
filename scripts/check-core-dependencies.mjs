@@ -25,34 +25,48 @@ function walk(dir) {
 }
 
 const violations = [];
-const importRe = /^\s*(?:import|export)\s+(?:type\s+)?.*?from\s*["']([^"']+)["']/gm;
-const bareImportRe = /^\s*import\s*["']([^"']+)["']/gm;
+// 使用 TypeScript AST 提取模块名，覆盖多行 import/export 与动态字面量导入，
+// 不再依赖单行正则（后者会漏掉跨行的值依赖）。
+let ts;
+try {
+  ts = (await import("typescript")).default;
+} catch {
+  console.error("#9 依赖检查失败：缺少 typescript，无法进行 AST 扫描");
+  process.exit(2);
+}
 
+let scannedFiles = 0;
 for (const file of walk(scanDir)) {
+  scannedFiles += 1;
   const source = readFileSync(file, "utf8");
-  const lines = source.split(/\r?\n/);
-  for (const match of source.matchAll(importRe)) {
-    const before = source.slice(0, match.index);
-    const line = before.split("\n").length;
-    const spec = match[1];
-    const isTypeOnly = /^\s*import\s+type\b/.test(lines[line - 1] ?? "") || /^\s*export\s+type\b/.test(lines[line - 1] ?? "");
-    if (isTypeOnly) continue; // 白名单：type-only import 不产生运行时依赖
+  const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const checkSpec = (spec, line, typeOnly) => {
+    if (typeof spec !== "string" || typeOnly) return;
     for (const { re, label } of forbiddenPatterns) {
-      if (re.test(spec)) {
-        violations.push(`${relative(root, file).split(sep).join("/")}:${line}: 禁止 ${label} import "${spec}"`);
+      if (re.test(spec)) violations.push(`${relative(root, file).split(sep).join("/")}:${line}: 禁止 ${label} import "${spec}"`);
+    }
+  };
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node)) {
+      const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+      checkSpec(node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier) ? node.moduleSpecifier.text : undefined, line, node.importClause?.isTypeOnly === true);
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+      checkSpec(node.moduleSpecifier.text, line, node.isTypeOnly === true);
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const arg = node.arguments[0];
+      if (arg && ts.isStringLiteral(arg)) {
+        const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+        checkSpec(arg.text, line, false);
       }
     }
-  }
-  for (const match of source.matchAll(bareImportRe)) {
-    const before = source.slice(0, match.index);
-    const line = before.split("\n").length;
-    const spec = match[1];
-    for (const { re, label } of forbiddenPatterns) {
-      if (re.test(spec)) {
-        violations.push(`${relative(root, file).split(sep).join("/")}:${line}: 禁止 ${label} import "${spec}"`);
-      }
-    }
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+}
+if (scannedFiles === 0) {
+  console.error("#9 依赖检查失败：未扫描到任何源文件");
+  process.exit(1);
 }
 
 if (violations.length > 0) {
