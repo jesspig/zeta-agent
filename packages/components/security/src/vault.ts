@@ -31,6 +31,10 @@ export type SecretBroker = (binding: SecretBinding) => Record<string, string>;
 export function createCredentialVault(): CredentialVault {
   const issued: Placeholder[] = [];
   const bindings = new Map<string, SecretBinding>();
+  // token 绑定签发实例，避免不同 vault 的序号 token 碰撞导致跨实例解析。
+  const instanceId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
   return {
     get issued(): readonly Placeholder[] {
@@ -43,7 +47,7 @@ export function createCredentialVault(): CredentialVault {
       }
       const placeholder: Placeholder = {
         name: input.name,
-        token: `__zeta_secret_${issued.length}__`,
+        token: `__zeta_secret_${instanceId}_${issued.length}__`,
       };
       issued.push(placeholder);
       bindings.set(placeholder.token, input.binding);

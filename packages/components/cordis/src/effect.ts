@@ -47,10 +47,16 @@ export async function* toIterator(effect: Effect): AsyncIterableIterator<Dispose
 export async function execute(effect: Effect, guard: () => boolean): Promise<Disposer> {
   const iterator = toIterator(effect);
   let inverse: Disposer = NOOP;
-  while (guard()) {
-    const { value, done } = await iterator.next();
-    if (value) inverse = composeDispose(value, inverse);
-    if (done) break;
+  try {
+    while (guard()) {
+      const { value, done } = await iterator.next();
+      if (value) inverse = composeDispose(value, inverse);
+      if (done) break;
+    }
+  } catch (error) {
+    // 迭代中途失败：回收已取得的逆动作后再抛出原错误，避免资源残留。
+    await inverse();
+    throw error;
   }
   return inverse;
 }

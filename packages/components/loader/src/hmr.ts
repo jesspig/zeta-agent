@@ -148,9 +148,10 @@ export function watch(root: string, opts: HmrOptions): HmrWatcher {
   if (opts.auto === true) {
     fsWatcher = fsWatch(root, (_event, filename) => {
       if (typeof filename !== "string") return;
+      // 立即登记脏文件，只对 flush 防抖，避免同窗口内较早变更被丢弃。
+      markDirty([filename]);
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
-        markDirty([filename]);
         void flush();
       }, opts.debounceMs ?? 100);
     });

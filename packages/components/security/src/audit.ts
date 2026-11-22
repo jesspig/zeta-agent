@@ -47,10 +47,13 @@ function fingerprint(seq: number, prevHash: string, record: AuditRecord): string
 
 export function verifyAuditChain(entries: readonly AuditEntry[], hash: HashFn): boolean {
   let previous = "0";
+  let expectedSeq = 0;
   for (const entry of entries) {
+    if (entry.seq !== expectedSeq) return false;
     if (entry.prevHash !== previous) return false;
     if (entry.hash !== hash(fingerprint(entry.seq, entry.prevHash, entry.record))) return false;
     previous = entry.hash;
+    expectedSeq += 1;
   }
   return true;
 }
@@ -62,19 +65,21 @@ export function createAuditSink(options: AuditSinkOptions = {}): AuditSink {
 
   return {
     get entries(): readonly AuditEntry[] {
-      return entries;
+      // 只暴露快照，外部改动不能影响内部链。
+      return entries.map((entry) => ({ ...entry, record: { ...entry.record } }));
     },
     append(record: AuditRecord): AuditEntry {
       const seq = entries.length;
       const prevHash = seq === 0 ? "0" : entries[seq - 1]!.hash;
+      const snapshot: AuditRecord = { ...record };
       const entry: AuditEntry = {
         seq,
-        record,
+        record: snapshot,
         prevHash,
-        hash: hash(fingerprint(seq, prevHash, record)),
+        hash: hash(fingerprint(seq, prevHash, snapshot)),
       };
       entries.push(entry);
-      return entry;
+      return { ...entry, record: { ...snapshot } };
     },
     noteDrop(): void {
       drops += 1;
