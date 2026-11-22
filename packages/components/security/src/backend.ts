@@ -43,9 +43,8 @@ export const CRITICAL_LAYERS = ["isolation", "seccomp", "fsConfinement"] as cons
 export type CapabilityKey = keyof Capabilities;
 
 export function criticalLayerFailures(capabilities: Capabilities): CapabilityKey[] {
-  return CRITICAL_LAYERS.filter(
-    (layer) => capabilities[layer] === "degraded" || capabilities[layer] === "unsupported"
-  );
+  // 关键层只有 active 才代表强制已生效；degraded/unsupported/disabled 都必须失败关闭。
+  return CRITICAL_LAYERS.filter((layer) => capabilities[layer] !== "active");
 }
 
 export function isCriticalLayerDegraded(capabilities: Capabilities): boolean {

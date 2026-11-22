@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertEnforcement, type ExecutionBackend } from "@zeta-agent/security";
 import type { PluginTool } from "../facade";
 
@@ -25,16 +25,51 @@ export interface BuiltinToolOptions {
 
 type Args = Readonly<Record<string, unknown>>;
 
+function isInside(absolute: string, base: string): boolean {
+  const relativePath = relative(base, absolute);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+/**
+ * 校验路径的实际目标仍处于允许目录内。
+ * 词法 resolve/relative 只能挡住字面越界；目录联接或符号链接可让根内路径
+ * 指向根外目标，因此对已存在的目标用 realpath 再校验一次。
+ */
 function assertConfined(path: string, allowed: readonly string[]): string {
   const absolute = resolve(path);
-  for (const directory of allowed) {
-    const base = resolve(directory);
-    const relativePath = relative(base, absolute);
-    if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
-      return absolute;
+  const lexicalOk = allowed.some((directory) => isInside(absolute, resolve(directory)));
+  if (!lexicalOk) {
+    throw new Error(`TOOL_CONFINEMENT_VIOLATION: ${path} is outside allowed directories`);
+  }
+  // 路径不存在（如 write 的新文件）时，解析其最近存在祖先的 realpath，
+  // 再补回缺失的路径段，从而仍能识别经目录联接逃逸的父目录。
+  let realTarget: string;
+  try {
+    realTarget = realpathSync(absolute);
+  } catch {
+    let ancestor = absolute;
+    const missingSegments: string[] = [];
+    while (true) {
+      try {
+        const ancestorReal = realpathSync(ancestor);
+        realTarget = join(ancestorReal, ...missingSegments.reverse());
+        break;
+      } catch {
+        const next = dirname(ancestor);
+        if (next === ancestor) return absolute;
+        missingSegments.push(ancestor.slice(next.length + 1));
+        ancestor = next;
+      }
     }
   }
-  throw new Error(`TOOL_CONFINEMENT_VIOLATION: ${path} is outside allowed directories`);
+  const realOk = allowed.some((directory) => {
+    const baseReal = realpathSync(resolve(directory));
+    return isInside(realTarget, baseReal);
+  });
+  if (!realOk) {
+    throw new Error(`TOOL_CONFINEMENT_VIOLATION: ${path} resolves outside allowed directories`);
+  }
+  return realTarget;
 }
 
 function requireString(args: Args, key: string): string {

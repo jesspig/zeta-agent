@@ -107,6 +107,7 @@ describe("T-09 createAgent 接入 runLoop 的事件契约", () => {
 
   test("工具调用标记产生 tool_execution_start/update/end 与 toolResult 消息", async () => {
     const agent = createAgent({
+      allowTextToolMarkers: true,
       streamFn: async function* () {
         yield "calling";
         yield '@@TOOL:read:{"path":"x"}@@';

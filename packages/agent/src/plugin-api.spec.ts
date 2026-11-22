@@ -12,6 +12,8 @@ function markerAgent(script: () => AsyncGenerator<string>): ReturnType<typeof cr
   return createAgent({
     includeBuiltins: false,
     streamFn: script,
+    // 测试夹具依赖文本标记工具协议；显式 opt-in，生产默认仍关闭。
+    allowTextToolMarkers: true,
   });
 }
 
@@ -381,6 +383,7 @@ describe("T-10 完整 AgentPluginApi 契约", () => {
       streamFn: async function* () {
         yield '@@TOOL:ping:{}@@';
       },
+      allowTextToolMarkers: true,
     });
     const messages = await agent.prompt("x");
     expect(agent.toolNames).toContain("ping");

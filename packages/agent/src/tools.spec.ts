@@ -56,6 +56,8 @@ describe("T-11 内置工具真实化", () => {
       streamFn: async function* () {
         yield toolText(name, args);
       },
+      // 测试通过文本标记驱动内置工具；显式 opt-in。
+      allowTextToolMarkers: true,
       ...options,
     });
     const result = await agent.prompt("go");
@@ -196,6 +198,7 @@ describe("T-11 内置工具真实化", () => {
       streamFn: async function* () {
         yield toolText("ls", { path: root });
       },
+      allowTextToolMarkers: true,
     });
     agent.subscribe((event) => {
       events.push(event);
@@ -250,6 +253,7 @@ describe("T-11 内置工具真实化", () => {
       streamFn: async function* () {
         yield toolText("read", { path: join(root, "a.txt") });
       },
+      allowTextToolMarkers: true,
     });
     agent.api.registerTool(override);
     const result = await agent.prompt("go");
