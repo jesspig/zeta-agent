@@ -406,33 +406,59 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
   // #11 嵌套 hook 调用走同一管线但不发事件/不加消息：
   //     waterfall 内嵌套 run 不产生额外 AgentEvent，消息数仅由正常 message_end 追加。
   11: async (mode) => {
-    let nestedRuns = 0;
+    // 两版都带 toolCall，并在各自的决策钩子里嵌套调用同一 hooks 管线。
+    // 嵌套只走纯决策计算：不 emit AgentEvent、不追加消息。
+    const toolCall = { id: "c1", name: "tool", args: {} };
+    const toolResult: ToolResult = { callId: "c1", message: { role: "toolResult", content: "r" } };
+    let legacyNestedInvoked = false;
+    let pluginNestedInvoked = false;
+
     const { runtime, order, stream } = makeRuntime(mode, {
-      response: { toolCalls: [], stopReason: "stop" },
+      response: { toolCalls: [toolCall], stopReason: "stop" },
+      toolResults: [toolResult],
       ...(mode === "legacy"
-        ? { finishTurnLegacy: () => ({ action: "end" } as const) }
-        : {
-            decisionPlugin: (state, turn) => {
-              // 嵌套调用同一 hooks 管线：不 emit、不改 state.messages。
+        ? {
+            // legacy：字段赋值钩子 finishTurn 内嵌套，并立即结束，避免额外请求污染事件计数。
+            finishTurnLegacy: (turn) => {
               const nested = createDecisionWaterfall();
-              nested.add((_d, next) => next({ kind: "reasoning", note: "nested" }));
+              nested.add((_d, next) => next({ kind: "reasoning", note: "nested-with-toolCall" }));
+              void nested.run(nextAction(stream.getState()), {
+                state: stream.getState(),
+                event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
+              });
+              legacyNestedInvoked = true;
+              return { action: "end" };
+            },
+          }
+        : {
+            // plugin：管线入口 decision 内嵌套（同步触发，随后由 waterfall 处理）。
+            decisionPlugin: (state, turn) => {
+              const nested = createDecisionWaterfall();
+              nested.add((_d, next) => next({ kind: "reasoning", note: "nested-with-toolCall" }));
               void nested.run(nextAction(state), {
                 state,
                 event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
               });
-              nestedRuns += 1;
+              pluginNestedInvoked = true;
               return { kind: "exit", reason: "done" };
             },
           }),
     });
     const before = stream.getState().messages.length;
     await runLoop(runtime);
-    if (mode === "plugin") expect(nestedRuns).toBe(1);
-    // 嵌套 hook 调用不发事件：agent_end 与 turn_end 各恰一次。
+
+    // 两版各自的可观察差异：legacy 走字段赋值钩子，plugin 走管线入口，各自设自己的哨兵。
+    if (mode === "legacy") {
+      expect(legacyNestedInvoked).toBe(true);
+    } else {
+      expect(pluginNestedInvoked).toBe(true);
+    }
+    // 嵌套调用不发事件：agent_end 与 turn_end 各恰一次，工具事件各一次。
     expect(order.filter((e) => e === "agent_end")).toHaveLength(1);
     expect(order.filter((e) => e === "turn_end")).toHaveLength(1);
-    // 消息仅由正常 assistant message_end 追加一次，嵌套调用不加消息。
-    expect(stream.getState().messages.length).toBe(before + 1);
+    expect(order.filter((e) => e === "tool_execution_end")).toHaveLength(1);
+    // 消息仅由正常 assistant message_end + toolResult message_end 追加，嵌套调用不加消息。
+    expect(stream.getState().messages.length).toBe(before + 2);
   },
   // #12 system 消息单一事实源：reduceState 对 system 消息不重复入列，声明 delta 对齐。
   12: (_mode) => {
