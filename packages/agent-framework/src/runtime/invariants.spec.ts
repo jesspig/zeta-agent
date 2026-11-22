@@ -45,8 +45,10 @@ interface InvariantCase {
 /** 运行时构造选项：覆盖各不变量所需的钩子与响应。 */
 interface RuntimeOptions {
   readonly response?: Partial<AssistantResult>;
+  /** 按轮次覆盖响应：索引 i 对应第 i+1 次 streamAssistant，缺省沿用 response。 */
+  readonly responses?: readonly Partial<AssistantResult>[];
   readonly toolResults?: readonly ToolResult[];
-  readonly finishTurnLegacy?: (turn: LastTurn) => { action: "continue" | "end" };
+  readonly finishTurnLegacy?: (turn: LastTurn) => { action: "continue" | "end" } | undefined;
   readonly decisionPlugin?: NonNullable<LoopRuntime["decision"]>;
   readonly prepareNextTurnCalls?: { count: number };
   readonly onRequest?: (request: unknown) => void;
@@ -91,7 +93,8 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
       streamCount += 1;
       // 安全阀：continue 场景在若干轮后强制硬退出，避免断言用例无限循环。
       if (streamCount > 3) return { ...response, stopReason: "error", toolCalls: [] };
-      return response;
+      const override = options.responses?.[streamCount - 1];
+      return override === undefined ? response : { ...response, ...override };
     },
     executeToolCalls: async () => options.toolResults ?? [],
     prepareNextTurn: () => {
@@ -267,17 +270,35 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
   },
   // #5 {action:"continue"} 是"保证一次请求"，已有自然请求时不叠加。
   5: async (mode) => {
+    let finishCount = 0;
+    // 自然请求场景：第 1 轮带 toolCall，其工具结果天然触发第 2 轮请求。
     const { runtime, getStreamCount } = makeRuntime(mode, {
+      responses: [
+        { toolCalls: [{ id: "c1", name: "tool", args: {} }], stopReason: "stop" },
+        { toolCalls: [], stopReason: "stop" },
+      ],
+      toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
       ...(mode === "legacy"
-        ? { finishTurnLegacy: () => ({ action: "continue" }) }
-        : { decisionPlugin: () => ({ kind: "reasoning", note: "more" }) as const }),
+        ? {
+            finishTurnLegacy: () => {
+              finishCount += 1;
+              // 第一次返回 continue：自然请求已存在，应被它满足而不额外叠加。
+              return finishCount === 1 ? ({ action: "continue" } as const) : undefined;
+            },
+          }
+        : {
+            decisionPlugin: () => {
+              finishCount += 1;
+              return finishCount === 1 ? ({ kind: "reasoning", note: "more" } as const) : ({ kind: "exit", reason: "done" } as const);
+            },
+          }),
     });
     await runLoop(runtime);
-    // #5 的可观察保障：continue 导向保证至少一次请求，且请求数有界（不会无限请求）。
-    // makeRuntime 的 >3 安全阀模拟"已有自然请求时不叠加"的外部约束：
-    // 超过上限强制硬退出，证明 continue 不会导致无界请求。
-    expect(getStreamCount()).toBeGreaterThanOrEqual(1);
-    expect(getStreamCount()).toBeLessThanOrEqual(4);
+    // 第 1 轮工具调用 + 第 2 轮自然跟进 = 精确 2 次请求。
+    const naturalRequestSeen = finishCount >= 1 && getStreamCount() === 2;
+    expect(getStreamCount()).toBe(2);
+    // 哨兵：自然请求确实存在且 continue 未叠加额外请求，旧 [1,4] 区间无法区分。
+    expect(naturalRequestSeen).toBe(true);
   },
   // #6 hook no-throw：决策/转换钩子必须返回安全回退值而非抛错。
   6: async (mode) => {
