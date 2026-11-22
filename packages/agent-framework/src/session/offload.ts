@@ -106,13 +106,22 @@ export function createMemoryWorkspaceStore(): WorkspaceStore {
   };
 }
 
+// 进程级唯一序列：跨实例（乃至跨重启后复用 store）都不复用同一 URI，
+// 否则旧血缘会指向后来写入的区块。
+let offloaderSequence = 0;
+function nextOffloadId(): string {
+  offloaderSequence += 1;
+  const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${offloaderSequence.toString(36)}-${random}`;
+}
+
 export function createOffloader(store: WorkspaceStore): Offloader {
-  let counter = 0;
   return {
     async offload(block, label = "block") {
       const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "_") || "block";
-      counter += 1;
-      const uri = `${WORKSPACE_PREFIX}${safeLabel}-${counter}`;
+      const uri = `${WORKSPACE_PREFIX}${safeLabel}-${nextOffloadId()}`;
       await store.put(uri, block);
       return uri;
     },
