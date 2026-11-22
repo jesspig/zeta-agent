@@ -34,10 +34,22 @@ export function provide<T>(seam: Seam<T>, impl: T): Disposer {
   };
 }
 
+/** 可选解析：缺失 provider 返回 undefined，不抛错。 */
+export function resolveOptional<T>(seam: Seam<T>): T | undefined;
+export function resolveOptional<C, V>(registry: Registry<C, V>): V;
+export function resolveOptional(target: Seam<unknown> | Registry<unknown, unknown>): unknown {
+  if ("id" in target) return seams.get(target.id);
+  return target.compose(target.contributions as never[]);
+}
+
 export function resolve<T>(seam: Seam<T>): T;
 export function resolve<C, V>(registry: Registry<C, V>): V;
 export function resolve(target: Seam<unknown> | Registry<unknown, unknown>): unknown {
-  if ("id" in target) return seams.get(target.id);
+  if ("id" in target) {
+    const value = seams.get(target.id);
+    if (value === undefined) throw new Error(`SEAM_NOT_PROVIDED: ${target.ns}:${target.name}`);
+    return value;
+  }
   return target.compose(target.contributions as never[]);
 }
 
