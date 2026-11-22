@@ -3,7 +3,12 @@ import type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener 
 
 export type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener } from "./types";
 
-export function createEventBus(): EventBus {
+export interface EventBusOptions {
+  /** 同步 emit 的监听器失败（含异步拒绝）出口；未提供时仅吞掉，避免未处理拒绝。 */
+  readonly onError?: (error: unknown) => void;
+}
+
+export function createEventBus(options: EventBusOptions = {}): EventBus {
   const listeners = new Map<string, Array<{ listener: Listener<EventName>; scope?: symbol }>>();
 
   function on<N extends EventName>(
@@ -33,7 +38,17 @@ export function createEventBus(): EventBus {
   return {
     on,
     emit(name, payload, opts) {
-      for (const listener of matching(name, opts)) void listener(payload);
+      for (const listener of matching(name, opts)) {
+        try {
+          const result = listener(payload);
+          // 异步监听器拒绝也走同一出口，避免未处理 Promise 拒绝。
+          if (result !== undefined && typeof (result as PromiseLike<unknown>).then === "function") {
+            Promise.resolve(result).catch((error) => options.onError?.(error));
+          }
+        } catch (error) {
+          options.onError?.(error);
+        }
+      }
     },
     async parallel(name, payload, opts) {
       const results = await Promise.allSettled(
