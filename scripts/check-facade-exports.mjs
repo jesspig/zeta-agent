@@ -69,19 +69,31 @@ for (const [name, subpaths] of Object.entries(facades)) {
   }
 }
 
+// [consumer, specifiers, 期望命名导出映射]：不仅验证路径可解析，还验证实际导入与关键命名导出。
 const importChecks = [
-  ["agent", ["@zeta-agent/framework", "@zeta-agent/framework/types", "@zeta-agent/framework/package.json"]],
-  ["agent-framework", ["@zeta-agent/framework/types", "@zeta-agent/cordis", "@zeta-agent/events"]],
-  ["tui", ["@zeta-agent/agent/facade", "@zeta-agent/agent", "@zeta-agent/tui/backend"]],
+  ["agent", [
+    "@zeta-agent/framework", "@zeta-agent/framework/types", "@zeta-agent/framework/package.json",
+    "@zeta-agent/agent/providers/openai-responses", "@zeta-agent/agent/providers/model-discovery",
+    "@zeta-agent/agent/providers/models-dev", "@zeta-agent/agent/providers/model-catalog",
+  ], {
+    "@zeta-agent/agent/providers/openai-responses": ["createOpenAiResponsesStreamFn"],
+    "@zeta-agent/agent/providers/model-discovery": ["fetchModelIds"],
+    "@zeta-agent/agent/providers/model-catalog": ["decorateModels"],
+  }],
+  ["agent-framework", ["@zeta-agent/framework/types", "@zeta-agent/cordis", "@zeta-agent/events"], {}],
+  ["tui", ["@zeta-agent/agent/facade", "@zeta-agent/agent", "@zeta-agent/tui/backend"], {
+    "@zeta-agent/agent/facade": ["createAgent"],
+  }],
 ];
 
-for (const [consumerDir, specifiers] of importChecks) {
+for (const [consumerDir, specifiers, expectedExports] of importChecks) {
   const probe = join(root, "packages", consumerDir, "__facade_probe__.mjs");
-  const lines = specifiers.map(
-    (spec) =>
-      `try { await import(${JSON.stringify(spec)}); console.log("OK " + ${JSON.stringify(spec)}); } ` +
-      `catch (e) { console.log("FAIL " + ${JSON.stringify(spec)} + " " + String(e.message).split("\\n")[0]); process.exitCode = 1; }`
-  );
+  const lines = specifiers.map((spec) => {
+    const names = expectedExports[spec] ?? [];
+    const checks = names.map((n) => `if (!(${JSON.stringify(n)} in mod)) { console.log("MISSING_EXPORT " + ${JSON.stringify(spec)} + " " + ${JSON.stringify(n)}); process.exitCode = 1; }`).join(" ");
+    return `try { const mod = await import(${JSON.stringify(spec)}); ${checks} console.log("OK " + ${JSON.stringify(spec)}); } ` +
+      `catch (e) { console.log("FAIL " + ${JSON.stringify(spec)} + " " + String(e.message).split("\\n")[0]); process.exitCode = 1; }`;
+  });
   writeFileSync(probe, `${lines.join("\n")}\n`);
   try {
     const r = spawnSync(bun, [probe], {
