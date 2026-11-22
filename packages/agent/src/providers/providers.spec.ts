@@ -31,6 +31,7 @@ async function collect(iterable: AsyncIterable<string | { readonly type: string;
 
 describe("多 provider 流式接口（T-12）", () => {
   test("openai-chat 家族：groq/deepseek/openrouter 走 OpenAI 兼容 /chat/completions", async () => {
+    const models: Record<string, string> = { groq: "llama", deepseek: "chat", openrouter: "or-auto" };
     for (const provider of ["groq", "deepseek", "openrouter"]) {
       let captured: { url?: string; init?: RequestInit } = {};
       const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -42,7 +43,7 @@ describe("多 provider 流式接口（T-12）", () => {
       }) as unknown as typeof fetch;
       const out = await collect(
         createProviderStreamFn(
-          { provider, model: "llama", apiKey: "dummy", baseUrl: `https://${provider}.test/v1` },
+          { provider, model: models[provider]!, apiKey: "dummy", baseUrl: `https://${provider}.test/v1` },
           fakeFetch
         )(request)
       );
