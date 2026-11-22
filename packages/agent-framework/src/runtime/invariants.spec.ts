@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import {
   createEventStream,
@@ -380,12 +383,25 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
   },
   // #9 core 无持久化/provider 依赖：runtime 模块仅依赖类型与纯函数。
   9: (_mode) => {
-    // 源码级约束：runtime/*.ts 只做类型导入与纯函数，不 import 持久化/provider 包。
-    // 通过 RUN_LOOP_STEPS 暴露的纯流水线与无副作用工厂证明 core 自洽。
-    expect(RUN_LOOP_STEPS).toHaveLength(11);
-    expect(RUN_LOOP_STEPS).toContain("streamAssistant");
-    expect(RUN_LOOP_STEPS).not.toContain("persist");
-    expect(RUN_LOOP_STEPS).not.toContain("provider");
+    // §13 #9：静态扫描 runtime/*.ts 的真实 import，替代 RUN_LOOP_STEPS 常量同义反复。
+    const runtimeDir = dirname(fileURLToPath(import.meta.url));
+    const files = readdirSync(runtimeDir).filter((name) => /\.tsx?$/.test(name) && !name.endsWith(".spec.ts"));
+    const forbidden = /(?:@zeta-agent\/)?(?:deploy|session-persistence|persistence|provider(?:s)?)(?:\/|["']|$)/;
+    const offenders: string[] = [];
+    let dependencyScanRan = false;
+    for (const name of files) {
+      const source = readFileSync(join(runtimeDir, name), "utf8");
+      for (const line of source.split(/\r?\n/)) {
+        dependencyScanRan = true;
+        const match = /^\s*(?:import|export)\s+(?!type\b).*?from\s*["']([^"']+)["']/.exec(line);
+        const bare = /^\s*import\s*["']([^"']+)["']/.exec(line);
+        const spec = match?.[1] ?? bare?.[1];
+        if (spec !== undefined && forbidden.test(spec)) offenders.push(`${name}: ${spec}`);
+      }
+    }
+    // 哨兵：扫描确实覆盖了 runtime 源文件，且未发现禁止的持久化/provider import。
+    expect(dependencyScanRan).toBe(true);
+    expect(offenders).toEqual([]);
   },
   // #11 嵌套 hook 调用走同一管线但不发事件/不加消息：
   //     waterfall 内嵌套 run 不产生额外 AgentEvent，消息数仅由正常 message_end 追加。
