@@ -1,7 +1,17 @@
 #!/usr/bin/env bun
-import { mkdirSync } from "node:fs";
-import { createAgent, createOpenAiStreamFn, MODES, type Agent, type AgentStreamFn } from "@zeta-agent/agent";
-import { renderTui, type RuntimeMessage } from "@zeta-agent/tui";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  createAgent,
+  createCommandRegistry,
+  createModelRegistry,
+  createOpenAiStreamFn,
+  MODES,
+  parseCommand,
+  type Agent,
+  type AgentStreamFn,
+} from "@zeta-agent/agent";
+import { renderTui, type RuntimeMessage, type RuntimeTuiHandle } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
 import { resolveDataDir } from "./runtime";
@@ -36,18 +46,46 @@ function echoStream(): AgentStreamFn {
   };
 }
 
-function makeAgent(): Agent {
+interface AgentBundle {
+  readonly agent: Agent;
+  readonly model: string;
+  readonly models: readonly string[];
+  setModel(model: string): void;
+}
+
+function makeAgent(): AgentBundle {
   const resolution = resolveModelConfig(process.env);
+  let modelName = resolution.kind === "configured" ? resolution.config.model : "echo";
   let streamFn: AgentStreamFn;
   if (resolution.kind === "configured") {
-    streamFn = createOpenAiStreamFn(resolution.config);
+    const config = resolution.config;
+    // 每次请求按当前模型构造，使 /model 切换能立即生效。
+    streamFn = (request) => createOpenAiStreamFn({ ...config, model: modelName })(request);
   } else {
     process.stderr.write(
       `zeta: 模型配置缺失 ${resolution.missing.join(", ")}，回退 echo（无网络）。设置这三项以连接真实模型。\n`,
     );
     streamFn = echoStream();
   }
-  return createAgent({ streamFn });
+  const agent = createAgent({
+    streamFn,
+    // 文件工具只在工作目录内可用；否则内置 read/write/edit 会一律拒绝。
+    allowedDirectories: [process.cwd()],
+  });
+  const catalog = createModelRegistry().list().map((model) => model.id);
+  const models = resolution.kind === "configured"
+    ? [...new Set([modelName, ...catalog])].slice(0, 24)
+    : ["echo"];
+  return {
+    agent,
+    get model() {
+      return modelName;
+    },
+    models,
+    setModel(next: string) {
+      modelName = next;
+    },
+  };
 }
 
 function toRuntimeMessages(messages: readonly { role: string; content: unknown }[]): readonly RuntimeMessage[] {
@@ -55,25 +93,88 @@ function toRuntimeMessages(messages: readonly { role: string; content: unknown }
 }
 
 async function runTui(args: CliArgs): Promise<number> {
-  const agent = makeAgent();
+  const bundle = makeAgent();
+  const agent = bundle.agent;
 
   if (!process.stdin.isTTY) {
     process.stdout.write("(非 TTY：请用 zeta --headless \"提示词\"；交互式 TUI 需要 TTY)\n");
     return 0;
   }
 
-  const tui = await renderTui({
-    ...buildTuiOptions(agent, VERSION, async (text) => {
-      await agent.prompt(text);
-      await agent.waitForIdle();
-    }),
-    messages: toRuntimeMessages(agent.state.messages),
+  const registry = createCommandRegistry();
+  let tui: RuntimeTuiHandle | undefined;
+
+  const notice = (text: string): void => {
+    tui?.appendMessage({ role: "notice", content: text });
+  };
+
+  registry.register({
+    name: "session",
+    description: "查看会话信息",
+    category: "session",
+    handler: () => {
+      notice(`session: ${agent.state.messages.length} messages · model ${bundle.model}`);
+    },
+  });
+  registry.register({
+    name: "compact",
+    description: "压缩会话上下文",
+    category: "session",
+    handler: () => {
+      notice("compact: 当前为内存态会话，上下文压缩暂未接入");
+    },
+  });
+  registry.register({
+    name: "export",
+    description: "导出会话为 JSONL",
+    category: "export",
+    handler: () => {
+      const dir = join(resolveDataDir(), "exports");
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `session-${Date.now()}.jsonl`);
+      writeFileSync(path, agent.state.messages.map((message) => JSON.stringify(message)).join("\n"), "utf8");
+      notice(`export: ${path}`);
+    },
   });
 
-  const unsubscribe = agent.subscribe((event) => {
-    if (event.type === "message_end") {
-      tui.appendMessage({ role: event.message.role, content: event.message.content });
+  const hostCommands = new Set(["session", "compact", "export"]);
+
+  const handleCommand = async (text: string): Promise<void> => {
+    if (!text.startsWith("/")) {
+      if (agent.state.isStreaming || agent.state.pendingToolCalls.size > 0) {
+        notice("正在运行中：请等待完成，或按 Esc 中止后再发送");
+        return;
+      }
+      await agent.prompt(text);
+      await agent.waitForIdle();
+      return;
     }
+    const result = await registry.execute(text);
+    if (!result.ok) {
+      const parsed = parseCommand(text);
+      notice(`未知命令：/${parsed?.name ?? text}（/help 查看可用命令）`);
+      return;
+    }
+    if (!hostCommands.has(result.name)) {
+      notice(`/${result.name} 暂未接入（当前可用：/help /clear /new /model /theme /settings /session /compact /export /quit）`);
+    }
+  };
+
+  tui = await renderTui({
+    ...buildTuiOptions(agent, VERSION, handleCommand, {
+      cwd: process.cwd(),
+      model: bundle.model,
+      models: bundle.models,
+      onModelChange: (model) => bundle.setModel(model),
+      commandCatalog: registry.list().map((command) => ({
+        name: command.name,
+        description: command.description,
+      })),
+      onCommand: handleCommand,
+      onAbort: () => agent.abort(),
+      resources: { models: bundle.models.slice(0, 4) },
+    }),
+    messages: toRuntimeMessages(agent.state.messages),
   });
 
   try {
@@ -83,14 +184,13 @@ async function runTui(args: CliArgs): Promise<number> {
     }
     await tui.waitForExit();
   } finally {
-    unsubscribe();
     await tui.destroy();
   }
   return 0;
 }
 
 async function runHeadless(args: CliArgs): Promise<number> {
-  const agent = makeAgent();
+  const { agent } = makeAgent();
   const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
   const opts = {
     prompt: args.prompt,

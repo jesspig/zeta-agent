@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentMessage } from "@zeta-agent/agent";
+import { applyTimelineEvent, createTimelineState, thinkingText, type TimelineState } from "./timeline";
 
 export interface ToolResultMessage extends AgentMessage {
   readonly toolCallId?: string;
@@ -55,16 +56,14 @@ export interface AgentSignals {
   readonly toolStates: Signal<ReadonlyMap<string, ToolState>>;
   readonly completedTools: Signal<readonly ToolResultMessage[]>;
   readonly statusMessage: Signal<StatusMessage>;
+  /** 统一时间线：用户/助手/工具按发生顺序内联排列。 */
+  readonly timeline: Signal<TimelineState>;
   dispose(): void;
 }
 
-function thinkingText(message: AgentMessage): string | null {
-  const content = message.content;
-  if (typeof content === "object" && content !== null && "type" in content) {
-    const record = content as { readonly type?: unknown; readonly text?: unknown };
-    if (record.type === "thinking" && typeof record.text === "string") return record.text;
-  }
-  return null;
+function thinkingFromMessage(message: AgentMessage): string | null {
+  const text = thinkingText(message);
+  return text.length > 0 ? text : null;
 }
 
 export function createAgentSignals(source: EventSource): AgentSignals {
@@ -76,8 +75,10 @@ export function createAgentSignals(source: EventSource): AgentSignals {
   const toolStates = createSignal<ReadonlyMap<string, ToolState>>(new Map<string, ToolState>());
   const completedTools = createSignal<readonly ToolResultMessage[]>([]);
   const statusMessage = createSignal<StatusMessage>(null);
+  const timeline = createSignal<TimelineState>(createTimelineState());
 
   const dispose = source.subscribe((event) => {
+    timeline.set(applyTimelineEvent(timeline(), event));
     switch (event.type) {
       case "agent_start":
         status.set("streaming");
@@ -103,7 +104,7 @@ export function createAgentSignals(source: EventSource): AgentSignals {
       case "message_update": {
         streaming.set(event.message);
         status.set("streaming");
-        const text = thinkingText(event.message);
+        const text = thinkingFromMessage(event.message);
         if (text !== null) thinking.set(text);
         break;
       }
@@ -170,6 +171,7 @@ export function createAgentSignals(source: EventSource): AgentSignals {
     toolStates,
     completedTools,
     statusMessage,
+    timeline,
     dispose,
   };
 }

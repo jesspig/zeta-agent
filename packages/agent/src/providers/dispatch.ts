@@ -1,6 +1,7 @@
-import type { AgentStreamFn, AgentStreamRequest } from "../facade";
+import type { AgentStreamChunk, AgentStreamFn, AgentStreamRequest } from "../facade";
 import { PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
+import { createOpenAiStreamFn } from "./openai";
 
 export interface ProviderConfig {
   /** provider id（如 openai / anthropic / groq）。 */
@@ -44,15 +45,132 @@ function resolveBaseUrl(info: ProviderInfo, explicit?: string): string {
   return base.replace(/\/+$/, "");
 }
 
-function toChatMessage(message: AgentStreamRequest["messages"][number]): { role: string; content: string } {
-  const role = message.role === "toolResult" ? "user" : message.role;
-  return { role, content: String(message.content) };
+function toAnthropicContent(message: AgentStreamRequest["messages"][number]): unknown {
+  if (message.role === "toolResult") {
+    return [
+      {
+        type: "tool_result",
+        tool_use_id: message.toolCallId ?? "call-1",
+        content: typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+      },
+    ];
+  }
+  if (message.role === "assistant" && message.toolCalls !== undefined && message.toolCalls.length > 0) {
+    const blocks: unknown[] = [];
+    if (typeof message.content === "string" && message.content.length > 0) {
+      blocks.push({ type: "text", text: message.content });
+    }
+    for (const call of message.toolCalls) {
+      let input: unknown = {};
+      try {
+        input = JSON.parse(call.arguments) as unknown;
+      } catch {
+        input = {};
+      }
+      blocks.push({ type: "tool_use", id: call.id, name: call.name, input });
+    }
+    return blocks;
+  }
+  return typeof message.content === "string" ? message.content : JSON.stringify(message.content);
 }
 
-async function* parseSse(
-  body: ReadableStream<Uint8Array>,
-  extract: (parsed: unknown) => string[]
-): AsyncIterableIterator<string> {
+function toAnthropicTools(tools: AgentStreamRequest["tools"]): unknown[] | undefined {
+  if (tools === undefined || tools.length === 0) return undefined;
+  return tools.map((schema) => ({
+    name: schema.name,
+    description: schema.description,
+    input_schema: {
+      type: "object",
+      properties: Object.fromEntries(
+        schema.parameters.map((parameter) => [
+          parameter.name,
+          { type: parameter.type, description: parameter.description },
+        ]),
+      ),
+      required: schema.parameters.filter((parameter) => parameter.required === true).map((p) => p.name),
+    },
+  }));
+}
+
+interface AnthropicEvent {
+  readonly type?: string;
+  readonly index?: number;
+  readonly content_block?: { readonly type?: string; readonly id?: string; readonly name?: string };
+  readonly delta?: {
+    readonly type?: string;
+    readonly text?: string;
+    readonly thinking?: string;
+    readonly partial_json?: string;
+  };
+}
+
+async function* parseAnthropicSse(body: ReadableStream<Uint8Array>): AsyncIterableIterator<AgentStreamChunk> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const blocks = new Map<number, { id?: string; name: string; json: string }>();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload.length === 0) continue;
+        let event: AnthropicEvent;
+        try {
+          event = JSON.parse(payload) as AnthropicEvent;
+        } catch {
+          continue;
+        }
+        if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+          blocks.set(event.index ?? blocks.size, {
+            id: event.content_block.id,
+            name: event.content_block.name ?? "",
+            json: "",
+          });
+          continue;
+        }
+        if (event.type === "content_block_delta") {
+          const delta = event.delta;
+          if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            yield delta.text;
+          } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+            yield { type: "reasoning", text: delta.thinking };
+          } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            const block = blocks.get(event.index ?? 0);
+            if (block !== undefined) block.json += delta.partial_json;
+          }
+        }
+        if (event.type === "content_block_stop") {
+          const block = blocks.get(event.index ?? 0);
+          if (block !== undefined && block.name.length > 0) {
+            yield { type: "tool_call", id: block.id, name: block.name, arguments: block.json };
+            blocks.delete(event.index ?? 0);
+          }
+        }
+      }
+    }
+  }
+}
+
+interface GoogleEvent {
+  readonly candidates?: readonly {
+    readonly content?: {
+      readonly parts?: readonly {
+        readonly text?: string;
+        readonly thought?: boolean;
+        readonly functionCall?: { readonly name?: string; readonly args?: unknown };
+      }[];
+    };
+  }[];
+}
+
+async function* parseGoogleSse(body: ReadableStream<Uint8Array>): AsyncIterableIterator<AgentStreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -66,57 +184,30 @@ async function* parseSse(
       for (const line of frame.split("\n")) {
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
-        if (payload === "[DONE]" || payload.length === 0) continue;
-        let parsed: unknown;
+        if (payload.length === 0) continue;
+        let event: GoogleEvent;
         try {
-          parsed = JSON.parse(payload) as unknown;
+          event = JSON.parse(payload) as GoogleEvent;
         } catch {
           continue;
         }
-        for (const chunk of extract(parsed)) {
-          if (chunk.length > 0) yield chunk;
+        for (const candidate of event.candidates ?? []) {
+          for (const part of candidate.content?.parts ?? []) {
+            if (typeof part.text === "string" && part.text.length > 0) {
+              yield part.thought === true ? { type: "reasoning", text: part.text } : part.text;
+            }
+            if (part.functionCall !== undefined && typeof part.functionCall.name === "string") {
+              yield {
+                type: "tool_call",
+                name: part.functionCall.name,
+                arguments: JSON.stringify(part.functionCall.args ?? {}),
+              };
+            }
+          }
         }
       }
     }
   }
-}
-
-function extractOpenAi(parsed: unknown): string[] {
-  if (typeof parsed !== "object" || parsed === null) return [];
-  const choices = (parsed as { choices?: unknown }).choices;
-  if (!Array.isArray(choices)) return [];
-  const first = choices[0];
-  if (typeof first !== "object" || first === null) return [];
-  const delta = (first as { delta?: { content?: unknown } }).delta;
-  if (typeof delta?.content === "string") return [delta.content];
-  return [];
-}
-
-function extractAnthropic(parsed: unknown): string[] {
-  if (typeof parsed !== "object" || parsed === null) return [];
-  const type = (parsed as { type?: unknown }).type;
-  if (type !== "content_block_delta") return [];
-  const delta = (parsed as { delta?: { type?: unknown; text?: unknown } }).delta;
-  if (delta?.type === "text_delta" && typeof delta.text === "string") return [delta.text];
-  return [];
-}
-
-function extractGoogle(parsed: unknown): string[] {
-  if (typeof parsed !== "object" || parsed === null) return [];
-  const candidates = (parsed as { candidates?: unknown }).candidates;
-  if (!Array.isArray(candidates)) return [];
-  const out: string[] = [];
-  for (const candidate of candidates) {
-    if (typeof candidate !== "object" || candidate === null) continue;
-    const parts = (candidate as { content?: { parts?: unknown } }).content?.parts;
-    if (!Array.isArray(parts)) continue;
-    for (const part of parts) {
-      if (typeof part === "object" && part !== null && typeof (part as { text?: unknown }).text === "string") {
-        out.push((part as { text: string }).text);
-      }
-    }
-  }
-  return out;
 }
 
 function httpError(status: number, provider: string): Error {
@@ -146,13 +237,19 @@ export function createProviderStreamFn(
   const baseUrl = resolveBaseUrl(info, config.baseUrl);
   const modelName = model.name;
 
+  if (info.api !== "anthropic-messages" && info.api !== "google-generate") {
+    // openai-chat 与 bedrock-invoke 均通过 OpenAI 兼容 SSE 网关对接。
+    return createOpenAiStreamFn({ baseUrl, apiKey, model: modelName }, fetchImpl);
+  }
+
   return async function* (request: AgentStreamRequest) {
     let url: string;
     let init: RequestInit;
-    let extract: (parsed: unknown) => string[];
+    let parse: (body: ReadableStream<Uint8Array>) => AsyncIterableIterator<AgentStreamChunk>;
 
     if (info.api === "anthropic-messages") {
       url = `${baseUrl}/messages`;
+      const tools = toAnthropicTools(request.tools);
       init = {
         method: "POST",
         headers: {
@@ -167,38 +264,70 @@ export function createProviderStreamFn(
           system: request.messages.filter((m) => m.role === "system").map((m) => String(m.content)).join("\n"),
           messages: request.messages
             .filter((m) => m.role !== "system")
-            .map((m) => ({ role: m.role === "toolResult" ? "user" : m.role, content: String(m.content) })),
+            .map((m) => ({
+              role: m.role === "assistant" ? "assistant" : "user",
+              content: toAnthropicContent(m),
+            })),
+          ...(tools !== undefined ? { tools } : {}),
         }),
       };
-      extract = extractAnthropic;
-    } else if (info.api === "google-generate") {
+      parse = parseAnthropicSse;
+    } else {
       url = `${baseUrl}/models/${modelName}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+      const tools =
+        request.tools === undefined || request.tools.length === 0
+          ? undefined
+          : [
+              {
+                functionDeclarations: request.tools.map((schema) => ({
+                  name: schema.name,
+                  description: schema.description,
+                  parameters: {
+                    type: "OBJECT",
+                    properties: Object.fromEntries(
+                      schema.parameters.map((parameter) => [
+                        parameter.name,
+                        { type: parameter.type.toUpperCase(), description: parameter.description },
+                      ]),
+                    ),
+                    required: schema.parameters.filter((p) => p.required === true).map((p) => p.name),
+                  },
+                })),
+              },
+            ];
       init = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: request.messages.map((m) => ({
-            role: m.role === "assistant" ? "model" : m.role === "toolResult" ? "user" : m.role,
-            parts: [{ text: String(m.content) }],
-          })),
+          contents: request.messages
+            .filter((m) => m.role !== "system")
+            .map((m) => ({
+              role: m.role === "assistant" ? "model" : m.role === "toolResult" ? "user" : m.role,
+              parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }],
+            })),
+          ...(request.messages.some((m) => m.role === "system")
+            ? {
+                system_instruction: {
+                  parts: [
+                    {
+                      text: request.messages
+                        .filter((m) => m.role === "system")
+                        .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+                        .join("\n"),
+                    },
+                  ],
+                },
+              }
+            : {}),
+          ...(tools !== undefined ? { tools } : {}),
         }),
       };
-      extract = extractGoogle;
-    } else {
-      // openai-chat 与 bedrock-invoke 均通过 OpenAI 兼容 SSE 网关对接，
-      // 避免引入各家 SDK 大依赖（见实现报告"偏离项"）。
-      url = `${baseUrl}/chat/completions`;
-      init = {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: modelName, messages: request.messages.map(toChatMessage), stream: true }),
-      };
-      extract = extractOpenAi;
+      parse = parseGoogleSse;
     }
 
     const response = await fetchImpl(url, init);
     if (!response.ok) throw httpError(response.status, config.provider);
     if (response.body === null) throw new Error(`${config.provider.toUpperCase()}_NO_BODY`);
-    yield* parseSse(response.body, extract);
+    yield* parse(response.body);
   };
 }

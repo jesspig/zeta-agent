@@ -7,6 +7,7 @@ import {
   type AgentMessage,
   type AgentPluginApi,
   type AgentState,
+  type AgentToolCallRecord,
   type AssistantMessageEvent,
   type AssistantResult,
   type Capabilities,
@@ -49,6 +50,7 @@ export type {
   AgentListener,
   AgentMessage,
   AgentState,
+  AgentToolCallRecord,
 } from "@zeta-agent/agent-framework";
 
 export interface PluginTool<P = never> {
@@ -192,11 +194,37 @@ export interface AgentToolCall {
 
 export type ToolFailure = { readonly ok: false; readonly reason: string } | { readonly ok: true; readonly value: unknown };
 
-export interface AgentStreamRequest {
-  readonly messages: readonly AgentMessage[];
+export interface AgentToolSchema {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: readonly {
+    readonly name: string;
+    readonly type: "string" | "number" | "boolean";
+    readonly description: string;
+    readonly required?: boolean;
+  }[];
 }
 
-export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<string>;
+/** provider 流式块：纯文本字符串为兼容形态；对象形态携带推理与工具调用。 */
+export type AgentStreamChunk =
+  | string
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "reasoning"; readonly text: string }
+  | {
+      readonly type: "tool_call";
+      readonly id?: string;
+      readonly name: string;
+      /** JSON 字符串形式的参数。 */
+      readonly arguments?: string;
+    };
+
+export interface AgentStreamRequest {
+  readonly messages: readonly AgentMessage[];
+  /** 本轮可用的工具 schema；provider 据此发送原生 function calling。 */
+  readonly tools?: readonly AgentToolSchema[];
+}
+
+export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<AgentStreamChunk>;
 
 const ACTIVE_CAPABILITIES: Capabilities = Object.freeze({
   isolation: "active",
@@ -227,6 +255,8 @@ export interface AgentOptions {
   readonly effectBridge?: EffectBridge;
   readonly coreContext?: CoreContextLike;
   readonly allowedDirectories?: readonly string[];
+  /** 系统提示词；缺省时注入 cwd/platform/tools 等运行环境信息。 */
+  readonly systemPrompt?: string | (() => string);
 }
 
 export interface Agent extends PluginApiSurface {
@@ -266,6 +296,29 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   const assembly = includeBuiltins ? listAssembly() : [];
 
+  const toolNamesForPrompt = toolDefinitions.map((tool) => tool.name);
+  function resolveSystemPrompt(): string {
+    if (typeof options.systemPrompt === "function") return options.systemPrompt();
+    if (typeof options.systemPrompt === "string" && options.systemPrompt.length > 0) return options.systemPrompt;
+    const lines = [
+      "You are zeta, an interactive coding agent running in the user's terminal.",
+      "",
+      "Environment:",
+      `- Current working directory: ${process.cwd()}`,
+      `- Platform: ${process.platform}`,
+      `- Date: ${new Date().toISOString().slice(0, 10)}`,
+      toolNamesForPrompt.length > 0 ? `- Available tools: ${toolNamesForPrompt.join(", ")}` : "",
+      "",
+      "Guidelines:",
+      "- Use the provided tools whenever the answer depends on files, directories, commands, or other system state.",
+      "- Do not invent file contents, paths, or command output; inspect them with tools first.",
+      "- File tool paths must be absolute and inside the current working directory.",
+      "- Answer environment questions (cwd, platform, git status, etc.) from the Environment section or by calling tools.",
+      "- Reply in the same language the user uses. Keep answers concise and concrete.",
+    ].filter((line) => line.length > 0);
+    return lines.join("\n");
+  }
+
   const logger = createLogger(options.observability ?? defaultLoggerOptions());
   const effectBridge = options.effectBridge ?? createEffectBridge();
   const fiberLogger = logger.forFiber("agent");
@@ -276,6 +329,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   });
 
   let aborted = false;
+  /** 当前回合是否使用了 provider 原生 tool_calls（决定是否自动续跑消费工具结果）。 */
+  let lastTurnHadNativeTools = false;
 
   // 插件 API 的可变注册集合。每个 add* 返回幂等 disposer；disposeAll 按 LIFO 撤销。
   const pluginTools = new Map<string, { readonly tool: PluginTool; readonly dispose: () => void }>();
@@ -407,13 +462,23 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 工具结果仅回传本地执行信息，不重新进入模型（避免 stub 下的无限续跑）。
   const NO_TOOL_RESULT = "";
 
+  /** 把内置工具的简化参数表投影为 provider 可用的工具描述。 */
+  function toToolSchema(tool: ToolDefinition): AgentToolSchema {
+    return {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    };
+  }
+
   /** 把已拼接的文本投影为 message_update 所需的流式部分快照。 */
   function textSnapshot(content: string): AssistantMessageEvent {
     return { type: "text_delta", delta: content };
   }
 
   async function runTurn(userText?: string): Promise<readonly AgentMessage[]> {
-    if (aborted) return stream.getState().messages;
+    aborted = false;
+    if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" });
 
     const inbox: Inbox = createInbox();
@@ -450,7 +515,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
         for (const fn of prepareNextTurnFns) fn(stream.getState());
       },
       prepareRequest: (request) => {
-        let result: unknown = request;
+        const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
+        const prompt = resolveSystemPrompt();
+        // 系统提示词只进入请求，不写入会话状态，避免 transcript 出现 system 行。
+        const seeded = {
+          ...(request as object),
+          messages:
+            prompt.length > 0 && base.messages?.[0]?.role !== "system"
+              ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
+              : (base.messages ?? []),
+        };
+        let result: unknown = seeded;
         for (const transform of contextTransforms) result = transform(result);
         for (const fn of prepareRequestFns) result = fn(result);
         return result;
@@ -459,30 +534,75 @@ export function createAgent(options: AgentOptions = {}): Agent {
       finishTurn: (turn) => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
         for (const fn of turnBoundaries) fn(event);
-        return TURN_END_DECISION;
+        // 原生工具调用需要续跑一轮，让模型消费工具结果；文本标记协议保持单轮收束。
+        return lastTurnHadNativeTools && turn.toolResults.length > 0 ? undefined : TURN_END_DECISION;
       },
 
-      async streamAssistant(request: unknown): Promise<AssistantResult> {
+      async streamAssistant(
+        request: unknown,
+        onPartial?: (message: AgentMessage) => void | Promise<void>,
+      ): Promise<AssistantResult> {
         const updates: AssistantMessageEvent[] = [];
         let content = "";
+        let thinking = "";
+        const streamedCalls: Array<{ id?: string; name: string; arguments?: string }> = [];
+        lastTurnHadNativeTools = false;
+        let partialSeq = 0;
+        const snapshot = (): AgentMessage => ({
+          role: "assistant",
+          content,
+          ...(thinking.length > 0 ? { thinking } : {}),
+        });
         if (effectiveStreamFn !== undefined) {
-          for await (const chunk of effectiveStreamFn(request as AgentStreamRequest)) {
-            emitConverted(chunk);
+          const base = (request ?? {}) as Partial<AgentStreamRequest>;
+          const enriched: AgentStreamRequest = {
+            ...base,
+            messages: base.messages ?? [],
+            tools: base.tools ?? toolDefinitions.map(toToolSchema),
+          } as AgentStreamRequest;
+          for await (const chunk of effectiveStreamFn(enriched)) {
             if (aborted) {
               return {
-                message: { role: "assistant", content },
+                message: snapshot(),
                 toolCalls: [],
                 stopReason: "aborted",
                 updates,
               };
             }
-            content += chunk;
-            updates.push(textSnapshot(content));
+            if (typeof chunk === "string") {
+              emitConverted(chunk);
+              content += chunk;
+            } else if (chunk.type === "text") {
+              content += chunk.text;
+            } else if (chunk.type === "reasoning") {
+              emitConverted(chunk.text);
+              thinking += chunk.text;
+            } else if (chunk.type === "tool_call") {
+              streamedCalls.push(chunk);
+            }
+            if (onPartial !== undefined && (content.length > 0 || thinking.length > 0)) {
+              partialSeq += 1;
+              await onPartial(snapshot());
+              updates.push({ type: "text_delta", delta: content, seq: partialSeq });
+            }
           }
         }
 
         const toolCalls: ToolCall[] = [];
+        const records: AgentToolCallRecord[] = [];
+        lastTurnHadNativeTools = streamedCalls.length > 0;
         if (!aborted) {
+          for (const call of streamedCalls) {
+            const id = call.id ?? `call-${toolCalls.length + 1}`;
+            let args: unknown = {};
+            try {
+              args = JSON.parse(call.arguments ?? "{}") as unknown;
+            } catch {
+              // 参数流式拼装失败时按空对象处理，由工具实现拒绝。
+            }
+            toolCalls.push({ id, name: call.name, args });
+            records.push({ id, name: call.name, arguments: call.arguments ?? JSON.stringify(args) });
+          }
           for (const match of content.matchAll(TOOL_MARKER_RE)) {
             const name = match[1];
             if (name === undefined) continue;
@@ -492,15 +612,23 @@ export function createAgent(options: AgentOptions = {}): Agent {
             } catch {
               // 参数非法时按空对象处理，由工具实现决定如何拒绝。
             }
-            toolCalls.push({ id: `call-${toolCalls.length + 1}`, name, args });
+            const id = `call-${toolCalls.length + 1}`;
+            toolCalls.push({ id, name, args });
+            records.push({ id, name, arguments: match[2] ?? "{}" });
           }
         }
 
         return {
-          message: { role: "assistant", content: content.replace(TOOL_MARKER_RE, "") },
+          message: {
+            role: "assistant",
+            content: content.replace(TOOL_MARKER_RE, ""),
+            ...(thinking.length > 0 ? { thinking } : {}),
+            ...(records.length > 0 ? { toolCalls: records } : {}),
+          },
           toolCalls,
           stopReason: aborted ? "aborted" : "stop",
-          updates,
+          // 增量已在流式过程中通过 onPartial 发出，避免重复。
+          updates: onPartial === undefined ? updates : [],
         };
       },
 
@@ -533,7 +661,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
           }
           results.push({
             callId: call.id || `call-${index + 1}`,
-            message: { role: "toolResult", content: output },
+            message: {
+              role: "toolResult",
+              content: output,
+              toolCallId: call.id || `call-${index + 1}`,
+              toolName: call.name,
+            },
             isError,
             updates,
           });
@@ -543,7 +676,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
     };
 
-    await runLoop(runtime);
+    try {
+      await runLoop(runtime);
+    } catch (error) {
+      const message: AgentMessage = {
+        role: "assistant",
+        content: `Error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      await stream.emit({ type: "message_start", message });
+      await stream.emit({ type: "message_end", message });
+      await stream.emit({ type: "agent_end", messages: stream.getState().messages });
+    }
     return stream.getState().messages;
   }
 

@@ -66,7 +66,7 @@ describe("图片输入（T-17）", () => {
       { baseUrl: "https://img.test/v1", apiKey: "dummy", model: "gpt-4o" },
       fakeFetch
     )(request)) {
-      out.push(chunk);
+      if (typeof chunk === "string") out.push(chunk);
     }
     expect(out).toEqual([]);
     const body = JSON.parse(String(captured.init?.body));

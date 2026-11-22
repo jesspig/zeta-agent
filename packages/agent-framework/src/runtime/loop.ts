@@ -50,7 +50,7 @@ export interface LoopRuntime {
   getState(): AgentState;
   prepareNextTurn?(lastTurn: LastTurn | undefined): void;
   prepareRequest?(request: unknown): unknown;
-  streamAssistant(request: unknown): Promise<AssistantResult>;
+  streamAssistant(request: unknown, onPartial?: (message: AgentMessage) => void | Promise<void>): Promise<AssistantResult>;
   executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]>;
   finishTurn?(turn: LastTurn): LoopDecision | undefined;
   decide?(state: AgentState, turn: LastTurn): LoopDecision;
@@ -120,8 +120,14 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       messages: runtime.getState().messages,
     };
 
-    const response = await runtime.streamAssistant(request);
-    await emit({ type: "message_start", message: response.message });
+    await emit({ type: "message_start", message: { role: "assistant", content: "" } });
+    const response = await runtime.streamAssistant(request, async (partial) => {
+      await emit({
+        type: "message_update",
+        message: partial,
+        assistantMessageEvent: { type: "text_delta", delta: partial.content },
+      });
+    });
     for (const update of response.updates ?? []) {
       await emit({ type: "message_update", message: response.message, assistantMessageEvent: update });
     }
@@ -185,6 +191,10 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
 
     const moreSteering = inbox.poll("nextTurn");
     explicitContinuation = toolCalls.length === 0 && moreSteering.length === 0;
+
+    // 决策为 continue（例如模型请求了原生工具调用）时必须进入下一轮，
+    // 让工具结果回到模型；否则会在一轮后静默结束。
+    if (action === "continue") continue;
 
     const followUps = runtime.pollFollowUp?.() ?? inbox.poll("nextTurn");
     if (followUps.length > 0) continue;

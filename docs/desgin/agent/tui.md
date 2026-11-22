@@ -329,6 +329,35 @@ print/json/rpc 模式（[framework-model/engineering §9](../architecture/engine
 - headless/print/json/rpc 三模式第二轮回回归均 exit 0。
 - 已知边界（非阻塞）：完整 markdown 结构化渲染（列表/表格/链接/LaTeX/mermaid）与鼠标文本选择、全屏搜索、follow-up 队列属第二阶段候选；pi 的 jiti+命令式路线与 zeta 的声明式路线无法 API 级 1:1。
 
+## 13.2 第三轮：全屏 TUI 与对话流 1:1 复刻（2026-11-22）
+
+本轮针对「工具调用显示、思考内容显示、候选命令显示、斜杠命令功能、全屏覆盖并在退出后恢复终端」做直接复刻，主要落点：
+
+| 能力 | 实现 | 验证 |
+| --- | --- | --- |
+| 全屏备用屏真正生效 | `renderTui()` 显式 `await renderer.setupTerminal()`；`screenMode: "alternate-screen"`；`exitOnCtrlC: false`、Kitty 键盘、鼠标 | PTY 端到端：输出含 `\x1b[?1049h` 与退出时 `\x1b[?1049l`，exit 0，光标/键盘协议复位 |
+| 退出恢复命令行与历史 | `destroy()` → `await renderer.closed`；raw mode、括号粘贴、Kitty、鼠标模式由 renderer 复位 | 同上；`process.exit` 前等待关闭完成 |
+| 单一对话时间线 | `timeline.ts`：`AgentEvent` → 用户/助手/工具/提示条目，按发生顺序内联；流式 `message_update` 就地更新 | `timeline.spec.ts`；`transcript.visual.spec.tsx` 顺序断言 |
+| 工具调用内联显示 | `components/transcript.tsx` 按时间线渲染工具块；`tool-view.ts` 逐工具标题/预览/折叠提示/耗时 | read 折叠不显示内容、bash 末 5 行、edit 完整 diff、write 前 10 行；工具块成功背景 `toolSuccessBg` |
+| 思考内容 | 助手消息内联；默认展开灰色斜体思考正文，`Ctrl+T` 折叠为 `Thinking...`（与目标 UI 的 `hideThinkingBlock=false` 对齐） | `transcript.visual.spec.tsx`（默认展开 + Ctrl+T 折叠） |
+| 系统提示词 | `createAgent` 自动注入 cwd/platform/date/工具清单/行为准则；只进入请求不写入 transcript；支持 `systemPrompt` 覆盖 | `facade.system-prompt.spec.ts`；PTY 端到端 `firstSystem: true` |
+| 候选命令列表 | 编辑器下边框之后展开；`→ ` 选中、两列 label/描述、`(n/total)`；`↑/↓`、Tab 应用（光标停在命令末尾）、Enter 应用并提交、Esc 关闭 | `editor-autocomplete.spec.tsx`（含 Tab 后继续输入） |
+| 斜杠命令 | 命令目录（help/clear/new/model/theme/settings/compact/export/quit + 扩展命令）；本地命令真正执行；其余交宿主处理器 | 本地命令、选择器联动；命令面板 |
+| 原生工具调用 | provider 解析 OpenAI `tool_calls`、Anthropic `tool_use`、Google `functionCall`；facade 自动续跑消费工具结果；工具 schema 随请求发送 | `facade.native-tools.spec.ts`（两轮：read → 最终回答） |
+| 推理流 | provider 解析 `reasoning_content`/`reasoning`/`thinking_delta`/Google `thought`，写入 `message.thinking` 并随流式快照更新 | `facade.native-tools.spec.ts`、PTY 端到端（屏幕出现 `Thinking...`） |
+| 键位对齐 | Esc 中止；Ctrl+C 清空（空输入 500ms 内双击退出）；Ctrl+D 退出；Ctrl+L 模型；Ctrl+O 工具展开；Ctrl+T 思考展开；↑/↓ 历史 | `runtime-keymap.spec.tsx` |
+| 主题对齐 | dark/light 采用目标 UI 的 OKHSL 取色（accent 紫、blueBg 蓝灰、tool* 背景等） | `theme-context.spec.tsx`、`transcript.visual.spec.tsx` 背景断言 |
+| Markdown 稳定投影 | 标题/列表/引用/代码块/分隔线/行内代码/链接；标识符下划线不再被误判为斜体 | `markdown-blocks.spec.ts` |
+
+**仍属边界（未在本轮声称 1:1）**：
+
+- 图片内联渲染（Kitty/iTerm2）与 LaTeX/mermaid；
+- 语法高亮（当前代码块为单色投影）；
+- 鼠标点击单个工具/思考展开（仅全局 Ctrl+O / Ctrl+T）；
+- 会话持久化、`/resume`、`/tree`、`/fork` 的完整交互；
+- 退出时把最终 transcript 重新打印到主屏幕（目标 UI 默认行为；当前只恢复到进入前的屏幕，保持 shell 历史干净）；
+- 真实 bash 隔离执行后端（默认后端仍为空执行）。
+
 **返回索引**：[00 索引与交叉验证](../README.md)
 
 

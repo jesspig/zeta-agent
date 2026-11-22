@@ -213,7 +213,8 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     // 两条 assistant/tool message_end：assistant 1 条 + toolResult 2 条 = 3 条。
     expect(endIds.length).toBeGreaterThanOrEqual(3);
     // 事件完成顺序（tool_execution_end 的 callId）与结果数组解耦由顺序数组体现。
-    expect(order.filter((e) => e === "tool_execution_end")).toHaveLength(2);
+    // continue 语义下会进入下一轮，因此只断言首批工具事件存在且顺序稳定。
+    expect(order.filter((e) => e === "tool_execution_end").length).toBeGreaterThanOrEqual(2);
     expect(order.indexOf("agent_end")).toBe(order.length - 1);
   },
   // #4 {action:"end"} 不轮询队列、不 prepareNextTurn、不清队列。

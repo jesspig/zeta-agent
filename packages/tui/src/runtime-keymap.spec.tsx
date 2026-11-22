@@ -44,7 +44,7 @@ test("U-02 overlay 打开时 Enter 确认并退出", async () => {
   }
 });
 
-test("U-09 Ctrl+P 打开命令面板并执行内置命令", async () => {
+test("U-09 Ctrl+P 打开命令面板并执行命令", async () => {
   const submitted: string[] = [];
   const setup = await testRender(
     () => (
@@ -52,9 +52,10 @@ test("U-09 Ctrl+P 打开命令面板并执行内置命令", async () => {
         title="zeta"
         messages={[]}
         onPush={() => {}}
-        onSubmit={(text) => { submitted.push(text); }}
+        onSubmit={() => {}}
+        onCommand={(text) => { submitted.push(text); }}
         onExit={() => {}}
-        commandList={[{ id: "clear", title: "Clear transcript" }]}
+        commandList={[{ id: "custom", title: "Custom command" }]}
       />
     ),
     { width: 60, height: 12 },
@@ -63,9 +64,10 @@ test("U-09 Ctrl+P 打开命令面板并执行内置命令", async () => {
     await setup.renderOnce();
     setup.mockInput.pressKey("p" as never, { ctrl: true } as never);
     await setup.waitForFrame((frame) => frame.includes("命令面板"));
+    setup.mockInput.typeText("custom");
     setup.mockInput.pressEnter();
     await setup.waitForFrame(() => submitted.length === 1);
-    expect(submitted).toEqual(["/clear"]);
+    expect(submitted).toEqual(["/custom"]);
   } finally {
     setup.renderer.destroy();
   }

@@ -1,7 +1,6 @@
 import { CliRenderer } from "@opentui/core";
-import { render as openTuiRender, useKeyboard } from "@opentui/solid";
-import { createSignal, For, Show, createMemo } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { render as openTuiRender, useKeyboard, useTerminalDimensions } from "@opentui/solid";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createKeymap } from "./keymap";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
@@ -19,23 +18,17 @@ import { useZetaSlots, type ZetaNativeSlots } from "./slots-native";
 import type { SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
-import { RichMessageList } from "./components/message";
+import { Transcript, type TranscriptResources } from "./components/transcript";
 import { ZetaEditor } from "./components/editor";
 import { ViewportLayout } from "./components/layout-view";
 import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
+import type { SlashCommand } from "./slash";
+import type { TuiThemeName } from "./runtime-types";
 
-export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
+export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions, RuntimeResources } from "./runtime-types";
 
 function messageLine(message: RuntimeMessage): string {
   return `${message.role}: ${String(message.content)}`;
-}
-
-/** 编辑器上方的强调色分隔线（参考终端 UI 的输入区分隔样式）。 */
-function AccentSeparator() {
-  const theme = useTheme();
-  const dimensions = useTerminalDimensions();
-  const w = createMemo(() => Math.max(1, dimensions().width));
-  return <text fg={theme.color("accent")}>{"─".repeat(w())}</text>;
 }
 
 export interface ZetaFrameProps {
@@ -56,34 +49,114 @@ export function ZetaFrame(props: ZetaFrameProps) {
   );
 }
 
-export function ZetaApp(props: {
+const HELP_TEXT: readonly string[] = [
+  "快捷键",
+  "  Enter        提交（Shift+Enter 换行）",
+  "  Esc          中止当前运行",
+  "  Ctrl+C       清空输入",
+  "  Ctrl+D       退出（输入为空时）",
+  "  Ctrl+O       展开/折叠工具输出",
+  "  Ctrl+T       展开/折叠思考内容",
+  "  Ctrl+L       选择模型",
+  "  Ctrl+P       下一个模型",
+  "  Up/Down      浏览输入历史",
+  "  Tab          补全斜杠命令",
+  "  /            打开命令候选",
+];
+
+function HelpOverlay(props: { readonly onClose: () => void }) {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const width = createMemo(() => Math.min(clampWidth(64, dimensions().width - 4), Math.max(20, dimensions().width - 4)));
+  return (
+    <box
+      position="absolute"
+      left={2}
+      bottom={6}
+      width={width()}
+      flexDirection="column"
+      backgroundColor={theme.color("surface")}
+      border={true}
+      borderColor={theme.color("borderAccent")}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={1}
+      paddingBottom={1}
+    >
+      <For each={HELP_TEXT}>{(line) => <text fg={theme.color(line.startsWith("  ") ? "text" : "mdHeading")}>{line}</text>}</For>
+      <text fg={theme.color("dim")}>Esc 关闭</text>
+    </box>
+  );
+}
+
+export interface ZetaAppProps {
   readonly title: string;
   readonly messages: readonly RuntimeMessage[];
   readonly source?: EventSource;
   readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
   readonly onSubmit?: (text: string) => void | Promise<void>;
   readonly onExit: () => void;
+  readonly onAbort?: () => void;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
+  readonly commandCatalog?: readonly SlashCommand[];
+  readonly onCommand?: (text: string) => void | Promise<void>;
   readonly plugins?: readonly SolidPlugin<ZetaNativeSlots>[];
-  readonly resources?: Readonly<{
-    readonly models?: readonly string[];
-    readonly prompts?: readonly string[];
-    readonly extensions?: readonly string[];
-  }>;
-}) {
-  const [lines, setLines] = createSignal<readonly string[]>(props.messages.map(messageLine));
+  readonly cwd?: string;
+  readonly model?: string;
+  readonly models?: readonly string[];
+  readonly onModelChange?: (model: string) => void;
+  readonly provider?: string;
+  readonly resources?: TranscriptResources;
+  readonly theme?: TuiThemeName;
+}
+
+/** 根界面：视口（对话）+ 停靠区（编辑器/footer）+ 覆盖层。 */
+export function ZetaApp(props: ZetaAppProps) {
+  const theme = useTheme();
+  const [lines, setLines] = createSignal<readonly RuntimeMessage[]>(props.messages);
+  const [helpOpen, setHelpOpen] = createSignal(false);
   const [overlayOpen, setOverlayOpen] = createSignal(false);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const [themeName, setThemeName] = createSignal<TuiThemeName>(props.theme ?? "dark");
+  const [activeModel, setActiveModel] = createSignal<string | undefined>(props.model);
+  const [resetKey, setResetKey] = createSignal(0);
   type SelectorKind = "model" | "theme" | "settings";
   const [selectorOpen, setSelectorOpen] = createSignal<SelectorKind | undefined>(undefined);
   const { BoundSlot } = useZetaSlots(props.plugins);
+  const [status, setStatus] = createSignal<"idle" | "streaming" | "tool">("idle");
+  const [editorText, setEditorText] = createSignal("");
+  let lastCtrlC = 0;
 
-  const DEMO_OPTIONS: Readonly<Record<SelectorKind, readonly SelectOption[]>> = {
-    model: [
+  if (props.source !== undefined) {
+    const signals = createAgentSignals(props.source);
+    onMount(() => {
+      const off = signals.status.subscribe((value) => setStatus(value));
+      onCleanup(() => {
+        off();
+        signals.dispose();
+      });
+    });
+  }
+
+  const SELECTOR_TITLES: Readonly<Record<SelectorKind, string>> = {
+    model: "选择模型",
+    theme: "主题",
+    settings: "设置",
+  };
+
+  const modelOptions = (): readonly SelectOption[] => {
+    const provided = props.models ?? [];
+    if (provided.length > 0) return provided.map((id) => ({ value: id, label: id }));
+    return [
       { value: "gpt-4o", label: "GPT-4o" },
       { value: "claude-sonnet", label: "Claude Sonnet" },
-    ],
+    ];
+  };
+
+  const DEMO_OPTIONS = (): Readonly<Record<SelectorKind, readonly SelectOption[]>> => ({
+    model: modelOptions(),
     theme: [
+      { value: "system", label: "system" },
       { value: "dark", label: "dark" },
       { value: "light", label: "light" },
     ],
@@ -91,110 +164,254 @@ export function ZetaApp(props: {
       { value: "editor", label: "编辑器" },
       { value: "keymap", label: "快捷键" },
     ],
-  };
-  const SELECTOR_TITLES: Readonly<Record<SelectorKind, string>> = {
-    model: "选择模型",
-    theme: "主题",
-    settings: "设置",
-  };
+  });
+
+  const catalog = createMemo<readonly SlashCommand[]>(() => {
+    const builtin: SlashCommand[] = [
+      { name: "help", description: "显示帮助与快捷键" },
+      { name: "clear", description: "清空当前会话视图" },
+      { name: "new", description: "新建会话" },
+      { name: "model", description: "选择模型", argumentHint: "[model]" },
+      { name: "theme", description: "切换主题", argumentHint: "[system|dark|light]" },
+      { name: "settings", description: "打开设置" },
+      { name: "compact", description: "压缩会话上下文" },
+      { name: "export", description: "导出会话" },
+      { name: "quit", description: "退出" },
+    ];
+    const seen = new Set(builtin.map((command) => command.name));
+    const extra = (props.commandCatalog ?? []).filter((command) => !seen.has(command.name));
+    return [...builtin, ...extra];
+  });
+
   const paletteCommands = (): readonly Command[] => [
-    ...(props.commandList ?? []),
-    { id: "model", title: SELECTOR_TITLES.model },
-    { id: "theme", title: SELECTOR_TITLES.theme },
-    { id: "settings", title: SELECTOR_TITLES.settings },
+    ...catalog().map((command) => ({ id: command.name, title: `${command.name} — ${command.description ?? ""}` })),
+    ...(props.commandList ?? []).filter((entry) => !catalog().some((command) => command.name === entry.id)),
   ];
-  props.onPush((message) => setLines((current) => [...current, messageLine(message)]));
+
+  props.onPush((message) => setLines((current) => [...current, message]));
+
+  const notify = (text: string): void => {
+    setLines((current) => [...current, { role: "notice", content: text }]);
+  };
+
+  const runLocalCommand = (input: string): boolean => {
+    const trimmed = input.trim();
+    const match = /^\/([A-Za-z0-9_-]+)(?::|\s+)?(.*)$/.exec(trimmed);
+    if (match === null) return false;
+    const name = match[1] ?? "";
+    const rest = (match[2] ?? "").trim();
+    switch (name) {
+      case "help":
+        setHelpOpen(true);
+        return true;
+      case "clear":
+        setLines([]);
+        setResetKey((value) => value + 1);
+        return true;
+      case "new":
+        setLines([]);
+        setResetKey((value) => value + 1);
+        notify("✓ New session started");
+        return true;
+      case "quit":
+      case "exit":
+        props.onExit();
+        return true;
+      case "theme":
+        if (rest === "dark" || rest === "light" || rest === "system") {
+          setThemeName(rest);
+          theme.setActive(rest);
+          notify(`theme: ${rest}`);
+        } else {
+          setSelectorOpen("theme");
+        }
+        return true;
+      case "model":
+        if (rest.length > 0 && (props.models ?? []).includes(rest)) {
+          setActiveModel(rest);
+          props.onModelChange?.(rest);
+          notify(`model: ${rest}`);
+        } else {
+          setSelectorOpen("model");
+        }
+        return true;
+      case "settings":
+        setSelectorOpen("settings");
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const submit = (text: string): void => {
+    const value = text.trim();
+    if (value.length === 0) return;
+    if (value.startsWith("/")) {
+      if (runLocalCommand(value)) return;
+      if (props.onCommand !== undefined) {
+        void props.onCommand(value);
+        return;
+      }
+      notify(`未知命令：${value}（/help 查看可用命令）`);
+      return;
+    }
+    void props.onSubmit?.(value);
+  };
 
   const keymap = createKeymap();
-  keymap.register({ combo: "escape", action: "overlay", layer: "tui" });
-  keymap.register({ combo: "ctrl+c", action: "exit", layer: "tui" });
-  // 沿用常见编辑语义：ctrl+k 归编辑器 kill-to-end；overlay 切换改用 ctrl+g，避免与编辑键冲突。
+  keymap.register({ combo: "escape", action: "abort", layer: "app" });
+  keymap.register({ combo: "ctrl+d", action: "exit", layer: "app" });
+  keymap.register({ combo: "ctrl+l", action: "model-selector", layer: "app" });
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
-  keymap.register({ combo: "ctrl+o", action: "model-selector", layer: "app" });
-  keymap.register({ combo: "ctrl+t", action: "theme-selector", layer: "app" });
-  keymap.register({ combo: "ctrl+s", action: "settings-selector", layer: "app" });
-
-  const dimensions = useTerminalDimensions();
-  const width = createMemo(() => clampWidth(100, dimensions().width));
+  keymap.register({ combo: "ctrl+o", action: "toggle-tools", layer: "tui" });
+  keymap.register({ combo: "ctrl+t", action: "toggle-thinking", layer: "tui" });
 
   useKeyboard((key) => {
     if (key.eventType === "release") return;
+
+    // 与目标终端 UI 一致：Ctrl+C 清空输入；空输入下 500ms 内二次按下退出。
+    if (key.ctrl && key.name === "c") {
+      if (editorText().trim().length === 0) {
+        const now = Date.now();
+        if (now - lastCtrlC < 500) {
+          key.preventDefault();
+          key.stopPropagation();
+          props.onExit();
+          return;
+        }
+        lastCtrlC = now;
+      } else {
+        lastCtrlC = 0;
+      }
+    }
     const combo = key.ctrl ? `ctrl+${key.name}` : key.name;
     const action = keymap.resolve(combo)?.action;
     if (action === "exit") {
-      props.onExit();
-      return;
-    }
-    if (action === "overlay") {
-      // Esc 只负责取消/关闭，避免与 toggle 重复导致 overlay 关不掉。
-      setOverlayOpen(false);
+      if (editorText().trim().length === 0) {
+        key.preventDefault();
+        key.stopPropagation();
+        props.onExit();
+      }
       return;
     }
     if (action === "confirm") {
+      key.preventDefault();
+      key.stopPropagation();
       setOverlayOpen((open) => !open);
       return;
     }
     if (action === "palette") {
+      key.preventDefault();
+      key.stopPropagation();
       setPaletteOpen((open) => !open);
       return;
     }
-    if (action === "model-selector") {
-      setSelectorOpen((kind) => (kind === "model" ? undefined : "model"));
+    if (action === "abort") {
+      if (helpOpen()) {
+        key.preventDefault();
+        key.stopPropagation();
+        setHelpOpen(false);
+        return;
+      }
+      if (overlayOpen()) {
+        key.preventDefault();
+        key.stopPropagation();
+        setOverlayOpen(false);
+        return;
+      }
+      // 选择器/命令面板自行处理 Esc；编辑器负责关闭候选并触发 onAbort。
       return;
     }
-    if (action === "theme-selector") {
-      setSelectorOpen((kind) => (kind === "theme" ? undefined : "theme"));
-      return;
-    }
-    if (action === "settings-selector") {
-      setSelectorOpen((kind) => (kind === "settings" ? undefined : "settings"));
-      return;
-    }
-    // overlay 打开时按常见交互语义处理：Enter 确认。
-    if (overlayOpen() && key.name === "return") {
+    if (overlayOpen() && (key.name === "return" || key.name === "enter")) {
       key.preventDefault();
       key.stopPropagation();
       setOverlayOpen(false);
       props.onExit();
-    }
-  });
-
-  function submit(value: string) {
-    const text = value.trim();
-    if (text.length === 0) return;
-    if (text === "exit" || text === "quit") {
-      props.onExit();
       return;
     }
-    setLines((current) => [...current, `user: ${text}`]);
-    void props.onSubmit?.(text);
-  }
+    if (action === "model-selector") {
+      key.preventDefault();
+      key.stopPropagation();
+      setSelectorOpen((kind) => (kind === "model" ? undefined : "model"));
+      return;
+    }
+  });
 
   return (
     <>
       <ViewportLayout
         transcript={
-          <Show when={props.source} fallback={<ZetaFrame title={props.title} lines={lines()} />}>
+          <Show
+            when={props.source}
+            fallback={<ZetaFrame title={props.title} lines={lines().map(messageLine)} />}
+          >
             {(sourceAccessor: () => EventSource) => (
-              <RichMessageList source={sourceAccessor()} resources={props.resources} />
+              <Transcript
+                source={sourceAccessor()}
+                cwd={props.cwd}
+                resources={props.resources}
+                resetKey={resetKey()}
+                notices={lines()
+                  .filter((message) => message.role === "notice")
+                  .map((message, index) => ({
+                    kind: "notice" as const,
+                    id: `n${index}-${String(message.content)}`,
+                    tone: "muted" as const,
+                    text: String(message.content),
+                  }))}
+              />
             )}
           </Show>
         }
         dock={
           <>
-            <AccentSeparator />
-            <ZetaEditor
-              onSubmit={(text) => {
-                if (text === "exit" || text === "quit") {
-                  props.onExit();
-                  return;
-                }
-                return props.onSubmit?.(text);
+            <Show
+              when={selectorOpen() !== undefined}
+              fallback={
+                <Show when={!paletteOpen() && !overlayOpen() && !helpOpen()}>
+                  <ZetaEditor
+                    commands={catalog()}
+                    status={status()}
+                    placeholder="输入消息，/ 查看命令"
+                    onChange={setEditorText}
+                    onEscape={() => props.onAbort?.()}
+                    onSubmit={(text) => submit(text)}
+                  />
+                </Show>
+              }
+            >
+              {() => {
+                const kind = selectorOpen() as SelectorKind;
+                const options = DEMO_OPTIONS()[kind];
+                const shared = {
+                  options: options.length > 0 ? options : [{ value: "default", label: "默认" }],
+                  onSelect: (option: SelectOption) => {
+                    setSelectorOpen(undefined);
+                    if (kind === "theme") {
+                      const next = option.value as TuiThemeName;
+                      setThemeName(next);
+                      theme.setActive(next);
+                    } else if (kind === "model") {
+                      setActiveModel(option.value);
+                      props.onModelChange?.(option.value);
+                    }
+                  },
+                  onCancel: () => setSelectorOpen(undefined),
+                };
+                if (kind === "model") return <ModelSelector {...shared} title={SELECTOR_TITLES[kind]} />;
+                if (kind === "theme") return <ThemeSelector {...shared} title={SELECTOR_TITLES[kind]} />;
+                return <SettingsSelector {...shared} title={SELECTOR_TITLES[kind]} />;
               }}
-            />
+            </Show>
             <BoundSlot name="footer" mode="replace">
-              <FooterBridge source={props.source} model={props.title} />
+              <FooterBridge
+                source={props.source}
+                model={activeModel() ?? props.model ?? "zeta"}
+                pwd={props.cwd}
+                provider={props.provider}
+                modelId={activeModel() ?? props.model}
+              />
             </BoundSlot>
           </>
         }
@@ -209,59 +426,57 @@ export function ZetaApp(props: {
           onCancel={() => setOverlayOpen(false)}
         />
       </Show>
+      <Show when={helpOpen()}>
+        <HelpOverlay onClose={() => setHelpOpen(false)} />
+      </Show>
       <Show when={paletteOpen()}>
         <CommandPaletteView
           commands={paletteCommands()}
           onRun={(command: Command) => {
             setPaletteOpen(false);
-            const known: SelectorKind[] = ["model", "theme", "settings"];
-            if ((known as readonly string[]).includes(command.id)) {
-              setSelectorOpen(command.id as SelectorKind);
-              return;
-            }
-            void props.onSubmit?.(`/${command.id}`);
+            submit(`/${command.id}`);
           }}
           onCancel={() => setPaletteOpen(false)}
         />
-      </Show>
-      <Show when={selectorOpen() !== undefined}>
-        {() => {
-          const kind = selectorOpen() as SelectorKind;
-          const shared = {
-            options: DEMO_OPTIONS[kind],
-            onSelect: (option: SelectOption) => {
-              setSelectorOpen(undefined);
-              void props.onSubmit?.(`/${kind}:${option.value}`);
-            },
-            onCancel: () => setSelectorOpen(undefined),
-          };
-          if (kind === "model") return <ModelSelector {...shared} title={SELECTOR_TITLES[kind]} />;
-          if (kind === "theme") return <ThemeSelector {...shared} title={SELECTOR_TITLES[kind]} />;
-          return <SettingsSelector {...shared} title={SELECTOR_TITLES[kind]} />;
-        }}
       </Show>
     </>
   );
 }
 
 export async function renderTui(options: RuntimeTuiOptions = {}): Promise<RuntimeTuiHandle> {
+  const screenMode = resolveDualMode(options.mode).screenMode;
   const renderer = new CliRenderer(
     process.stdin,
     process.stdout,
     process.stdout.columns || 80,
     process.stdout.rows || 24,
-    { screenMode: resolveDualMode(options.mode).screenMode },
+    {
+      screenMode,
+      exitOnCtrlC: false,
+      useMouse: true,
+      clearOnShutdown: false,
+      useKittyKeyboard: { disambiguate: true, alternateKeys: true },
+    },
   );
+  // 关键：构造函数不会进入备用屏/原始模式，必须显式 setupTerminal。
+  try {
+    await renderer.setupTerminal();
+  } catch (error) {
+    renderer.destroy();
+    await renderer.closed.catch(() => {});
+    throw error;
+  }
+
   let resolveClosed: () => void = () => {};
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve;
   });
   let push: (message: RuntimeMessage) => void = () => {};
+  let destroyed = false;
 
   const signals: AgentSignals | undefined = options.source
     ? createAgentSignals(options.source)
     : undefined;
-  // OSC 7501/9;4：向终端上报工作状态与进度；退出时复位为 done。
   const releaseOsc = signals
     ? createOscBridge(signals, (sequence) => process.stdout.write(sequence))
     : undefined;
@@ -273,35 +488,56 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     return options.onSubmit?.(text);
   };
 
-  const exit = () => {
-    releaseOsc?.();
-    signals?.dispose();
-    renderer.destroy();
-    resolveClosed();
+  const exit = (): void => {
+    if (destroyed) return;
+    destroyed = true;
+    try {
+      releaseOsc?.();
+      signals?.dispose();
+      renderer.destroy();
+    } finally {
+      resolveClosed();
+    }
   };
 
-  await openTuiRender(
-    () => (
-      <ThemeProvider initial={options.theme ?? "dark"}>
-        <ZetaApp
-          title={options.title ?? "zeta"}
-          messages={options.messages ?? []}
-          source={options.source}
-          onPush={(sink) => {
-            push = sink;
-          }}
-          onSubmit={onSubmit}
-          commandList={options.commandList}
-          plugins={options.plugins}
-          onExit={() => {
-            options.onExit?.();
-            exit();
-          }}
-        />
-      </ThemeProvider>
-    ),
-    renderer,
-  );
+  try {
+    await openTuiRender(
+      () => (
+        <ThemeProvider initial={options.theme ?? "dark"}>
+          <ZetaApp
+            title={options.title ?? "zeta"}
+            messages={options.messages ?? []}
+            source={options.source}
+            onPush={(sink) => {
+              push = sink;
+            }}
+            onSubmit={onSubmit}
+            onCommand={options.onCommand}
+            onAbort={options.onAbort}
+            commandList={options.commandList}
+            commandCatalog={options.commandCatalog}
+            plugins={options.plugins}
+            cwd={options.cwd}
+            model={options.model}
+            models={options.models}
+            onModelChange={options.onModelChange}
+            provider={options.provider}
+            resources={options.resources}
+            theme={options.theme}
+            onExit={() => {
+              options.onExit?.();
+              exit();
+            }}
+          />
+        </ThemeProvider>
+      ),
+      renderer,
+    );
+  } catch (error) {
+    exit();
+    await renderer.closed.catch(() => {});
+    throw error;
+  }
 
   return {
     appendMessage(message) {

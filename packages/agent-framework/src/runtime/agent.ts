@@ -1,6 +1,21 @@
+export interface AgentToolCallRecord {
+  readonly id: string;
+  readonly name: string;
+  /** JSON 字符串形式的参数（与 OpenAI tool_calls.function.arguments 对齐）。 */
+  readonly arguments: string;
+}
+
 export interface AgentMessage {
   readonly role: "system" | "user" | "assistant" | "toolResult";
   readonly content: unknown;
+  /** 助手推理/思考内容（provider 原生 reasoning 或 thinking 块）。 */
+  readonly thinking?: string;
+  /** 助手消息发起的工具调用，供多轮工具协议回传给模型。 */
+  readonly toolCalls?: readonly AgentToolCallRecord[];
+  /** toolResult 对应的调用 id。 */
+  readonly toolCallId?: string;
+  /** toolResult 对应的工具名。 */
+  readonly toolName?: string;
 }
 
 export interface AssistantMessageEvent {

@@ -23,10 +23,10 @@ describe("U-04 主题接线", () => {
       { width: 40, height: 3 },
     );
     try {
-      await setup.waitForFrame((frame) => frame.includes("dark:#7ee787"));
+      await setup.waitForFrame((frame) => frame.includes("dark:#a798d7"));
       innerSet?.("light");
-      await setup.waitForFrame((frame) => frame.includes("light:#1a7f37"));
-      expect(setup.captureCharFrame()).toContain("light:#1a7f37");
+      await setup.waitForFrame((frame) => frame.includes("light:#7459b4"));
+      expect(setup.captureCharFrame()).toContain("light:#7459b4");
     } finally {
       setup.renderer.destroy();
     }
@@ -35,7 +35,7 @@ describe("U-04 主题接线", () => {
   test("无 Provider 时回退 dark，组件独立可测", async () => {
     const setup = await testRender(() => <ThemeProbe />, { width: 40, height: 3 });
     try {
-      await setup.waitForFrame((frame) => frame.includes("dark:#7ee787"));
+      await setup.waitForFrame((frame) => frame.includes("dark:#a798d7"));
     } finally {
       setup.renderer.destroy();
     }

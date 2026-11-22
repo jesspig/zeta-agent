@@ -13,49 +13,51 @@ function renderApp(onSubmit?: (text: string) => void) {
         onExit={() => {}}
       />
     ),
-    { width: 48, height: 12 },
+    { width: 60, height: 14 },
   );
 }
 
-test("T-03 ctrl+o 打开 ModelSelector，Enter 提交选择", async () => {
-  const submitted: string[] = [];
-  const setup = await renderApp((text) => { submitted.push(text); });
-  try {
-    await setup.renderOnce();
-    expect(setup.captureCharFrame()).not.toContain("GPT-4o");
-    setup.mockInput.pressKey("o" as never, { ctrl: true } as never);
-    await setup.waitForFrame((frame) => frame.includes("GPT-4o"));
-    setup.mockInput.pressEnter();
-    await setup.waitForFrame(() => submitted.length === 1);
-    expect(submitted).toEqual(["/model:gpt-4o"]);
-  } finally {
-    setup.renderer.destroy();
-  }
-});
-
-test("T-03 ctrl+t 打开 ThemeSelector，Escape 取消", async () => {
+test("T-03 ctrl+l 打开 ModelSelector，Enter 选择后关闭并写入 footer", async () => {
   const setup = await renderApp();
   try {
     await setup.renderOnce();
-    setup.mockInput.pressKey("t" as never, { ctrl: true } as never);
-    await setup.waitForFrame((frame) => frame.includes("选择主题") || frame.includes("主题"));
-    expect(setup.captureCharFrame()).toContain("light");
-    setup.mockInput.pressEscape();
-    await Bun.sleep(30);
-    await setup.waitForFrame((frame) => !frame.includes("light") || !frame.includes("选择"));
+    expect(setup.captureCharFrame()).not.toContain("GPT-4o");
+    setup.mockInput.pressKey("l" as never, { ctrl: true } as never);
+    await setup.waitForFrame((frame) => frame.includes("GPT-4o"));
+    setup.mockInput.pressEnter();
+    await setup.waitForFrame((frame) => !frame.includes("GPT-4o") && frame.includes("gpt-4o"));
+    expect(setup.captureCharFrame()).toContain("gpt-4o");
   } finally {
     setup.renderer.destroy();
   }
 });
 
-test("T-03 命令面板内置 model 命令打开 ModelSelector", async () => {
+test("T-03 命令面板 theme 命令打开 ThemeSelector，Escape 取消", async () => {
+  const setup = await renderApp();
+  try {
+    await setup.renderOnce();
+    setup.mockInput.pressKey("p" as never, { ctrl: true } as never);
+    await setup.waitForFrame((frame) => frame.includes("命令面板"));
+    setup.mockInput.typeText("theme");
+    await setup.waitForFrame((frame) => !frame.includes("theme: 主题") || frame.includes("theme"));
+    setup.mockInput.pressEnter();
+    await setup.waitForFrame((frame) => frame.includes("light"));
+    expect(setup.captureCharFrame()).toContain("light");
+    setup.mockInput.pressEscape();
+    await Bun.sleep(30);
+    await setup.waitForFrame((frame) => !frame.includes("system") || !frame.includes("light"));
+  } finally {
+    setup.renderer.destroy();
+  }
+});
+
+test("T-03 命令面板 model 命令打开 ModelSelector", async () => {
   const setup = await renderApp();
   try {
     await setup.renderOnce();
     setup.mockInput.pressKey("p" as never, { ctrl: true } as never);
     await setup.waitForFrame((frame) => frame.includes("命令面板"));
     setup.mockInput.typeText("model");
-    await setup.waitForFrame((frame) => !frame.includes("theme: 主题"));
     setup.mockInput.pressEnter();
     await setup.waitForFrame((frame) => frame.includes("GPT-4o"));
   } finally {

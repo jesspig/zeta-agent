@@ -20,9 +20,12 @@ const request: AgentStreamRequest = {
   ],
 };
 
-async function collect(iterable: AsyncIterable<string>): Promise<string[]> {
+async function collect(iterable: AsyncIterable<string | { readonly type: string; readonly text?: string }>): Promise<string[]> {
   const out: string[] = [];
-  for await (const chunk of iterable) out.push(chunk);
+  for await (const chunk of iterable) {
+    if (typeof chunk === "string") out.push(chunk);
+    else if (typeof chunk.text === "string") out.push(chunk.text);
+  }
   return out;
 }
 
@@ -97,8 +100,8 @@ describe("多 provider 流式接口（T-12）", () => {
     expect(captured.url).toContain("alt=sse");
     expect(captured.url).toContain("key=dummy");
     const body = JSON.parse(String(captured.init?.body));
-    expect(body.contents[0]).toEqual({ role: "system", parts: [{ text: "sys" }] });
-    expect(body.contents[1]).toEqual({ role: "user", parts: [{ text: "hi" }] });
+    expect(body.contents[0]).toEqual({ role: "user", parts: [{ text: "hi" }] });
+    expect(body.system_instruction).toEqual({ parts: [{ text: "sys" }] });
   });
 
   test("bedrock：走 OpenAI 兼容网关（bedrock-invoke 等价适配器）", async () => {

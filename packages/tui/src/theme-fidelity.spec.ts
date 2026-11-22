@@ -11,7 +11,7 @@ import { createThemeRegistry, type ColorToken } from "./theme";
 describe("T-05 主题增强", () => {
   test("语义 token 扩展到 ~60 个，保留原有 8 个基础 token", () => {
     expect(SEMANTIC_TOKENS.length).toBeGreaterThanOrEqual(50);
-    expect(SEMANTIC_TOKENS.length).toBeLessThanOrEqual(72);
+    expect(SEMANTIC_TOKENS.length).toBeLessThanOrEqual(100);
     for (const base of ["accent", "text", "border", "muted", "error", "info", "warning", "thinking"] as ColorToken[]) {
       expect(SEMANTIC_TOKENS).toContain(base);
     }

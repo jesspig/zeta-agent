@@ -19,6 +19,13 @@ export const SEMANTIC_TOKENS = [
   "focusBorder", "hoverBg", "activeBg", "disabled", "placeholder",
   "notification", "notificationInfo", "notificationWarn", "notificationError",
   "chart1", "chart2", "chart3", "chart4",
+  // 高保真消息/工具/Markdown 语义色（与目标终端 UI 的 token 集对齐）
+  "borderMuted", "borderAccent", "dim", "thinkingText", "selectedBg",
+  "toolPendingBg", "toolSuccessBg", "toolErrorBg", "toolTitle", "toolOutput",
+  "mdHeading", "mdLink", "mdLinkUrl", "mdCode", "mdCodeBlock", "mdCodeBlockBorder",
+  "mdListBullet", "quoteText", "quoteBorder", "mdRule",
+  "toolDiffAdded", "toolDiffRemoved", "toolDiffContext",
+  "syntaxKeyword", "syntaxString", "syntaxNumber", "syntaxType", "syntaxFunction",
 ] as const;
 
 export interface TerminalPaletteInput {
@@ -199,6 +206,34 @@ export function generateOklchPalette(input: TerminalPaletteInput): GeneratedPale
     chart2: tone(green),
     chart3: tone(yellow),
     chart4: tone(magenta),
+    borderMuted: rgbToHex(mix(bg, fg, isDark ? 0.45 : 0.42)),
+    borderAccent: rgbToHex(mix(bg, magenta, isDark ? 0.5 : 0.4)),
+    dim: tone(fg, -0.22),
+    thinkingText: tone(magenta, -0.16),
+    selectedBg: rgbToHex(mix(bg, blue, isDark ? 0.3 : 0.14)),
+    toolPendingBg: rgbToHex(mix(bg, fg, isDark ? 0.11 : 0.06)),
+    toolSuccessBg: rgbToHex(mix(bg, green, isDark ? 0.16 : 0.1)),
+    toolErrorBg: rgbToHex(mix(bg, red, isDark ? 0.18 : 0.1)),
+    toolTitle: rgbToHex(fg),
+    toolOutput: tone(fg, -0.12),
+    mdHeading: tone(yellow),
+    mdLink: tone(blue),
+    mdLinkUrl: tone(fg, -0.12),
+    mdCode: tone(magenta),
+    mdCodeBlock: tone(green),
+    mdCodeBlockBorder: tone(fg, -0.14),
+    mdListBullet: tone(magenta),
+    quoteText: tone(fg, -0.12),
+    quoteBorder: tone(fg, -0.16),
+    mdRule: tone(fg, -0.12),
+    toolDiffAdded: tone(green, -0.05),
+    toolDiffRemoved: tone(red, -0.05),
+    toolDiffContext: tone(fg, -0.16),
+    syntaxKeyword: tone(blue),
+    syntaxString: tone(red, 0.02),
+    syntaxNumber: tone(green),
+    syntaxType: tone(magenta),
+    syntaxFunction: tone(yellow),
   };
 }
 

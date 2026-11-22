@@ -9,6 +9,10 @@ const CONTEXT_LIMIT = 128000;
 export interface FooterBridgeProps {
   readonly source?: EventSource;
   readonly model?: string;
+  /** 覆盖默认 cwd（例如 CLI 显式传入）。 */
+  readonly pwd?: string;
+  readonly provider?: string;
+  readonly modelId?: string;
   /** 遥测覆盖：真实 token/成本/分支来自宿主时由此注入。 */
   readonly telemetry?: {
     readonly pwd?: string;
@@ -68,7 +72,7 @@ export function FooterBridge(props: FooterBridgeProps) {
       budget={budget()}
       retry={STATUS_LABEL[statusMessage() ?? ""] || undefined}
       statusText={telemetry ? STATUS_LABEL[statusMessage() ?? ""] || undefined : undefined}
-      pwd={telemetry?.pwd ?? defaults.pwd}
+      pwd={telemetry?.pwd ?? props.pwd ?? defaults.pwd}
       home={telemetry?.home ?? defaults.home}
       branch={telemetry?.branch}
       session={telemetry?.session}
