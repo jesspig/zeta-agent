@@ -65,6 +65,8 @@ export interface RuntimeTuiOptions {
   /** 思考强度档位与变更回调。 */
   readonly reasoningEffort?: string;
   readonly onEffortChange?: (effort: string) => void;
+  /** /new：宿主执行真实会话替换；未提供时保持旧的纯视图行为。 */
+  readonly onNewSession?: () => void | Promise<void>;
   readonly resources?: RuntimeResources;
 }
 

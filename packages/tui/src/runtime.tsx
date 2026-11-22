@@ -122,6 +122,8 @@ export interface ZetaAppProps {
   readonly reasoningEffort?: string;
   /** 思考强度变更回调。 */
   readonly onEffortChange?: (effort: string) => void;
+  /** /new：宿主执行真实会话替换（清空历史并隔离在途事件）。 */
+  readonly onNewSession?: () => void | Promise<void>;
 }
 
 /** 根界面：视口（对话）+ 停靠区（编辑器/footer）+ 覆盖层。 */
@@ -233,8 +235,10 @@ export function ZetaApp(props: ZetaAppProps) {
         setResetKey((value) => value + 1);
         return true;
       case "new":
+        // 视图总是清空；宿主回调负责清空真正的会话上下文（agent.reset）。
         setLines([]);
         setResetKey((value) => value + 1);
+        if (props.onNewSession !== undefined) void props.onNewSession();
         notify("✓ New session started");
         return true;
       case "quit":
@@ -612,6 +616,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
             currentModel={currentModel()}
             reasoningEffort={options.reasoningEffort}
             onEffortChange={options.onEffortChange}
+            onNewSession={options.onNewSession}
             onConnect={options.onConnect}
             connection={options.connection}
             onModelChange={options.onModelChange}

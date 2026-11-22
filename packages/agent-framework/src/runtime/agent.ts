@@ -113,6 +113,8 @@ export interface EventStream {
   subscribe(listener: AgentListener): () => void;
   emit(event: AgentEvent): Promise<void>;
   waitForIdle(): Promise<void>;
+  /** 清空状态与在途等待，保留订阅者，供新建会话使用。 */
+  reset(): void;
   readonly listenerCount: number;
 }
 
@@ -160,6 +162,11 @@ export function createEventStream(initial: AgentState = createInitialState()): E
       return new Promise<void>((resolve) => {
         idleWaiters.push(resolve);
       });
+    },
+    reset() {
+      state = createInitialState();
+      inFlight.clear();
+      for (const resolve of idleWaiters.splice(0)) resolve();
     },
     get listenerCount() {
       return listeners.length;
