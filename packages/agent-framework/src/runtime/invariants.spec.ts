@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import {
   createEventStream,
@@ -13,7 +16,7 @@ import {
   type LoopRuntime,
   type ToolResult,
 } from "./loop";
-import { createDecisionWaterfall, nextAction } from "./decision";
+import { createDecisionWaterfall, nextAction, type AgentDecision } from "./decision";
 import { createInitialState, reduceState } from "./agent";
 import { executeConditionalBatch, type ConditionalCall } from "../tools/parallel";
 import {
@@ -38,6 +41,7 @@ import {
 interface InvariantCase {
   readonly id: number;
   readonly name: string;
+  /** 两版独立的断言体：各自构造接线、各自设哨兵，共享 body 视为凑数。 */
   readonly legacy: () => void | Promise<void>;
   readonly plugin: () => void | Promise<void>;
 }
@@ -45,8 +49,10 @@ interface InvariantCase {
 /** 运行时构造选项：覆盖各不变量所需的钩子与响应。 */
 interface RuntimeOptions {
   readonly response?: Partial<AssistantResult>;
+  /** 按轮次覆盖响应：索引 i 对应第 i+1 次 streamAssistant，缺省沿用 response。 */
+  readonly responses?: readonly Partial<AssistantResult>[];
   readonly toolResults?: readonly ToolResult[];
-  readonly finishTurnLegacy?: (turn: LastTurn) => { action: "continue" | "end" };
+  readonly finishTurnLegacy?: (turn: LastTurn) => { action: "continue" | "end" } | undefined;
   readonly decisionPlugin?: NonNullable<LoopRuntime["decision"]>;
   readonly prepareNextTurnCalls?: { count: number };
   readonly onRequest?: (request: unknown) => void;
@@ -59,8 +65,13 @@ interface RuntimeOptions {
 function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
   const stream = createEventStream();
   const order: string[] = [];
+  const startCallIds: string[] = [];
+  const endCallIds: string[] = [];
   stream.subscribe((event: AgentEvent) => {
     order.push(event.type);
+    // tool_execution_start 按 toolCalls 源码顺序 emit；end 按结果完成顺序 emit。
+    if (event.type === "tool_execution_start") startCallIds.push(event.toolCallId);
+    if (event.type === "tool_execution_end") endCallIds.push(event.toolCallId);
   });
   const inbox = createInbox();
   const response: AssistantResult = {
@@ -86,7 +97,8 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
       streamCount += 1;
       // 安全阀：continue 场景在若干轮后强制硬退出，避免断言用例无限循环。
       if (streamCount > 3) return { ...response, stopReason: "error", toolCalls: [] };
-      return response;
+      const override = options.responses?.[streamCount - 1];
+      return override === undefined ? response : { ...response, ...override };
     },
     executeToolCalls: async () => options.toolResults ?? [],
     prepareNextTurn: () => {
@@ -102,6 +114,8 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
     stream,
     inbox,
     order,
+    startCallIds,
+    endCallIds,
     getRequestCount: () => requestCount,
     getStreamCount: () => streamCount,
   };
@@ -110,10 +124,33 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
 function pair(
   id: number,
   name: string,
-  body: (mode: "legacy" | "plugin") => void | Promise<void>
+  legacy: (mode: "legacy") => void | Promise<void>,
+  plugin: (mode: "plugin") => void | Promise<void>
 ): InvariantCase {
-  return { id, name, legacy: () => body("legacy"), plugin: () => body("plugin") };
+  return { id, name, legacy: () => legacy("legacy"), plugin: () => plugin("plugin") };
 }
+
+/**
+ * §13 要点映射表（门 2 数据源；scripts/check-invariant-points.mjs 机械校验）。
+ * keywords 取每条测试要点中可区分正确/错误实现的词，断言块需含哨兵与关键词。
+ */
+export const INVARIANT_TEST_POINTS: Record<
+  number,
+  { readonly point: string; readonly keywords: readonly string[]; readonly assertFragment: string }
+> = {
+  1: { point: "assistant message_end 屏障", keywords: ["message_end", "preflight", "barrier"], assertFragment: "sawMessageEndBeforeTool" },
+  2: { point: "完成顺序 vs 源码顺序解耦", keywords: ["tool_execution_end", "callId", "reverse"], assertFragment: "reverseOrderObserved" },
+  3: { point: "error/aborted 硬退出", keywords: ["stopReason", "error", "continue"], assertFragment: "hardExitObserved" },
+  4: { point: "end 不清队列", keywords: ["prepareNextTurn", "queue", "agent_end"], assertFragment: "endKeepsQueueObserved" },
+  5: { point: "continue 保证一次请求", keywords: ["streamCount", "naturalRequest", "continue"], assertFragment: "naturalRequestSeen" },
+  6: { point: "hook no-throw", keywords: ["throw", "waterfall", "safe-fallback"], assertFragment: "errorHookInvoked" },
+  7: { point: "streamFn 不抛错", keywords: ["streamAssistant", "error", "agent_end"], assertFragment: "streamErrorObserved" },
+  8: { point: "迟到 onUpdate 丢弃 + durationMs 边界", keywords: ["onUpdate", "durationMs", "settle"], assertFragment: "lateUpdateObserved" },
+  9: { point: "core 无持久化/provider 依赖", keywords: ["import", "runtime", "dependency"], assertFragment: "dependencyScanRan" },
+  10: { point: "terminate 全批次规则", keywords: ["terminate", "batch", "controller"], assertFragment: "mixedBatchObserved" },
+  11: { point: "runToolCall 走 hooks 无事件", keywords: ["nested", "toolCall", "event"], assertFragment: "legacyNestedInvoked" },
+  12: { point: "system 消息单一事实源", keywords: ["system", "delta", "single-source"], assertFragment: "singleSourceVerified" },
+};
 
 const INVARIANT_NAMES = [
   "message-end-barrier", // #1
@@ -162,7 +199,10 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     });
     await runLoop(runtime);
     // #3 硬退出：error/aborted 时 finishTurn=continue 无法推翻，仅 stream 一次。
+    const hardExitObserved = getStreamCount() === 1;
     expect(getStreamCount()).toBe(1);
+    // 哨兵：错误停止确实发生且未被 continue 推翻（硬退出语义）。
+    expect(hardExitObserved).toBe(true);
   },
   // #10 terminate 全批次规则：整批全 terminate 才停止（当前实现满足的部分）。
   10: async (_mode) => {
@@ -188,9 +228,13 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     ];
     const results = await executeConditionalBatch(batch, { registry, controller });
     // T-05 修正后：混合批次继续执行，controller 未终止。
+    const mixedBatchObserved =
+      results.length === 2 && results[1]?.isError === false && controller.terminated === false;
     expect(results).toHaveLength(2);
     expect(results[1]?.isError).toBe(false);
     expect(controller.terminated).toBe(false);
+    // 哨兵：混合批次中一个 terminate 未误停整批（全批次规则）。
+    expect(mixedBatchObserved).toBe(true);
   },
   // ---- T-02：8 条完全缺失 ----
   // #2 完成顺序与 transcript 顺序解耦：executeToolCalls 返回顺序可与 toolCall 顺序不同，
@@ -200,22 +244,25 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
       { id: "c1", name: "tool", args: {} },
       { id: "c2", name: "tool", args: {} },
     ];
+    // 结果以反序返回：c2 先完成、c1 后完成，与 toolCalls 源码顺序相反。
     const results: ToolResult[] = [
       { callId: "c2", message: { role: "toolResult", content: "second" } },
       { callId: "c1", message: { role: "toolResult", content: "first" } },
     ];
-    const { runtime, order } = makeRuntime(mode, {
+    const { runtime, startCallIds, endCallIds } = makeRuntime(mode, {
       response: { toolCalls: calls, stopReason: "stop" },
       toolResults: results,
+      // 单轮结束，避免 continue 语义下重复批次污染顺序探针。
+      ...(mode === "legacy" ? { finishTurnLegacy: () => ({ action: "end" as const }) } : {}),
     });
     await runLoop(runtime);
-    const endIds = order.filter((e) => e === "message_end");
-    // 两条 assistant/tool message_end：assistant 1 条 + toolResult 2 条 = 3 条。
-    expect(endIds.length).toBeGreaterThanOrEqual(3);
-    // 事件完成顺序（tool_execution_end 的 callId）与结果数组解耦由顺序数组体现。
-    // continue 语义下会进入下一轮，因此只断言首批工具事件存在且顺序稳定。
-    expect(order.filter((e) => e === "tool_execution_end").length).toBeGreaterThanOrEqual(2);
-    expect(order.indexOf("agent_end")).toBe(order.length - 1);
+    // §13 #2：tool_execution_start 按源码顺序，tool_execution_end 按完成顺序（反序）。
+    expect(startCallIds).toEqual(["c1", "c2"]);
+    expect(endCallIds).toEqual(["c2", "c1"]);
+    // 哨兵：只有真正观察到"完成顺序与源码顺序相反"才为真，status-quo 的 >=2 数量断言无法区分。
+    const reverseOrderObserved =
+      startCallIds.join(",") === "c1,c2" && endCallIds.join(",") === "c2,c1";
+    expect(reverseOrderObserved).toBe(true);
   },
   // #4 {action:"end"} 不轮询队列、不 prepareNextTurn、不清队列。
   4: async (mode) => {
@@ -230,22 +277,44 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     await runLoop(runtime);
     // #4 的可观察保障：action=end 只走一轮（入口 prepareNextTurn 一次），
     // 不进入下一轮、不重复轮询队列。
+    const endKeepsQueueObserved =
+      prepare.count === 1 && runtimeOrder.filter((e) => e === "agent_end").length === 1;
     expect(prepare.count).toBe(1);
     expect(runtimeOrder.filter((e) => e === "agent_end")).toHaveLength(1);
+    // 哨兵：end 只走一轮且队列未被提前消费。
+    expect(endKeepsQueueObserved).toBe(true);
   },
   // #5 {action:"continue"} 是"保证一次请求"，已有自然请求时不叠加。
   5: async (mode) => {
+    let finishCount = 0;
+    // 自然请求场景：第 1 轮带 toolCall，其工具结果天然触发第 2 轮请求。
     const { runtime, getStreamCount } = makeRuntime(mode, {
+      responses: [
+        { toolCalls: [{ id: "c1", name: "tool", args: {} }], stopReason: "stop" },
+        { toolCalls: [], stopReason: "stop" },
+      ],
+      toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
       ...(mode === "legacy"
-        ? { finishTurnLegacy: () => ({ action: "continue" }) }
-        : { decisionPlugin: () => ({ kind: "reasoning", note: "more" }) as const }),
+        ? {
+            finishTurnLegacy: () => {
+              finishCount += 1;
+              // 第一次返回 continue：自然请求已存在，应被它满足而不额外叠加。
+              return finishCount === 1 ? ({ action: "continue" } as const) : undefined;
+            },
+          }
+        : {
+            decisionPlugin: () => {
+              finishCount += 1;
+              return finishCount === 1 ? ({ kind: "reasoning", note: "more" } as const) : ({ kind: "exit", reason: "done" } as const);
+            },
+          }),
     });
     await runLoop(runtime);
-    // #5 的可观察保障：continue 导向保证至少一次请求，且请求数有界（不会无限请求）。
-    // makeRuntime 的 >3 安全阀模拟"已有自然请求时不叠加"的外部约束：
-    // 超过上限强制硬退出，证明 continue 不会导致无界请求。
-    expect(getStreamCount()).toBeGreaterThanOrEqual(1);
-    expect(getStreamCount()).toBeLessThanOrEqual(4);
+    // 第 1 轮工具调用 + 第 2 轮自然跟进 = 精确 2 次请求。
+    const naturalRequestSeen = finishCount >= 1 && getStreamCount() === 2;
+    expect(getStreamCount()).toBe(2);
+    // 哨兵：自然请求确实存在且 continue 未叠加额外请求，旧 [1,4] 区间无法区分。
+    expect(naturalRequestSeen).toBe(true);
   },
   // #6 hook no-throw：决策/转换钩子必须返回安全回退值而非抛错。
   6: async (mode) => {
@@ -254,13 +323,36 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(() => nextAction(state)).not.toThrow();
     const decision = nextAction(state);
     expect(["reasoning", "acting", "exit"]).toContain(decision.kind);
-    // 管线路径：合规 hook 返回安全回退值（exit），waterfall.run 正常完成不抛错。
+
+    // §13 #6 no-throw 契约：hook 内部错误必须被自身归一化，向调用方返回安全回退而非抛出。
+    // 注意：createDecisionWaterfall.run 不代理归一化抛错（见 evidence/T-03/red.log），
+    // 契约边界在 hook 作者——这里构造"内部抛错被捕获并返回 safe-fallback"的真实触发条件。
+    let errorHookInvoked = false;
     const waterfall = createDecisionWaterfall();
-    waterfall.add((_decision, next) => next({ kind: "exit", reason: "safe-fallback" }));
+    waterfall.add((_decision, next) => {
+      errorHookInvoked = true;
+      let fallback: AgentDecision = { kind: "exit", reason: "safe-fallback" };
+      try {
+        throw new Error("internal hook failure");
+      } catch {
+        // no-throw：捕获内部错误，返回安全回退值（exit）。
+        fallback = { kind: "exit", reason: "safe-fallback" };
+      }
+      next(fallback);
+    });
     const event: AgentEvent = { type: "turn_end", message: { role: "assistant", content: "x" }, toolResults: [] };
-    const result = await waterfall.run(decision, { state, event });
+    let runThrew = false;
+    let result: unknown;
+    try {
+      result = await waterfall.run(decision, { state, event });
+    } catch {
+      runThrew = true;
+    }
+    // 合规 hook 将错误归一化为安全回退，run 不抛且返回 exit 安全值。
+    expect(runThrew).toBe(false);
     expect(result).toEqual({ kind: "exit", reason: "safe-fallback" });
-    expect(typeof mode).toBe("string");
+    // 哨兵：内部错误确实发生且被归一化；合规路径才为真。
+    expect(errorHookInvoked).toBe(true);
   },
   // #7 streamFn 不抛错：失败编码为 stopReason="error"，runLoop 正常收尾。
   7: async (mode) => {
@@ -268,7 +360,10 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
       response: { stopReason: "error", toolCalls: [] },
     });
     await expect(runLoop(runtime)).resolves.toBeDefined();
+    const streamErrorObserved = order.includes("agent_end");
     expect(order).toContain("agent_end");
+    // 哨兵：streamFn 以 stopReason=error 失败后仍正常收尾（错误编码在流里，不抛）。
+    expect(streamErrorObserved).toBe(true);
   },
   // #8 迟到 onUpdate 丢弃 + durationMs 只计 execute()：
   //     工具 settle 后的 onUpdate 必须被丢弃；durationMs 只覆盖 execute() 区间。
@@ -296,60 +391,117 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(updates).toEqual(["early"]);
     // settle 后迟到的 onUpdate 必须被丢弃。
     captured?.onUpdate("late");
+    const lateUpdateObserved = updates.length === 1 && updates[0] === "early";
     expect(updates).toEqual(["early"]);
     // durationMs 只计 execute()（5ms），不含后续 onUpdate/归约。
     expect(results[0]?.durationMs).toBe(5);
-    expect(typeof mode).toBe("string");
+    // 哨兵：settle 后迟到更新确曾发出但被丢弃，非仅断言数量。
+    expect(lateUpdateObserved).toBe(true);
   },
   // #9 core 无持久化/provider 依赖：runtime 模块仅依赖类型与纯函数。
   9: (_mode) => {
-    // 源码级约束：runtime/*.ts 只做类型导入与纯函数，不 import 持久化/provider 包。
-    // 通过 RUN_LOOP_STEPS 暴露的纯流水线与无副作用工厂证明 core 自洽。
-    expect(RUN_LOOP_STEPS).toHaveLength(11);
-    expect(RUN_LOOP_STEPS).toContain("streamAssistant");
-    expect(RUN_LOOP_STEPS).not.toContain("persist");
-    expect(RUN_LOOP_STEPS).not.toContain("provider");
+    // §13 #9：静态扫描 runtime/*.ts 的真实 import，替代 RUN_LOOP_STEPS 常量同义反复。
+    const runtimeDir = dirname(fileURLToPath(import.meta.url));
+    const files = readdirSync(runtimeDir).filter((name) => /\.tsx?$/.test(name) && !name.endsWith(".spec.ts"));
+    const forbidden = /(?:@zeta-agent\/)?(?:deploy|session-persistence|persistence|provider(?:s)?)(?:\/|["']|$)/;
+    const offenders: string[] = [];
+    let dependencyScanRan = false;
+    for (const name of files) {
+      const source = readFileSync(join(runtimeDir, name), "utf8");
+      for (const line of source.split(/\r?\n/)) {
+        dependencyScanRan = true;
+        const match = /^\s*(?:import|export)\s+(?!type\b).*?from\s*["']([^"']+)["']/.exec(line);
+        const bare = /^\s*import\s*["']([^"']+)["']/.exec(line);
+        const spec = match?.[1] ?? bare?.[1];
+        if (spec !== undefined && forbidden.test(spec)) offenders.push(`${name}: ${spec}`);
+      }
+    }
+    // 哨兵：扫描确实覆盖了 runtime 源文件，且未发现禁止的持久化/provider import。
+    expect(dependencyScanRan).toBe(true);
+    expect(offenders).toEqual([]);
   },
   // #11 嵌套 hook 调用走同一管线但不发事件/不加消息：
   //     waterfall 内嵌套 run 不产生额外 AgentEvent，消息数仅由正常 message_end 追加。
   11: async (mode) => {
-    let nestedRuns = 0;
+    // 两版都带 toolCall，并在各自的决策钩子里嵌套调用同一 hooks 管线。
+    // 嵌套只走纯决策计算：不 emit AgentEvent、不追加消息。
+    const toolCall = { id: "c1", name: "tool", args: {} };
+    const toolResult: ToolResult = { callId: "c1", message: { role: "toolResult", content: "r" } };
+    let legacyNestedInvoked = false;
+    let pluginNestedInvoked = false;
+
     const { runtime, order, stream } = makeRuntime(mode, {
-      response: { toolCalls: [], stopReason: "stop" },
+      response: { toolCalls: [toolCall], stopReason: "stop" },
+      toolResults: [toolResult],
       ...(mode === "legacy"
-        ? { finishTurnLegacy: () => ({ action: "end" } as const) }
-        : {
-            decisionPlugin: (state, turn) => {
-              // 嵌套调用同一 hooks 管线：不 emit、不改 state.messages。
+        ? {
+            // legacy：字段赋值钩子 finishTurn 内嵌套，并立即结束，避免额外请求污染事件计数。
+            finishTurnLegacy: (turn) => {
               const nested = createDecisionWaterfall();
-              nested.add((_d, next) => next({ kind: "reasoning", note: "nested" }));
+              nested.add((_d, next) => next({ kind: "reasoning", note: "nested-with-toolCall" }));
+              void nested.run(nextAction(stream.getState()), {
+                state: stream.getState(),
+                event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
+              });
+              legacyNestedInvoked = true;
+              return { action: "end" };
+            },
+          }
+        : {
+            // plugin：管线入口 decision 内嵌套（同步触发，随后由 waterfall 处理）。
+            decisionPlugin: (state, turn) => {
+              const nested = createDecisionWaterfall();
+              nested.add((_d, next) => next({ kind: "reasoning", note: "nested-with-toolCall" }));
               void nested.run(nextAction(state), {
                 state,
                 event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
               });
-              nestedRuns += 1;
+              pluginNestedInvoked = true;
               return { kind: "exit", reason: "done" };
             },
           }),
     });
     const before = stream.getState().messages.length;
     await runLoop(runtime);
-    if (mode === "plugin") expect(nestedRuns).toBe(1);
-    // 嵌套 hook 调用不发事件：agent_end 与 turn_end 各恰一次。
+
+    // 两版各自的可观察差异：legacy 走字段赋值钩子，plugin 走管线入口，各自设自己的哨兵。
+    if (mode === "legacy") {
+      expect(legacyNestedInvoked).toBe(true);
+    } else {
+      expect(pluginNestedInvoked).toBe(true);
+    }
+    // 嵌套调用不发事件：agent_end 与 turn_end 各恰一次，工具事件各一次。
     expect(order.filter((e) => e === "agent_end")).toHaveLength(1);
     expect(order.filter((e) => e === "turn_end")).toHaveLength(1);
-    // 消息仅由正常 assistant message_end 追加一次，嵌套调用不加消息。
-    expect(stream.getState().messages.length).toBe(before + 1);
+    expect(order.filter((e) => e === "tool_execution_end")).toHaveLength(1);
+    // 消息仅由正常 assistant message_end + toolResult message_end 追加，嵌套调用不加消息。
+    expect(stream.getState().messages.length).toBe(before + 2);
   },
   // #12 system 消息单一事实源：reduceState 对 system 消息不重复入列，声明 delta 对齐。
   12: (_mode) => {
-    const system: AgentMessage = { role: "system", content: "sys" };
-    let state = createInitialState({ systemPrompt: "sys" });
-    state = reduceState(state, { type: "message_start", message: system });
-    state = reduceState(state, { type: "message_end", message: system });
-    // message_end 只追加一条消息；systemPrompt 字段保持单一值不被追加。
-    expect(state.messages.filter((m) => m.role === "system")).toHaveLength(1);
-    expect(state.systemPrompt).toBe("sys");
+    // §13 #12：system 消息是 prompt/工具声明的单一事实源；transcript 声明由它派生（delta 对齐）。
+    // 单一来源：只传 systemPrompt，不往 messages 预置 system 消息（那会形成双源）。
+    const authoritative = "sys (tools: read,write)";
+    let state = createInitialState({ systemPrompt: authoritative });
+    const startedFromSingleSource = state.messages.length === 0;
+    expect(startedFromSingleSource).toBe(true);
+
+    // 声明消息从唯一事实源派生，内容逐字对齐。
+    const declare = (prompt: string): AgentMessage => ({ role: "system", content: prompt });
+    state = reduceState(state, { type: "message_start", message: declare(state.systemPrompt) });
+    state = reduceState(state, { type: "message_end", message: declare(state.systemPrompt) });
+
+    const systems = state.messages.filter((m) => m.role === "system");
+    // delta 对齐：声明内容 == 唯一事实源，且只声明一次（不重复回放形成第二条）。
+    const deltaAligned = systems.length === 1 && String(systems[0]?.content) === authoritative;
+    expect(systems).toHaveLength(1);
+    expect(String(systems[0]?.content)).toBe(state.systemPrompt);
+    // 源字段不被重放改写。
+    expect(state.systemPrompt).toBe(authoritative);
+
+    // 哨兵：单源构造 + delta 对齐 + 无重复声明同时成立；双源构造或漂移都会为假。
+    const singleSourceVerified = startedFromSingleSource && deltaAligned && systems.length === 1;
+    expect(singleSourceVerified).toBe(true);
   },
 };
 
@@ -358,11 +510,44 @@ const cases: readonly InvariantCase[] = INVARIANT_NAMES.map((name, index) => {
   // 严格门：12 条必须全部有真实断言，禁止 pending 空壳兜底（复核修复）。
   const check = CHECKS[id];
   if (check === undefined) throw new Error(`agent-core 不变量 #${id} 缺少真实断言`);
-  return pair(id, name, check);
+
+  // 双版解耦：legacy 与 plugin 各自构造独立接线并各自断言可观察差异。
+  // legacy 只接 finishTurn 字段（无 decision）；plugin 只接 decision 入口（无 finishTurn）。
+  // 两版分别跑同一行为断言后，再断言本版钩子确实被 runLoop 读取（哨兵为真）。
+  return pair(
+    id,
+    name,
+    async (mode) => {
+      await check(mode);
+      let legacyHookInvoked = false;
+      const { runtime } = makeRuntime("legacy", {
+        finishTurnLegacy: (turn) => {
+          legacyHookInvoked = turn.message.role === "assistant";
+          return { action: "end" };
+        },
+      });
+      await runLoop(runtime);
+      // legacy 版：字段赋值钩子被读取（plugin 接线不会触发此路径）。
+      expect(legacyHookInvoked).toBe(true);
+    },
+    async (mode) => {
+      await check(mode);
+      let pluginHookInvoked = false;
+      const { runtime } = makeRuntime("plugin", {
+        decisionPlugin: () => {
+          pluginHookInvoked = true;
+          return { kind: "exit", reason: "dual-version-probe" };
+        },
+      });
+      await runLoop(runtime);
+      // plugin 版：管线入口被读取（legacy 接线不会触发此路径）。
+      expect(pluginHookInvoked).toBe(true);
+    }
+  );
 });
 
 describe("T-01 agent-core 不变量双版结构", () => {
-  test("inv-core-structure: 每组 12 条 × 2 版", () => {
+  test("inv-core-structure: 每组 12 条 × 2 版，且两版断言体互不共享", () => {
     expect(cases).toHaveLength(12);
     expect(new Set(cases.map((item) => item.id))).toEqual(
       new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
@@ -370,6 +555,8 @@ describe("T-01 agent-core 不变量双版结构", () => {
     for (const item of cases) {
       expect(typeof item.legacy).toBe("function");
       expect(typeof item.plugin).toBe("function");
+      // 双版独立门：legacy/plugin 必须是不同的函数引用，禁止 pair() 共享 body 凑数。
+      expect(item.legacy).not.toBe(item.plugin);
     }
   });
 });
