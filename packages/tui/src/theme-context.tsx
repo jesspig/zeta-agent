@@ -34,7 +34,11 @@ export function ThemeProvider(props: ThemeProviderProps) {
     reloader.dispose();
   });
   const view: ThemeView = {
-    color: (token) => registry.activeTheme().color(token),
+    // 读取 name signal 建立响应式依赖：只消费 color 的组件在主题切换后也能更新。
+    color: (token) => {
+      name();
+      return registry.activeTheme().color(token);
+    },
     name,
     setActive: (next) => registry.setActive(next),
     applyTerminalPalette: (input) => {

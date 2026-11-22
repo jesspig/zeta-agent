@@ -21,6 +21,14 @@ function splitWords(line: string): string[] {
   return line.match(/\S+|\s+/g) ?? [];
 }
 
+// LCS 表按两侧长度乘积增长；超过预算时退化为有界摘要，避免阻塞 UI。
+const DIFF_CELL_BUDGET = 1_000_000;
+const DIFF_MAX_LINES = 80;
+
+function boundedFallback(label: string): DiffLine {
+  return { op: "context", text: `... (${label} diff 过大，已折叠)` };
+}
+
 /** 真正的词级 LCS：返回未匹配（删除/新增）的词序列，支持插入、删除与多词重排。 */
 export function diffWords(before: string, after: string): {
   readonly removedWords: readonly string[];
@@ -28,6 +36,13 @@ export function diffWords(before: string, after: string): {
 } {
   const a = splitWords(before).filter((token) => token.trim().length > 0);
   const b = splitWords(after).filter((token) => token.trim().length > 0);
+  if ((a.length + 1) * (b.length + 1) > DIFF_CELL_BUDGET) {
+    // 超大输入不做 LCS，返回有界词摘要。
+    return {
+      removedWords: a.slice(0, DIFF_MAX_LINES),
+      addedWords: b.slice(0, DIFF_MAX_LINES),
+    };
+  }
   const table: number[][] = Array.from({ length: a.length + 1 }, () =>
     Array<number>(b.length + 1).fill(0),
   );
@@ -73,6 +88,11 @@ function wordDiff(before: string, after: string): WordDiff | undefined {
 export function diffLines(beforeText: string, afterText: string): readonly DiffLine[] {
   const before = beforeText.split("\n");
   const after = afterText.split("\n");
+  if ((before.length + 1) * (after.length + 1) > DIFF_CELL_BUDGET) {
+    // 超大输入不分配 LCS 表，只给有界摘要（保留两侧前若干行作为上下文）。
+    const head = before.slice(0, DIFF_MAX_LINES).map((text) => ({ op: "context" as const, text }));
+    return [...head, boundedFallback("超大")];
+  }
   const table: number[][] = Array.from({ length: before.length + 1 }, () =>
     Array<number>(after.length + 1).fill(0),
   );
