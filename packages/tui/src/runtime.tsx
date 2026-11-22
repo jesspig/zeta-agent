@@ -297,7 +297,7 @@ export function ZetaApp(props: ZetaAppProps) {
   keymap.register({ combo: "escape", action: "abort", layer: "app" });
   keymap.register({ combo: "ctrl+d", action: "exit", layer: "app" });
   keymap.register({ combo: "ctrl+l", action: "model-selector", layer: "app" });
-  keymap.register({ combo: "ctrl+k", action: "connect", layer: "app" });
+  // Ctrl+K 归编辑器 kill-line 使用；连接改由 /connect 命令打开，避免快捷键冲突。
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
   keymap.register({ combo: "ctrl+o", action: "toggle-tools", layer: "tui" });
@@ -372,12 +372,7 @@ export function ZetaApp(props: ZetaAppProps) {
       setSelectorOpen((kind) => (kind === "model" ? undefined : "model"));
       return;
     }
-    if (action === "connect") {
-      key.preventDefault();
-      key.stopPropagation();
-      setSelectorOpen((kind) => (kind === "connect" ? undefined : "connect"));
-      return;
-    }
+    // 连接对话框统一由 /connect 命令打开，不再占用 Ctrl+K。
   });
 
   return (
