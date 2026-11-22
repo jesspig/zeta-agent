@@ -174,7 +174,15 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       }
     }
 
-    const toolResultMessages = results.map((result) => result.message);
+    // 完成通知按 results（完成顺序）发出；会话提交按 assistant 声明顺序排列，
+    // 两者解耦，保证 transcript 顺序稳定且与工具声明对应。
+    const resultByCallId = new Map(results.map((result) => [result.callId, result]));
+    const orderedResults = toolCalls
+      .map((call) => resultByCallId.get(call.id))
+      .filter((result): result is ToolResult => result !== undefined);
+    const toolResultMessages = (orderedResults.length === results.length ? orderedResults : results).map(
+      (result) => result.message
+    );
     for (const message of toolResultMessages) {
       await emit({ type: "message_start", message });
       await emit({ type: "message_end", message });
@@ -189,8 +197,8 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       return runtime.getState();
     }
 
-    const moreSteering = inbox.poll("nextTurn");
-    explicitContinuation = toolCalls.length === 0 && moreSteering.length === 0;
+    // 只读判定队列是否非空：消息留到下一轮轮首统一 poll，避免被此处提前消费。
+    explicitContinuation = toolCalls.length === 0 && inbox.size("nextTurn") === 0;
 
     // 决策为 continue（例如模型请求了原生工具调用）时必须进入下一轮，
     // 让工具结果回到模型；否则会在一轮后静默结束。

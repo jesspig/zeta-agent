@@ -34,22 +34,26 @@ export async function executeConditionalBatch(
     if (level.length === 0) level.push(...remaining.values());
     for (const call of level) remaining.delete(call.id);
 
-    await Promise.allSettled(
+    const settled = await Promise.allSettled(
       level.map(async (call) => {
-        if (blockedFromPriorBatch) {
-          results.set(call.id, blockedResult(call, "BATCH_TERMINATED"));
-          return;
-        }
+        if (blockedFromPriorBatch) return blockedResult(call, "BATCH_TERMINATED");
         const unmet = (call.dependsOn ?? []).some(
           (dep) => !results.has(dep) || results.get(dep)?.isError === true
         );
-        if (unmet) {
-          results.set(call.id, blockedResult(call, "TOOL_DEPENDENCY_UNSATISFIED"));
-          return;
-        }
-        results.set(call.id, await executeCall(call, ctx));
+        if (unmet) return blockedResult(call, "TOOL_DEPENDENCY_UNSATISFIED");
+        return executeCall(call, ctx);
       })
     );
+    // 每个输入槽位都要有结果：拒绝（如 guard/clock 抛错）转成对应调用的失败结果。
+    settled.forEach((outcome, index) => {
+      const call = level[index]!;
+      results.set(
+        call.id,
+        outcome.status === "fulfilled"
+          ? outcome.value
+          : blockedResult(call, `TOOL_BATCH_REJECTED: ${String(outcome.reason)}`),
+      );
+    });
   }
 
   const finalized = batch.map((call) => results.get(call.id) as ToolResult);

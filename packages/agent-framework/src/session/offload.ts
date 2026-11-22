@@ -106,13 +106,22 @@ export function createMemoryWorkspaceStore(): WorkspaceStore {
   };
 }
 
+// 进程级唯一序列：跨实例（乃至跨重启后复用 store）都不复用同一 URI，
+// 否则旧血缘会指向后来写入的区块。
+let offloaderSequence = 0;
+function nextOffloadId(): string {
+  offloaderSequence += 1;
+  const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${offloaderSequence.toString(36)}-${random}`;
+}
+
 export function createOffloader(store: WorkspaceStore): Offloader {
-  let counter = 0;
   return {
     async offload(block, label = "block") {
       const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "_") || "block";
-      counter += 1;
-      const uri = `${WORKSPACE_PREFIX}${safeLabel}-${counter}`;
+      const uri = `${WORKSPACE_PREFIX}${safeLabel}-${nextOffloadId()}`;
       await store.put(uri, block);
       return uri;
     },
@@ -171,14 +180,22 @@ export function createCompactionListener(options: CompactionListenerOptions): Ag
       const cut = Math.max(1, Math.ceil(entries.length / 2));
       const block = entries.slice(0, cut);
       const uri = await offloader.offload(block, "compaction");
-      surface.replace({
-        start: 0,
-        end: cut,
-        recap: createRecap(buildRecap(block, [uri])),
-        uris: [uri],
-        threshold: budget.compactionThreshold,
-        preTokenCount,
-      });
+      // 外置可能耗时；期间 surface 可能被其它压缩替换。按条目身份条件提交，
+      // 区间内容已变化时不按旧索引替换，避免移除未外置的条目。
+      const current = surface.entries();
+      const stillSame =
+        current.length >= cut &&
+        block.every((entry, index) => current[index] === entry);
+      if (stillSame) {
+        surface.replace({
+          start: 0,
+          end: cut,
+          recap: createRecap(buildRecap(block, [uri])),
+          uris: [uri],
+          threshold: budget.compactionThreshold,
+          preTokenCount,
+        });
+      }
     }
 
     await persist(surface.lineage());
