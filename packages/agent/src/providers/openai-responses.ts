@@ -156,12 +156,11 @@ async function* parseResponsesSse(body: ReadableStream<Uint8Array>): AsyncIterab
           // 未完成：不得交付任何工具调用。
           throw new Error("OPENAI_RESPONSES_INCOMPLETE: 响应未完成，未提交工具调用");
         } else if (event.type === "error") {
-          throw new Error(`OPENAI_RESPONSES_ERROR ${event.code ?? "unknown"}: ${event.message ?? "no message"}`);
+          // 只保留允许的分类码；上游 message 原文不进入会话可见输出。
+          throw new Error(`OPENAI_RESPONSES_ERROR ${event.code ?? "unknown"}`);
         } else if (event.type === "response.failed") {
           const error = event.response?.error;
-          throw new Error(
-            `OPENAI_RESPONSES_FAILED ${error?.code ?? "unknown"}: ${error?.message ?? "no message"}`
-          );
+          throw new Error(`OPENAI_RESPONSES_FAILED ${error?.code ?? "unknown"}`);
         }
       }
     }
