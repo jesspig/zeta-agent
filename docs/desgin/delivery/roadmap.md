@@ -156,7 +156,7 @@ flowchart LR
 | A3 | 同配置不同加载顺序 → 相同观察状态（Thm 80） | `replayConfig` 测试 | 1 |
 | A4 | 随机加载/卸载后所有逆调用一次且仅一次，无残留（Cor 69） | `assertNoResidue` / `observeDispose` | 1 |
 | A5 | guard：消费者 teardown 能读依赖；撤回延迟（Thm 70） | 场景测试 | 1 |
-| A6 | 12 条 agent-core 不变量（pi-baseline §9）的 legacy/plugin 双版测试全绿（`inv-core-` 前缀，24 个；区别于工具流水线 12 条 `inv-tool-`） | 24 个测试报告 | 2 |
+| A6 | 12 条 agent-core 不变量（pi-baseline §9）的 legacy/plugin 双版测试全绿（`inv-core-` 前缀，24 个；区别于工具流水线 12 条 `inv-tool-`），并通过双门：门 1 每条加固断言有真实触发条件哨兵（`xxxObserved/Invoked/Verified`），门 2 `INVARIANT_TEST_POINTS` 12 条要点映射齐全且关键词/哨兵命中对应断言块（`bun scripts/check-invariant-points.mjs`） | 24 个测试报告 + 双门门 1 哨兵检查 + 门 2 要点门脚本输出 | 2 |
 | A7 | 工具热插拔后 transcript 声明同步；权限策略热更新不 reload | 集成测试 | 3 |
 | A8 | 工具副作用分类审查通过；发射类默认策略符合配置 | 工具清单审查 | 3 |
 | A9 | `testRender` 帧快照覆盖消息/工具/状态/overlay/槽位热替换 | 帧快照测试 | 4 |

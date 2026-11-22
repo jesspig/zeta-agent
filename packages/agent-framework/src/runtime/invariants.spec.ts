@@ -199,7 +199,10 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     });
     await runLoop(runtime);
     // #3 硬退出：error/aborted 时 finishTurn=continue 无法推翻，仅 stream 一次。
+    const hardExitObserved = getStreamCount() === 1;
     expect(getStreamCount()).toBe(1);
+    // 哨兵：错误停止确实发生且未被 continue 推翻（硬退出语义）。
+    expect(hardExitObserved).toBe(true);
   },
   // #10 terminate 全批次规则：整批全 terminate 才停止（当前实现满足的部分）。
   10: async (_mode) => {
@@ -225,9 +228,13 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     ];
     const results = await executeConditionalBatch(batch, { registry, controller });
     // T-05 修正后：混合批次继续执行，controller 未终止。
+    const mixedBatchObserved =
+      results.length === 2 && results[1]?.isError === false && controller.terminated === false;
     expect(results).toHaveLength(2);
     expect(results[1]?.isError).toBe(false);
     expect(controller.terminated).toBe(false);
+    // 哨兵：混合批次中一个 terminate 未误停整批（全批次规则）。
+    expect(mixedBatchObserved).toBe(true);
   },
   // ---- T-02：8 条完全缺失 ----
   // #2 完成顺序与 transcript 顺序解耦：executeToolCalls 返回顺序可与 toolCall 顺序不同，
@@ -270,8 +277,12 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     await runLoop(runtime);
     // #4 的可观察保障：action=end 只走一轮（入口 prepareNextTurn 一次），
     // 不进入下一轮、不重复轮询队列。
+    const endKeepsQueueObserved =
+      prepare.count === 1 && runtimeOrder.filter((e) => e === "agent_end").length === 1;
     expect(prepare.count).toBe(1);
     expect(runtimeOrder.filter((e) => e === "agent_end")).toHaveLength(1);
+    // 哨兵：end 只走一轮且队列未被提前消费。
+    expect(endKeepsQueueObserved).toBe(true);
   },
   // #5 {action:"continue"} 是"保证一次请求"，已有自然请求时不叠加。
   5: async (mode) => {
@@ -349,7 +360,10 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
       response: { stopReason: "error", toolCalls: [] },
     });
     await expect(runLoop(runtime)).resolves.toBeDefined();
+    const streamErrorObserved = order.includes("agent_end");
     expect(order).toContain("agent_end");
+    // 哨兵：streamFn 以 stopReason=error 失败后仍正常收尾（错误编码在流里，不抛）。
+    expect(streamErrorObserved).toBe(true);
   },
   // #8 迟到 onUpdate 丢弃 + durationMs 只计 execute()：
   //     工具 settle 后的 onUpdate 必须被丢弃；durationMs 只覆盖 execute() 区间。
@@ -377,9 +391,12 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(updates).toEqual(["early"]);
     // settle 后迟到的 onUpdate 必须被丢弃。
     captured?.onUpdate("late");
+    const lateUpdateObserved = updates.length === 1 && updates[0] === "early";
     expect(updates).toEqual(["early"]);
     // durationMs 只计 execute()（5ms），不含后续 onUpdate/归约。
     expect(results[0]?.durationMs).toBe(5);
+    // 哨兵：settle 后迟到更新确曾发出但被丢弃，非仅断言数量。
+    expect(lateUpdateObserved).toBe(true);
   },
   // #9 core 无持久化/provider 依赖：runtime 模块仅依赖类型与纯函数。
   9: (_mode) => {

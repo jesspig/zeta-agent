@@ -1,5 +1,6 @@
-// 要点关键词门（门 2）：校验 invariants.spec.ts 的 INVARIANT_TEST_POINTS 映射表。
-// 只读源码，不修改测试行为；缺失映射表或条目不全时以非 0 退出。
+// 要点关键词门（门 2）：校验 invariants.spec.ts 的 INVARIANT_TEST_POINTS 映射表，
+// 并验证每条 §13 要点的哨兵与关键词确实命中对应的断言块（不只是表本身）。
+// 只读源码，不修改测试行为；缺失映射表、条目不全或关键词未命中时非 0 退出。
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,19 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const spec = join(root, "packages/agent-framework/src/runtime/invariants.spec.ts");
 const failures = [];
+
+/** 从指定下标处的 { 开始做大括号配对，返回配对 } 的下标。 */
+function matchBrace(source, openIndex) {
+  let depth = 0;
+  for (let i = openIndex; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
 
 if (!existsSync(spec)) {
   failures.push(`找不到断言文件：${spec}`);
@@ -39,6 +53,50 @@ if (!existsSync(spec)) {
       if (entry.fragment.length === 0) failures.push(`要点 #${id} 没有 assertFragment`);
     }
     if (found.size !== 12) failures.push(`映射表条目数应为 12，实际 ${found.size}`);
+
+    // 门 2 核心：提取 CHECKS 的每条断言块，验证哨兵 + 至少一个关键词命中对应块。
+    const checksStart = source.indexOf("const CHECKS");
+    if (checksStart === -1) {
+      failures.push("找不到 CHECKS 断言块集合");
+    } else {
+      const checksOpen = source.indexOf("{", checksStart);
+      const checksEnd = matchBrace(source, checksOpen);
+      if (checksEnd === -1) {
+        failures.push("CHECKS 断言块大括号未配对");
+      } else {
+        const checksBody = source.slice(checksOpen + 1, checksEnd);
+        const blockPattern = /^\s{2}(\d+):\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{/gm;
+        const blocks = new Map();
+        for (const match of checksBody.matchAll(blockPattern)) {
+          const id = Number(match[1]);
+          const braceIndex = checksBody.indexOf("{", match.index + match[0].length - 1);
+          const blockEnd = matchBrace(checksBody, braceIndex);
+          if (blockEnd === -1) {
+            failures.push(`断言块 #${id} 大括号未配对`);
+            continue;
+          }
+          blocks.set(id, checksBody.slice(braceIndex + 1, blockEnd));
+        }
+        for (let id = 1; id <= 12; id += 1) {
+          const entry = found.get(id);
+          const block = blocks.get(id);
+          if (entry === undefined || block === undefined) {
+            failures.push(`要点 #${id} 找不到对应的断言块`);
+            continue;
+          }
+          // 哨兵（assertFragment）必须出现在该断言块中，证明触发条件被真实断言。
+          if (!block.includes(entry.fragment)) {
+            failures.push(`要点 #${id} 的哨兵 "${entry.fragment}" 未命中断言块`);
+          }
+          // 至少一个要点关键词必须命中该断言块（大小写不敏感）。
+          const lowered = block.toLowerCase();
+          const hit = entry.keywords.some((kw) => lowered.includes(kw.toLowerCase()));
+          if (!hit) {
+            failures.push(`要点 #${id} 的关键词 [${entry.keywords.join(", ")}] 均未命中断言块`);
+          }
+        }
+      }
+    }
   }
 }
 
@@ -47,4 +105,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`  - ${failure}`);
   process.exit(1);
 }
-console.log("要点关键词门通过：INVARIANT_TEST_POINTS 覆盖 1-12，每条含 point/keywords/assertFragment");
+console.log("要点关键词门通过：12 条要点映射表齐全，哨兵与关键词均命中对应断言块");
