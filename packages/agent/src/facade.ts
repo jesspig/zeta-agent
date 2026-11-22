@@ -237,10 +237,17 @@ const ACTIVE_CAPABILITIES: Capabilities = Object.freeze({
 });
 
 function defaultSecurityBackend(): ExecutionBackend {
+  // 占位后端没有连接真实隔离执行器：命令不能被执行，更不能报告成功。
+  // 返回非零退出码与明确原因，使命令工具走 COMMAND_FAILED 分支，而不是伪造成功。
   return createExecutionBackend({
-    name: "facade-default",
+    name: "facade-default-placeholder",
     capabilities: { ...ACTIVE_CAPABILITIES },
-    executor: () => ({ exitCode: 0, stdout: "", stderr: "", isolated: null }),
+    executor: () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "NO_REAL_EXECUTION_BACKEND: 未配置真实隔离执行后端，命令未执行",
+      isolated: null,
+    }),
   });
 }
 
