@@ -10,7 +10,7 @@ const bun = "bun";
 const facades = {
   framework: ["./types", "./package.json"],
   "agent-framework": ["./types", "./runtime/agent", "./session/surface", "./tools/pipeline"],
-  agent: ["./facade", "./cli/modes", "./providers/openai"],
+  agent: ["./facade", "./cli/modes", "./providers/openai", "./providers/openai-responses", "./providers/model-discovery", "./providers/models-dev", "./providers/model-catalog"],
   tui: ["./slots", "./signal", "./virtual", "./hud", "./frame-state", "./backend", "./runtime"],
   components: [],
   "agent-components": [],
