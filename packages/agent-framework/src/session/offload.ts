@@ -171,14 +171,22 @@ export function createCompactionListener(options: CompactionListenerOptions): Ag
       const cut = Math.max(1, Math.ceil(entries.length / 2));
       const block = entries.slice(0, cut);
       const uri = await offloader.offload(block, "compaction");
-      surface.replace({
-        start: 0,
-        end: cut,
-        recap: createRecap(buildRecap(block, [uri])),
-        uris: [uri],
-        threshold: budget.compactionThreshold,
-        preTokenCount,
-      });
+      // 外置可能耗时；期间 surface 可能被其它压缩替换。按条目身份条件提交，
+      // 区间内容已变化时不按旧索引替换，避免移除未外置的条目。
+      const current = surface.entries();
+      const stillSame =
+        current.length >= cut &&
+        block.every((entry, index) => current[index] === entry);
+      if (stillSame) {
+        surface.replace({
+          start: 0,
+          end: cut,
+          recap: createRecap(buildRecap(block, [uri])),
+          uris: [uri],
+          threshold: budget.compactionThreshold,
+          preTokenCount,
+        });
+      }
     }
 
     await persist(surface.lineage());
