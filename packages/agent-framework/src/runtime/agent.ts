@@ -76,7 +76,8 @@ export function reduceState(state: AgentState, event: AgentEvent): AgentState {
     case "agent_start":
       return { ...state, isStreaming: false, streamingMessage: undefined, pendingToolCalls: new Set<string>(), errorMessage: undefined };
     case "agent_end":
-      return { ...state, messages: [...event.messages], isStreaming: false, streamingMessage: undefined };
+      // 运行已终止：清空本运行的待处理工具，避免监听器失败后永久 pending。
+      return { ...state, messages: [...event.messages], isStreaming: false, streamingMessage: undefined, pendingToolCalls: new Set<string>() };
     case "turn_start":
       return { ...state, isStreaming: false, streamingMessage: undefined };
     case "turn_end":
