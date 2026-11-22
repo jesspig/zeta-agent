@@ -254,8 +254,11 @@ export function ZetaApp(props: ZetaAppProps) {
           setSelectorOpen("theme");
         }
         return true;
-      case "model":
-        if (rest.length > 0 && (props.models ?? []).includes(rest)) {
+      case "model": {
+        // 优先从动态发现的 modelList 选择，兼容旧宿主只传 models 的情况。
+        const known = (props.modelList ?? []).map((option) => option.value);
+        const candidates = known.length > 0 ? known : (props.models ?? []);
+        if (rest.length > 0 && candidates.includes(rest)) {
           setActiveModel(rest);
           props.onModelChange?.(rest);
           notify(`model: ${rest}`);
@@ -263,6 +266,7 @@ export function ZetaApp(props: ZetaAppProps) {
           setSelectorOpen("model");
         }
         return true;
+      }
       case "settings":
         setSelectorOpen("settings");
         return true;
