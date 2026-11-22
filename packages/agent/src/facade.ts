@@ -261,6 +261,12 @@ export interface AgentOptions {
   readonly systemPrompt?: string | (() => string);
   /** 初始思考强度档位（可被 setReasoningEffort 修改）。 */
   readonly reasoningEffort?: string;
+  /**
+   * 是否允许把 assistant 正文中的 @@TOOL:...@@ 文本标记解释为工具调用。
+   * 默认 false：生产路径只接受结构化 tool_call，避免引用/回显正文获得工具权限。
+   * 仅测试夹具或显式隔离的兼容宿主才应开启。
+   */
+  readonly allowTextToolMarkers?: boolean;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -287,6 +293,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
   const baseStreamFn = options.streamFn;
   let reasoningEffort: string | undefined = options.reasoningEffort;
+  const allowTextToolMarkers = options.allowTextToolMarkers === true;
   const includeBuiltins = options.includeBuiltins !== false;
   const plugins = options.plugins ?? [];
   const securityBackend = options.securityBackend ?? defaultSecurityBackend();
@@ -611,25 +618,29 @@ export function createAgent(options: AgentOptions = {}): Agent {
             toolCalls.push({ id, name: call.name, args });
             records.push({ id, name: call.name, arguments: call.arguments ?? JSON.stringify(args) });
           }
-          for (const match of content.matchAll(TOOL_MARKER_RE)) {
-            const name = match[1];
-            if (name === undefined) continue;
-            let args: unknown = {};
-            try {
-              args = JSON.parse(match[2] ?? "{}") as unknown;
-            } catch {
-              // 参数非法时按空对象处理，由工具实现决定如何拒绝。
+          // 文本标记是可选的兼容通道：默认关闭，正文中的标记保持为普通文本，
+          // 不进入工具执行路径；只有显式 opt-in 时才解析并消费标记。
+          if (allowTextToolMarkers) {
+            for (const match of content.matchAll(TOOL_MARKER_RE)) {
+              const name = match[1];
+              if (name === undefined) continue;
+              let args: unknown = {};
+              try {
+                args = JSON.parse(match[2] ?? "{}") as unknown;
+              } catch {
+                // 参数非法时按空对象处理，由工具实现决定如何拒绝。
+              }
+              const id = `call-${toolCalls.length + 1}`;
+              toolCalls.push({ id, name, args });
+              records.push({ id, name, arguments: match[2] ?? "{}" });
             }
-            const id = `call-${toolCalls.length + 1}`;
-            toolCalls.push({ id, name, args });
-            records.push({ id, name, arguments: match[2] ?? "{}" });
           }
         }
 
         return {
           message: {
             role: "assistant",
-            content: content.replace(TOOL_MARKER_RE, ""),
+            content: allowTextToolMarkers ? content.replace(TOOL_MARKER_RE, "") : content,
             ...(thinking.length > 0 ? { thinking } : {}),
             ...(records.length > 0 ? { toolCalls: records } : {}),
           },
