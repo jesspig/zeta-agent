@@ -68,3 +68,58 @@
 - 历史归档：上一轮 `.handoff` 快照只读保留于 `.handoff/archive/2026-11-20-1659-zeta-agent-harness/`（85 文件 + manifest）。
 
 **总索引**：[README.md](../README.md)
+
+## 7 审查闭环复审（2026-11-23）
+
+> 本节记录复审归零结论。复审基线 HEAD `870c145`（旧 finding 修复均在此基线内），
+> CR-39 修复提交 `183d990`、归并 `a6648f9`。**权威结论以本节为准**（受版本控制、可审计）；
+> `.handoff/CODE_REVIEW.md` 与 `.handoff/reviews/` 内报告为过程产物（被 gitignore）。
+
+### 7.1 复审结论
+
+| 项 | 值 |
+| --- | --- |
+| review_id | `2026-11-23-1430-rereview-closure` |
+| 复审基线 | `870c145`（46 条 finding 的修复均在此基线内） |
+| 含 CR-39 修复的 HEAD | `a6648f9`（提交 `183d990` → 归并 `a6648f9`） |
+| 级别 / 模式 | deep / precision |
+| verdict | `approve` |
+| standards_status | `pass` |
+| spec_status | `available`（详见 7.3） |
+| risk_status | `pass` |
+| 本轮新 finding | 0 |
+| 上一轮 finding | 47 条全部 closed：46 verified_fixed（含 CR-39），1 false_positive（补审 CR-07） |
+
+- 复审报告：`review_id 2026-11-23-1430-rereview-closure`，scope=diff（870c145..a6648f9）、2 文件 / 2 单元；`render`/`validate --strict`/`publish` 均通过。
+- 上一轮两份报告（首轮 deep-full、补审 supplemental-paths）保留历史，不直接篡改；本轮通过 memory pass 逐条对账处置。
+
+### 7.2 CR-39 裁决
+
+- **用户裁决：修复**（非接受风险）。
+- **修复内容**：`packages/agent-framework/src/runtime/invariants.spec.ts` 将 legacy/plugin 两版共享的 `CHECKS(check(mode))` 拆为各 12 条自包含断言体，每条各自构造本版 runtime、内联行为断言与接线哨兵（`legacyHookProbe` / `pluginHookProbe`）；`scripts/check-invariant-points.mjs` 门 2 配套改为扫描 `cases` 的 legacy 断言体。
+- **理由（消除循环论证）**：两版不再共享行为断言函数体；每条断言各自构造本版接线、各自断言可观察行为，哨兵仅证明本版接线被 runLoop 读取，**不替代**行为独立性证明。旧延期理由"以按 mode 哨兵断言替代行为独立"的自相矛盾已消除。
+- **验证**：RED 25 pass / 1 fail（结构门失败，暴露共享 body）→ GREEN 26 pass / 0 fail；全量 679 pass / 0 fail；`bun run check` 45/45 + 要点关键词门通过；归并后主工作树复验通过。
+
+### 7.3 spec 验收复核
+
+- 对照 `delivery/roadmap.md §4`（A1-A30）与 `architecture/engineering.md §12` 复核。
+- **核心质量门项通过**：
+  - A1（build/typecheck/test 全绿、依赖图无环）：`bun run check` 45/45、全量 679 pass、依赖门通过。
+  - A6（12 条不变量 legacy/plugin 双版 24 测试 + 双门）：24 个 `inv-core-` 测试全绿；门 1 哨兵与门 2 要点关键词门均通过；本轮 CR-39 修复进一步强化了两版独立性。
+- 其余 A2-A5、A7-A30 为阶段 0-6 规划项，按 roadmap 路线推进，部分已由既有测试覆盖；本轮不逐项判为 fail，标注"按阶段推进 / 待后续验收"。
+- **结论**：验收矩阵可用，`spec_status` 由旧报告的 `fail` / `not_available` 更新为 `available`；核心质量门项通过，无 spec 验收失败导致的阻断。
+
+### 7.4 handoff 状态一致性
+
+- finding 计数、状态、下一步与偏离记录已在 `.handoff/STATE.md` 对齐：46 条 finding 全部 closed/verified_fixed + 1 条 false_positive；偏离 D-100..D-104 记录执行模式、顺序调整、worktree、质量门配套等。
+- 旧报告与归档只读保留，未篡改历史。
+
+### 7.5 零回归结果
+
+| 检查 | 基线（T-00，HEAD 870c145） | 收口（T-06，含 CR-39 修复） | 结论 |
+| --- | --- | --- | --- |
+| `bun test` | 678 pass / 0 fail | 679 pass / 0 fail | 通过（+1 为 CR-39 结构门） |
+| `bun run check` | 45/45 | 45/45 | 通过 |
+| docs 链接 | 0 断链 / 0 断锚 | 0 断链 / 0 断锚 | 通过 |
+
+零回归达成，数字不下降。证据见 `evidence/T-06/`。
