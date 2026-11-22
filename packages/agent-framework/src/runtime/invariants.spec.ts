@@ -115,6 +115,28 @@ function pair(
   return { id, name, legacy: () => body("legacy"), plugin: () => body("plugin") };
 }
 
+/**
+ * §13 要点映射表（门 2 数据源；scripts/check-invariant-points.mjs 机械校验）。
+ * keywords 取每条测试要点中可区分正确/错误实现的词，断言块需含哨兵与关键词。
+ */
+export const INVARIANT_TEST_POINTS: Record<
+  number,
+  { readonly point: string; readonly keywords: readonly string[]; readonly assertFragment: string }
+> = {
+  1: { point: "assistant message_end 屏障", keywords: ["message_end", "preflight", "barrier"], assertFragment: "sawMessageEndBeforeTool" },
+  2: { point: "完成顺序 vs 源码顺序解耦", keywords: ["tool_execution_end", "callId", "reverse"], assertFragment: "reverseOrderObserved" },
+  3: { point: "error/aborted 硬退出", keywords: ["stopReason", "error", "continue"], assertFragment: "hardExitObserved" },
+  4: { point: "end 不清队列", keywords: ["prepareNextTurn", "queue", "agent_end"], assertFragment: "endKeepsQueueObserved" },
+  5: { point: "continue 保证一次请求", keywords: ["streamCount", "naturalRequest", "continue"], assertFragment: "naturalRequestSeen" },
+  6: { point: "hook no-throw", keywords: ["throw", "waterfall", "safe-fallback"], assertFragment: "errorHookInvoked" },
+  7: { point: "streamFn 不抛错", keywords: ["streamAssistant", "error", "agent_end"], assertFragment: "streamErrorObserved" },
+  8: { point: "迟到 onUpdate 丢弃 + durationMs 边界", keywords: ["onUpdate", "durationMs", "settle"], assertFragment: "lateUpdateObserved" },
+  9: { point: "core 无持久化/provider 依赖", keywords: ["import", "runtime", "dependency"], assertFragment: "dependencyScanRan" },
+  10: { point: "terminate 全批次规则", keywords: ["terminate", "batch", "controller"], assertFragment: "mixedBatchObserved" },
+  11: { point: "runToolCall 走 hooks 无事件", keywords: ["nested", "toolCall", "event"], assertFragment: "legacyNestedInvoked" },
+  12: { point: "system 消息单一事实源", keywords: ["system", "delta", "single-source"], assertFragment: "singleSourceVerified" },
+};
+
 const INVARIANT_NAMES = [
   "message-end-barrier", // #1
   "completion-order-decoupled", // #2
