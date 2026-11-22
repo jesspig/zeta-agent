@@ -65,6 +65,13 @@ export interface OAuthManager {
 export function createOAuthManager(providers: readonly OAuthProvider[]): OAuthManager {
   const byId = new Map<string, OAuthProvider>(providers.map((provider) => [provider.id, provider]));
   const store = new Map<string, OAuthCredentials>();
+  // 每个 provider 的操作代数：新登录或登出使此前在途的兑换结果失效。
+  const generations = new Map<string, number>();
+  const bump = (id: string): number => {
+    const next = (generations.get(id) ?? 0) + 1;
+    generations.set(id, next);
+    return next;
+  };
 
   function valid(providerId: string): boolean {
     const creds = store.get(providerId);
@@ -82,12 +89,16 @@ export function createOAuthManager(providers: readonly OAuthProvider[]): OAuthMa
       if (provider === undefined) {
         throw new Error(`UNKNOWN_OAUTH_PROVIDER: ${providerId}（可用：${[...byId.keys()].join(", ")}）`);
       }
+      const gen = bump(providerId);
       const credentials = await provider.exchange(args);
       if (credentials.token.length === 0) throw new Error("OAUTH_EMPTY_TOKEN");
+      // 迟到的结果只有在其发起代数仍是最新时才提交。
+      if (gen !== generations.get(providerId)) return credentials;
       store.set(providerId, credentials);
       return credentials;
     },
     logout(providerId: string): void {
+      bump(providerId);
       store.delete(providerId);
     },
     check(providerId: string): boolean {
