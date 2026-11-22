@@ -1,5 +1,5 @@
 import type { AgentStreamChunk, AgentStreamFn, AgentStreamRequest } from "../facade";
-import { PROVIDERS } from "./catalog.generated";
+import { MODELS, PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
 import { createOpenAiStreamFn } from "./openai";
 import { createOpenAiResponsesStreamFn } from "./openai-responses";
@@ -232,7 +232,8 @@ export function createProviderStreamFn(
   if (info === undefined) {
     throw new Error(`UNKNOWN_PROVIDER: ${config.provider}（可用：${PROVIDERS.map((p) => p.id).join(", ")}）`);
   }
-  const registry = createModelRegistry();
+  // 只在所选 provider 的模型集合内解析别名，避免把别的 provider 的模型名发给当前端点。
+  const registry = createModelRegistry(MODELS.filter((entry) => entry.provider === config.provider));
   const model = registry.resolve(config.model);
   if (model === undefined) throw new Error(`UNKNOWN_MODEL: ${config.model}`);
   const apiKey = resolveApiKey(config.provider, config.apiKey);

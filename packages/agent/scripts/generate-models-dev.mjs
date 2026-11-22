@@ -12,6 +12,7 @@
 import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pickCanonicalMakerEntry } from "./canonical-selection.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outPath = resolve(here, "../src/providers/models-dev.generated.ts");
@@ -89,19 +90,19 @@ for (const id of labIds) {
 //    其余 canonical 仅在多个 provider 价格一致时才采纳（magpie canonicallyPriced 思想）。
 const canonicalVotes = new Map();
 for (const [providerId, provider] of Object.entries(raw)) {
-  for (const model of Object.values(provider?.models ?? {})) {
+  for (const [modelKey, model] of Object.entries(provider?.models ?? {})) {
     const c = model?.canonical_model_id;
     if (typeof c !== "string" || c.length === 0) continue;
     if (!canonicalVotes.has(c)) canonicalVotes.set(c, []);
-    canonicalVotes.get(c).push({ model, providerId });
+    canonicalVotes.get(c).push({ model, providerId, modelKey });
   }
 }
 const canonicalMeta = {};
 for (const [canonical, entries] of canonicalVotes) {
   const canonBare = bareOf(canonical);
   const makerPrefix = canonical.split("/")[0];
-  // maker 自有条目（provider === canonical 前缀）优先，取官方价格。
-  const maker = entries.find((e) => e.providerId === makerPrefix);
+  // maker 自有条目优先；共享 canonical 的多个变体按模型键精确匹配，避免输入顺序影响。
+  const maker = pickCanonicalMakerEntry(entries, canonical, makerPrefix, bareOf);
   if (maker !== undefined) {
     const official = metaOf(canonical, maker.model, makerPrefix);
     canonicalMeta[canonical] = official;

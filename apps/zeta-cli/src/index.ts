@@ -287,12 +287,32 @@ async function runTui(args: CliArgs): Promise<number> {
   return 0;
 }
 
+/**
+ * RPC 帧来源：非 TTY 时优先读 stdin 的逐行帧；否则沿用 argv 的单帧。
+ * 每行一条 JSON-RPC 帧，空行忽略。
+ */
+export function collectRpcLines(argvPrompt: string | undefined, stdinText: string, isTTY: boolean): string[] {
+  if (!isTTY && stdinText.trim().length > 0) {
+    return stdinText.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  }
+  return argvPrompt !== undefined ? [argvPrompt] : [];
+}
+
+async function readStdinFrames(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function runHeadless(args: CliArgs): Promise<number> {
   const { agent } = makeAgent();
   const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
+  const stdinText = mode === "rpc" && !process.stdin.isTTY ? await readStdinFrames() : "";
   const opts = {
     prompt: args.prompt,
-    lines: args.prompt !== undefined ? [args.prompt] : [],
+    lines: mode === "rpc"
+      ? collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
+      : args.prompt !== undefined ? [args.prompt] : [],
     output: (line: string) => process.stdout.write(line + "\n"),
   };
   try {

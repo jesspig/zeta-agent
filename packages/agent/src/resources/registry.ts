@@ -83,17 +83,12 @@ function scanRoot(root: string, scope: ResourceScope): ResourceEntry[] {
     for (const file of walk(base, layout.recursive)) {
       if (!matches(file.split(/[\\/]/).at(-1) ?? "", layout.ext)) continue;
       const relativePath = relative(base, file).split(sep).join("/");
-      let content: string;
-      try {
-        content = readFileSync(file, "utf8");
-      } catch {
-        content = "";
-      }
+      // 发现阶段只登记元数据；正文只在 load 且通过信任门后读取，避免越权泄露。
       found.push({
         id: `${scope}:${type}:${relativePath}`,
         type,
         scope,
-        content,
+        content: "",
         root,
         relativePath,
       });
@@ -137,7 +132,14 @@ export function createResourceRegistry(options: ResourceRegistryOptions): Resour
           throw error;
         }
       }
-      return entry;
+      // 信任通过后再读取正文；读取失败返回空内容，与发现阶段一致。
+      let content = "";
+      try {
+        content = readFileSync(join(entry.root, RESOURCE_LAYOUT[entry.type].dir, entry.relativePath), "utf8");
+      } catch {
+        content = "";
+      }
+      return { ...entry, content };
     },
   };
 }
