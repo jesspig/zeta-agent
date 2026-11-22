@@ -174,7 +174,15 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       }
     }
 
-    const toolResultMessages = results.map((result) => result.message);
+    // 完成通知按 results（完成顺序）发出；会话提交按 assistant 声明顺序排列，
+    // 两者解耦，保证 transcript 顺序稳定且与工具声明对应。
+    const resultByCallId = new Map(results.map((result) => [result.callId, result]));
+    const orderedResults = toolCalls
+      .map((call) => resultByCallId.get(call.id))
+      .filter((result): result is ToolResult => result !== undefined);
+    const toolResultMessages = (orderedResults.length === results.length ? orderedResults : results).map(
+      (result) => result.message
+    );
     for (const message of toolResultMessages) {
       await emit({ type: "message_start", message });
       await emit({ type: "message_end", message });
