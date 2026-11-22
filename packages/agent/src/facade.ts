@@ -686,7 +686,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
                 : {};
               for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
               const value = await execute(args);
-              for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: false });
+              // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
+              const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+              if (failed) isError = true;
+              for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed });
               output = value === undefined ? NO_TOOL_RESULT : value;
             } catch (error) {
               isError = true;

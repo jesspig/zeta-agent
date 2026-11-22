@@ -109,8 +109,14 @@ export function resultToText(result: unknown): string {
   const record = asRecord(result);
   if (record === undefined) return String(result);
   if (record.ok === false) {
+    // 失败时保留摘要与有界的两路输出，便于展开后查看诊断。
     const error = firstString(record, ["error", "reason", "message"]);
+    const streams = [record.stdout, record.stderr]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join("\n");
+    if (error !== undefined && streams.length > 0) return `${error}\n${streams}`;
     if (error !== undefined) return error;
+    if (streams.length > 0) return streams;
   }
   const content = record.content;
   if (typeof content === "string") return content;
