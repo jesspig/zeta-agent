@@ -41,6 +41,36 @@ const HELP = [
   "  未配置连接时回退 echo（无网络）。密钥勿写入仓库。",
 ].join("\n");
 
+/**
+ * 连接后选择有效模型：保留仍存在于新列表的用户选择；
+ * 未连接（echo）或旧模型不在新列表时采用首个模型；无可用模型返回 undefined。
+ */
+export function selectModelAfterConnect(
+  currentModel: string,
+  discoveredIds: readonly string[]
+): string | undefined {
+  const first = discoveredIds[0];
+  if (currentModel !== "echo" && discoveredIds.includes(currentModel)) return currentModel;
+  return first;
+}
+
+/** 连接代次序列：只有最新发起的连接结果才允许发布。 */
+export function createConnectionSequence(): {
+  next(): number;
+  isCurrent(generation: number): boolean;
+} {
+  let current = 0;
+  return {
+    next() {
+      current += 1;
+      return current;
+    },
+    isCurrent(generation) {
+      return generation === current;
+    },
+  };
+}
+
 function echoStream(): AgentStreamFn {
   return async function* (request) {
     const last = request.messages.at(-1);
@@ -98,7 +128,7 @@ function makeAgent(): AgentBundle {
     },
     connect(baseUrl: string, apiKey: string) {
       connection = { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey };
-      modelName = modelName === "echo" ? "" : modelName;
+      // 不在此处清空模型；模型选择由 selectModelAfterConnect 基于新列表统一决定。
     },
   };
 }
@@ -162,24 +192,28 @@ async function runTui(args: CliArgs): Promise<number> {
   });
 
   const hostCommands = new Set(["session", "compact", "export"]);
+  const connectionSeq = createConnectionSequence();
 
-  /** 设置内存连接并拉取 /v1/models；失败则报错且不显示任何模型。 */
+  /** 设置内存连接并拉取 /v1/models；仅最新代次可发布，失败也不覆盖更新的连接。 */
   const applyConnection = async (baseUrl: string, apiKey: string): Promise<void> => {
+    const generation = connectionSeq.next();
     notice(`连接 ${baseUrl}：正在拉取模型列表…`);
     try {
       const ids = await fetchModelIds({ baseUrl, apiKey });
+      if (!connectionSeq.isCurrent(generation)) return; // 迟到结果，忽略
+      const previousModel = bundle.model;
+      const chosen = selectModelAfterConnect(previousModel, ids);
+      if (chosen === undefined) {
+        throw new Error("MODELS_EMPTY: 无可发送的模型");
+      }
       bundle.connect(baseUrl, apiKey);
+      bundle.setModel(chosen);
       const options = decorateModels(ids);
       tui?.setModelOptions(options);
-      const first = ids[0];
-      if (first !== undefined && bundle.model === "echo") {
-        bundle.setModel(first);
-        tui?.setModel(first);
-      } else {
-        tui?.setModel(bundle.model);
-      }
-      notice(`已连接：${ids.length} 个模型（/model 选择，元数据来自 models.dev）`);
+      tui?.setModel(chosen);
+      notice(`已连接：${ids.length} 个模型（当前 ${chosen}，/model 可切换）`);
     } catch (error) {
+      if (!connectionSeq.isCurrent(generation)) return; // 过期的失败也不提示
       notice(`连接失败：${(error as Error).message}；请用 /connect 重新设置 API 与 Key`);
     }
   };
