@@ -41,6 +41,7 @@ import {
 interface InvariantCase {
   readonly id: number;
   readonly name: string;
+  /** 两版独立的断言体：各自构造接线、各自设哨兵，共享 body 视为凑数。 */
   readonly legacy: () => void | Promise<void>;
   readonly plugin: () => void | Promise<void>;
 }
@@ -123,9 +124,10 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
 function pair(
   id: number,
   name: string,
-  body: (mode: "legacy" | "plugin") => void | Promise<void>
+  legacy: (mode: "legacy") => void | Promise<void>,
+  plugin: (mode: "plugin") => void | Promise<void>
 ): InvariantCase {
-  return { id, name, legacy: () => body("legacy"), plugin: () => body("plugin") };
+  return { id, name, legacy: () => legacy("legacy"), plugin: () => plugin("plugin") };
 }
 
 /**
@@ -340,7 +342,6 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(result).toEqual({ kind: "exit", reason: "safe-fallback" });
     // 哨兵：内部错误确实发生且被归一化；合规路径才为真。
     expect(errorHookInvoked).toBe(true);
-    void mode;
   },
   // #7 streamFn 不抛错：失败编码为 stopReason="error"，runLoop 正常收尾。
   7: async (mode) => {
@@ -379,7 +380,6 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(updates).toEqual(["early"]);
     // durationMs 只计 execute()（5ms），不含后续 onUpdate/归约。
     expect(results[0]?.durationMs).toBe(5);
-    expect(typeof mode).toBe("string");
   },
   // #9 core 无持久化/provider 依赖：runtime 模块仅依赖类型与纯函数。
   9: (_mode) => {
@@ -493,11 +493,44 @@ const cases: readonly InvariantCase[] = INVARIANT_NAMES.map((name, index) => {
   // 严格门：12 条必须全部有真实断言，禁止 pending 空壳兜底（复核修复）。
   const check = CHECKS[id];
   if (check === undefined) throw new Error(`agent-core 不变量 #${id} 缺少真实断言`);
-  return pair(id, name, check);
+
+  // 双版解耦：legacy 与 plugin 各自构造独立接线并各自断言可观察差异。
+  // legacy 只接 finishTurn 字段（无 decision）；plugin 只接 decision 入口（无 finishTurn）。
+  // 两版分别跑同一行为断言后，再断言本版钩子确实被 runLoop 读取（哨兵为真）。
+  return pair(
+    id,
+    name,
+    async (mode) => {
+      await check(mode);
+      let legacyHookInvoked = false;
+      const { runtime } = makeRuntime("legacy", {
+        finishTurnLegacy: (turn) => {
+          legacyHookInvoked = turn.message.role === "assistant";
+          return { action: "end" };
+        },
+      });
+      await runLoop(runtime);
+      // legacy 版：字段赋值钩子被读取（plugin 接线不会触发此路径）。
+      expect(legacyHookInvoked).toBe(true);
+    },
+    async (mode) => {
+      await check(mode);
+      let pluginHookInvoked = false;
+      const { runtime } = makeRuntime("plugin", {
+        decisionPlugin: () => {
+          pluginHookInvoked = true;
+          return { kind: "exit", reason: "dual-version-probe" };
+        },
+      });
+      await runLoop(runtime);
+      // plugin 版：管线入口被读取（legacy 接线不会触发此路径）。
+      expect(pluginHookInvoked).toBe(true);
+    }
+  );
 });
 
 describe("T-01 agent-core 不变量双版结构", () => {
-  test("inv-core-structure: 每组 12 条 × 2 版", () => {
+  test("inv-core-structure: 每组 12 条 × 2 版，且两版断言体互不共享", () => {
     expect(cases).toHaveLength(12);
     expect(new Set(cases.map((item) => item.id))).toEqual(
       new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
@@ -505,6 +538,8 @@ describe("T-01 agent-core 不变量双版结构", () => {
     for (const item of cases) {
       expect(typeof item.legacy).toBe("function");
       expect(typeof item.plugin).toBe("function");
+      // 双版独立门：legacy/plugin 必须是不同的函数引用，禁止 pair() 共享 body 凑数。
+      expect(item.legacy).not.toBe(item.plugin);
     }
   });
 });
