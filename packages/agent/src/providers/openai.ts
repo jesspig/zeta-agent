@@ -201,6 +201,7 @@ export function createOpenAiStreamFn(
       model: config.model,
       messages: toOpenAiMessages(request.messages),
       stream: true,
+      ...(request.reasoningEffort !== undefined ? { reasoning_effort: request.reasoningEffort } : {}),
     };
     if (tools !== undefined && tools.length > 0) {
       body.tools = tools.map((schema) => ({
