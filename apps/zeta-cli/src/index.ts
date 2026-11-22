@@ -234,6 +234,8 @@ async function runTui(args: CliArgs): Promise<number> {
       })),
       onCommand: handleCommand,
       onAbort: () => agent.abort(),
+      // /new：清空真实会话上下文，使下一轮请求不再携带旧消息。
+      onNewSession: () => agent.reset(),
       resources: { models: bundle.models.slice(0, 4) },
     }),
     messages: toRuntimeMessages(agent.state.messages),

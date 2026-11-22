@@ -281,6 +281,8 @@ export interface Agent extends PluginApiSurface {
   continue(): Promise<readonly AgentMessage[]>;
   subscribe(listener: AgentListener): Disposer;
   abort(): void;
+  /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
+  reset(): void;
   waitForIdle(): Promise<void>;
   runTool(call: AgentToolCall): Promise<ToolFailure>;
   emitEffect(meta: EffectMeta): void;
@@ -725,6 +727,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     subscribe: (listener) => stream.subscribe(listener),
     abort() {
       aborted = true;
+    },
+    reset() {
+      aborted = false;
+      lastTurnHadNativeTools = false;
+      stream.reset();
     },
     waitForIdle: () => stream.waitForIdle(),
     ...api,
