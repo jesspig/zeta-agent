@@ -193,6 +193,7 @@ export function createOpenAiResponsesStreamFn(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      ...(request.signal !== undefined ? { signal: request.signal } : {}),
     });
     if (!response.ok) {
       const hint =

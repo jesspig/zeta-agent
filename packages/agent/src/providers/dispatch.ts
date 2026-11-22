@@ -331,7 +331,10 @@ export function createProviderStreamFn(
       parse = parseGoogleSse;
     }
 
-    const response = await fetchImpl(url, init);
+    const response = await fetchImpl(url, {
+      ...init,
+      ...(request.signal !== undefined ? { signal: request.signal } : {}),
+    });
     if (!response.ok) throw httpError(response.status, config.provider);
     if (response.body === null) throw new Error(`${config.provider.toUpperCase()}_NO_BODY`);
     yield* parse(response.body);
