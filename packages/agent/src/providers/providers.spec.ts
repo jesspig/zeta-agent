@@ -52,6 +52,25 @@ describe("多 provider 流式接口（T-12）", () => {
     }
   });
 
+  test("openai-responses：走 /responses 与 instructions/input 而非 chat/completions", async () => {
+    let captured: { url?: string; init?: RequestInit } = {};
+    const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      captured = { url: String(url), init };
+      return sse(['data: {"type":"response.output_text.delta","delta":"resp"}\n\n']);
+    }) as unknown as typeof fetch;
+    const out = await collect(
+      createProviderStreamFn(
+        { provider: "openai-responses", model: "responses", apiKey: "dummy", baseUrl: "https://responses.test/v1" },
+        fakeFetch
+      )(request)
+    );
+    expect(out).toEqual(["resp"]);
+    expect(captured.url).toBe("https://responses.test/v1/responses");
+    expect(captured.url).not.toContain("chat/completions");
+    const body = JSON.parse(String(captured.init?.body));
+    expect(body.instructions).toBe("sys");
+  });
+
   test("anthropic：/messages + x-api-key + anthropic-version，解析 content_block_delta", async () => {
     let captured: { url?: string; init?: RequestInit } = {};
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {

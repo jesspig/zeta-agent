@@ -44,10 +44,10 @@ describe("模型 catalog（T-12）", () => {
 
   test("覆盖全部主流 provider", () => {
     const ids = new Set(PROVIDERS.map((provider) => provider.id));
-    for (const expected of ["openai", "anthropic", "google", "bedrock", "openrouter", "groq", "deepseek"]) {
+    for (const expected of ["openai", "openai-responses", "anthropic", "google", "bedrock", "openrouter", "groq", "deepseek"]) {
       expect(ids.has(expected)).toBe(true);
     }
-    expect(MODELS.length).toBeGreaterThanOrEqual(14);
+    expect(MODELS.length).toBeGreaterThanOrEqual(16);
   });
 
   test("按完整 id 解析模型", () => {

@@ -222,6 +222,8 @@ export interface AgentStreamRequest {
   readonly messages: readonly AgentMessage[];
   /** 本轮可用的工具 schema；provider 据此发送原生 function calling。 */
   readonly tools?: readonly AgentToolSchema[];
+  /** 思考强度档位（如 low/medium/high/xhigh），由 provider 映射到原生字段。 */
+  readonly reasoningEffort?: string;
 }
 
 export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<AgentStreamChunk>;
@@ -257,6 +259,8 @@ export interface AgentOptions {
   readonly allowedDirectories?: readonly string[];
   /** 系统提示词；缺省时注入 cwd/platform/tools 等运行环境信息。 */
   readonly systemPrompt?: string | (() => string);
+  /** 初始思考强度档位（可被 setReasoningEffort 修改）。 */
+  readonly reasoningEffort?: string;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -275,11 +279,14 @@ export interface Agent extends PluginApiSurface {
   readonly toolNames: readonly string[];
   readonly toolDefinitions: readonly ToolDefinition[];
   readonly assembly: readonly string[];
+  readonly reasoningEffort: string | undefined;
+  setReasoningEffort(effort: string | undefined): void;
 }
 
 export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
   const baseStreamFn = options.streamFn;
+  let reasoningEffort: string | undefined = options.reasoningEffort;
   const includeBuiltins = options.includeBuiltins !== false;
   const plugins = options.plugins ?? [];
   const securityBackend = options.securityBackend ?? defaultSecurityBackend();
@@ -559,6 +566,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
             ...base,
             messages: base.messages ?? [],
             tools: base.tools ?? toolDefinitions.map(toToolSchema),
+            ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
           } as AgentStreamRequest;
           for await (const chunk of effectiveStreamFn(enriched)) {
             if (aborted) {
@@ -729,5 +737,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     toolDefinitions,
     assembly,
+    get reasoningEffort() {
+      return reasoningEffort;
+    },
+    setReasoningEffort(effort) {
+      reasoningEffort = effort;
+    },
   };
 }

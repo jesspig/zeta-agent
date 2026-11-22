@@ -61,6 +61,21 @@ describe("OpenAI 兼容 provider", () => {
     ]);
   });
 
+  test("reasoningEffort 写入请求体 reasoning_effort", async () => {
+    let captured: RequestInit | undefined;
+    const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      captured = init;
+      return sseResponse(["data: [DONE]\n\n"]);
+    }) as unknown as typeof fetch;
+    const request: AgentStreamRequest = {
+      messages: [{ role: "user", content: "hi" }],
+      reasoningEffort: "high",
+    };
+    for await (const _chunk of createOpenAiStreamFn(config, fakeFetch)(request)) void _chunk;
+    const body = JSON.parse(String(captured?.body));
+    expect(body.reasoning_effort).toBe("high");
+  });
+
   test("解析 reasoning 与 tool_calls，并在请求体发送 tools", async () => {
     let captured: RequestInit | undefined;
     const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {

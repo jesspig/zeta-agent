@@ -88,6 +88,23 @@ describe("T-25 agent facade and plugin assembly", () => {
     agent.abort();
     expect(agent.aborted).toBe(true);
   });
+
+  test("思考强度随请求传递且可运行时切换", async () => {
+    const seen: (string | undefined)[] = [];
+    const agent = facade.createAgent({
+      reasoningEffort: "low",
+      streamFn: async function* (request) {
+        seen.push(request.reasoningEffort);
+        yield "ok";
+      },
+    });
+    expect(agent.reasoningEffort).toBe("low");
+    await agent.prompt("one");
+    agent.setReasoningEffort("high");
+    expect(agent.reasoningEffort).toBe("high");
+    await agent.prompt("two");
+    expect(seen).toEqual(["low", "high"]);
+  });
 });
 
 describe("T-09 createAgent PluginApiSurface 装配", () => {

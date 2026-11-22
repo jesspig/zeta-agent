@@ -2,6 +2,7 @@ import type { AgentStreamChunk, AgentStreamFn, AgentStreamRequest } from "../fac
 import { PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
 import { createOpenAiStreamFn } from "./openai";
+import { createOpenAiResponsesStreamFn } from "./openai-responses";
 
 export interface ProviderConfig {
   /** provider id（如 openai / anthropic / groq）。 */
@@ -22,6 +23,7 @@ interface ProviderInfo {
 
 const ENV_KEY_BY_PROVIDER: Readonly<Record<string, string>> = {
   openai: "OPENAI_API_KEY",
+  "openai-responses": "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
   google: "GOOGLE_API_KEY",
   bedrock: "BEDROCK_API_KEY",
@@ -237,6 +239,10 @@ export function createProviderStreamFn(
   const baseUrl = resolveBaseUrl(info, config.baseUrl);
   const modelName = model.name;
 
+  if (info.api === "openai-responses") {
+    // OpenAI Responses API：/responses + instructions/input。
+    return createOpenAiResponsesStreamFn({ baseUrl, apiKey, model: modelName }, fetchImpl);
+  }
   if (info.api !== "anthropic-messages" && info.api !== "google-generate") {
     // openai-chat 与 bedrock-invoke 均通过 OpenAI 兼容 SSE 网关对接。
     return createOpenAiStreamFn({ baseUrl, apiKey, model: modelName }, fetchImpl);
