@@ -579,17 +579,23 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     return options.onSubmit?.(text);
   };
 
-  const exit = (): void => {
+  const cleanup = (): void => {
     if (destroyed) return;
     destroyed = true;
-    try {
-      releaseOsc?.();
-      signals?.dispose();
-      renderer.destroy();
-    } finally {
-      resolveClosed();
-    }
+    releaseOsc?.();
+    signals?.dispose();
+    resolveClosed();
   };
+
+  const exit = (): void => {
+    if (destroyed) return;
+    cleanup();
+    renderer.destroy();
+  };
+
+  // 渲染器自行关闭（原生会话失败/退出信号）时也走同一收尾路径，
+  // 避免宿主 waitForExit() 永久挂起。
+  void renderer.closed.then(cleanup, cleanup);
 
   try {
     await openTuiRender(
