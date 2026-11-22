@@ -462,13 +462,29 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
   },
   // #12 system 消息单一事实源：reduceState 对 system 消息不重复入列，声明 delta 对齐。
   12: (_mode) => {
-    const system: AgentMessage = { role: "system", content: "sys" };
-    let state = createInitialState({ systemPrompt: "sys" });
-    state = reduceState(state, { type: "message_start", message: system });
-    state = reduceState(state, { type: "message_end", message: system });
-    // message_end 只追加一条消息；systemPrompt 字段保持单一值不被追加。
-    expect(state.messages.filter((m) => m.role === "system")).toHaveLength(1);
-    expect(state.systemPrompt).toBe("sys");
+    // §13 #12：system 消息是 prompt/工具声明的单一事实源；transcript 声明由它派生（delta 对齐）。
+    // 单一来源：只传 systemPrompt，不往 messages 预置 system 消息（那会形成双源）。
+    const authoritative = "sys (tools: read,write)";
+    let state = createInitialState({ systemPrompt: authoritative });
+    const startedFromSingleSource = state.messages.length === 0;
+    expect(startedFromSingleSource).toBe(true);
+
+    // 声明消息从唯一事实源派生，内容逐字对齐。
+    const declare = (prompt: string): AgentMessage => ({ role: "system", content: prompt });
+    state = reduceState(state, { type: "message_start", message: declare(state.systemPrompt) });
+    state = reduceState(state, { type: "message_end", message: declare(state.systemPrompt) });
+
+    const systems = state.messages.filter((m) => m.role === "system");
+    // delta 对齐：声明内容 == 唯一事实源，且只声明一次（不重复回放形成第二条）。
+    const deltaAligned = systems.length === 1 && String(systems[0]?.content) === authoritative;
+    expect(systems).toHaveLength(1);
+    expect(String(systems[0]?.content)).toBe(state.systemPrompt);
+    // 源字段不被重放改写。
+    expect(state.systemPrompt).toBe(authoritative);
+
+    // 哨兵：单源构造 + delta 对齐 + 无重复声明同时成立；双源构造或漂移都会为假。
+    const singleSourceVerified = startedFromSingleSource && deltaAligned && systems.length === 1;
+    expect(singleSourceVerified).toBe(true);
   },
 };
 
