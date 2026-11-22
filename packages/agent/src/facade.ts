@@ -224,6 +224,8 @@ export interface AgentStreamRequest {
   readonly tools?: readonly AgentToolSchema[];
   /** 思考强度档位（如 low/medium/high/xhigh），由 provider 映射到原生字段。 */
   readonly reasoningEffort?: string;
+  /** 本轮取消信号；provider 应传给 fetch 并在提前退出时释放 reader。 */
+  readonly signal?: AbortSignal;
 }
 
 export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<AgentStreamChunk>;
@@ -352,6 +354,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   });
 
   let aborted = false;
+  /** 当前回合的取消控制器；abort() 触发它，使等待中的网络请求立即结束。 */
+  let abortController: AbortController | undefined;
   /** 当前回合是否使用了 provider 原生 tool_calls（决定是否自动续跑消费工具结果）。 */
   let lastTurnHadNativeTools = false;
 
@@ -501,6 +505,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   async function runTurn(userText?: string): Promise<readonly AgentMessage[]> {
     aborted = false;
+    abortController = new AbortController();
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" });
 
@@ -583,6 +588,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
             messages: base.messages ?? [],
             tools: base.tools ?? toolDefinitions.map(toToolSchema),
             ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+            signal: abortController?.signal,
           } as AgentStreamRequest;
           for await (const chunk of effectiveStreamFn(enriched)) {
             if (aborted) {
@@ -727,9 +733,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     subscribe: (listener) => stream.subscribe(listener),
     abort() {
       aborted = true;
+      abortController?.abort();
     },
     reset() {
       aborted = false;
+      abortController = undefined;
       lastTurnHadNativeTools = false;
       stream.reset();
     },

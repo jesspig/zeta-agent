@@ -51,6 +51,13 @@ export function decodeRpcFrame(line: string): Record<string, unknown> {
   return parsed;
 }
 
+/** 检测 facade 在回合失败时编码进 assistant 消息的 Error 文本。 */
+export function detectRunError(messages: readonly AgentMessage[]): boolean {
+  return messages.some(
+    (m) => m.role === "assistant" && typeof m.content === "string" && m.content.startsWith("Error:")
+  );
+}
+
 async function runTranscript(
   agent: Agent,
   opts: ModeOptions,
@@ -69,13 +76,14 @@ async function runTranscript(
       output(`tool ${event.toolName}: ${event.isError ? "error" : "ok"}`);
     }
   });
+  let messages: readonly AgentMessage[];
   try {
-    await agent.prompt(opts.prompt ?? opts.lines?.[0] ?? "");
+    messages = await agent.prompt(opts.prompt ?? opts.lines?.[0] ?? "");
     await agent.waitForIdle();
   } finally {
     dispose();
   }
-  return 0;
+  return detectRunError(messages) ? 1 : 0;
 }
 
 async function runInteractive(agent: Agent, opts: ModeOptions): Promise<number> {
@@ -121,6 +129,10 @@ async function runRpc(agent: Agent, opts: ModeOptions): Promise<number> {
         messages = await agent.continue();
       }
       await agent.waitForIdle();
+      if (detectRunError(messages)) {
+        output(encodeRpcFrame({ id, error: { code: -32000, message: "RUN_FAILED" } }));
+        continue;
+      }
       output(
         encodeRpcFrame({
           id,

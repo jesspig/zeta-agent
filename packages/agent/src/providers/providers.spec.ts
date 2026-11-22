@@ -56,7 +56,10 @@ describe("多 provider 流式接口（T-12）", () => {
     let captured: { url?: string; init?: RequestInit } = {};
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
       captured = { url: String(url), init };
-      return sse(['data: {"type":"response.output_text.delta","delta":"resp"}\n\n']);
+      return sse([
+        'data: {"type":"response.output_text.delta","delta":"resp"}\n\n',
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+      ]);
     }) as unknown as typeof fetch;
     const out = await collect(
       createProviderStreamFn(

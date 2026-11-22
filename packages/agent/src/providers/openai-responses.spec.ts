@@ -32,7 +32,10 @@ describe("OpenAI Responses 适配器", () => {
     let captured: { url?: string; init?: RequestInit } = {};
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
       captured = { url: String(url), init };
-      return sse(['data: {"type":"response.output_text.delta","delta":"ok"}\n\n']);
+      return sse([
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+      ]);
     }) as unknown as typeof fetch;
     const out = await collect(
       createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1/", apiKey: "dummy", model: "gpt-4o" }, fakeFetch)(request)
@@ -57,6 +60,7 @@ describe("OpenAI Responses 适配器", () => {
         'data: {"type":"response.reasoning_summary_text.delta","delta":"think"}\n\n',
         'data: {"type":"response.output_text.delta","delta":"hel"}\n\n',
         'data: {"type":"response.output_text.delta","delta":"lo"}\n\n',
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
       ])) as unknown as typeof fetch;
     const out = await collect(
       createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "dummy", model: "gpt-4o" }, fakeFetch)(request)
@@ -84,6 +88,7 @@ describe("OpenAI Responses 适配器", () => {
         'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"a\\""}\n\n',
         'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta\\":1}"}\n\n',
         'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"fc_x","name":"write","arguments":"{\\"a\\":1}"}}\n\n',
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
       ]);
     }) as unknown as typeof fetch;
     const out = await collect(
