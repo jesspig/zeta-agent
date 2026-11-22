@@ -38,7 +38,10 @@ describe("T-15 资源发现（skills / prompts / themes）", () => {
 
     expect(manifest.entries.map((e) => e.type).sort()).toEqual(["prompt", "skill", "theme"]);
     expect(manifest.entries.every((e) => e.scope === "agent")).toBe(true);
-    expect(manifest.entries.find((e) => e.type === "skill")?.content).toContain("Demo Skill");
+    // 发现只给元数据；正文通过 load 获取
+    const skill = manifest.entries.find((e) => e.type === "skill");
+    expect(skill?.content).toBe("");
+    expect(registry.load(skill!.id).content).toContain("Demo Skill");
   });
 
   test("discover 合并项目级目录资源", () => {
