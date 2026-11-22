@@ -28,6 +28,12 @@ export const PROVIDERS: readonly ProviderInfo[] = [
     "api": "openai-chat"
   },
   {
+    "id": "openai-responses",
+    "name": "OpenAI Responses",
+    "defaultBaseUrl": "https://api.openai.com/v1",
+    "api": "openai-responses"
+  },
+  {
     "id": "anthropic",
     "name": "Anthropic",
     "defaultBaseUrl": "https://api.anthropic.com/v1",
@@ -93,6 +99,36 @@ export const MODELS: readonly Model[] = [
       "image"
     ],
     "api": "openai-chat"
+  },
+  {
+    "id": "openai-responses/gpt-4o",
+    "provider": "openai-responses",
+    "name": "gpt-4o",
+    "aliases": [
+      "responses"
+    ],
+    "contextWindow": 128000,
+    "maxOutput": 16384,
+    "input": [
+      "text",
+      "image"
+    ],
+    "api": "openai-responses"
+  },
+  {
+    "id": "openai-responses/gpt-4o-mini",
+    "provider": "openai-responses",
+    "name": "gpt-4o-mini",
+    "aliases": [
+      "responses-mini"
+    ],
+    "contextWindow": 128000,
+    "maxOutput": 16384,
+    "input": [
+      "text",
+      "image"
+    ],
+    "api": "openai-responses"
   },
   {
     "id": "anthropic/claude-sonnet-4-5",

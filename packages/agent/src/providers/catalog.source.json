@@ -2,6 +2,7 @@
   "version": 1,
   "providers": [
     { "id": "openai", "name": "OpenAI", "defaultBaseUrl": "https://api.openai.com/v1", "api": "openai-chat" },
+    { "id": "openai-responses", "name": "OpenAI Responses", "defaultBaseUrl": "https://api.openai.com/v1", "api": "openai-responses" },
     { "id": "anthropic", "name": "Anthropic", "defaultBaseUrl": "https://api.anthropic.com/v1", "api": "anthropic-messages" },
     { "id": "google", "name": "Google", "defaultBaseUrl": "https://generativelanguage.googleapis.com/v1beta", "api": "google-generate" },
     { "id": "bedrock", "name": "AWS Bedrock", "defaultBaseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com", "api": "bedrock-invoke" },
@@ -12,6 +13,8 @@
   "models": [
     { "id": "openai/gpt-4o", "provider": "openai", "name": "gpt-4o", "aliases": [], "contextWindow": 128000, "maxOutput": 16384, "input": ["text", "image"], "api": "openai-chat" },
     { "id": "openai/gpt-4o-mini", "provider": "openai", "name": "gpt-4o-mini", "aliases": ["mini"], "contextWindow": 128000, "maxOutput": 16384, "input": ["text", "image"], "api": "openai-chat" },
+    { "id": "openai-responses/gpt-4o", "provider": "openai-responses", "name": "gpt-4o", "aliases": ["responses"], "contextWindow": 128000, "maxOutput": 16384, "input": ["text", "image"], "api": "openai-responses" },
+    { "id": "openai-responses/gpt-4o-mini", "provider": "openai-responses", "name": "gpt-4o-mini", "aliases": ["responses-mini"], "contextWindow": 128000, "maxOutput": 16384, "input": ["text", "image"], "api": "openai-responses" },
     { "id": "anthropic/claude-sonnet-4-5", "provider": "anthropic", "name": "claude-sonnet-4-5", "aliases": ["sonnet"], "contextWindow": 200000, "maxOutput": 16384, "input": ["text", "image"], "api": "anthropic-messages" },
     { "id": "anthropic/claude-opus-4-1", "provider": "anthropic", "name": "claude-opus-4-1", "aliases": ["opus"], "contextWindow": 200000, "maxOutput": 16384, "input": ["text", "image"], "api": "anthropic-messages" },
     { "id": "google/gemini-2.5-pro", "provider": "google", "name": "gemini-2.5-pro", "aliases": ["pro"], "contextWindow": 1048576, "maxOutput": 65536, "input": ["text", "image"], "api": "google-generate" },
