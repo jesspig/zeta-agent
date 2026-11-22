@@ -95,6 +95,9 @@ async function* parseResponsesSse(body: ReadableStream<Uint8Array>): AsyncIterab
   const decoder = new TextDecoder();
   let buffer = "";
   const slots = new Map<number, CallSlot>();
+  // 工具调用只在响应级成功终态后交付，避免未完成/失败的回合执行副作用。
+  const pendingCalls: AgentStreamChunk[] = [];
+  let completed = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -139,14 +142,19 @@ async function* parseResponsesSse(body: ReadableStream<Uint8Array>): AsyncIterab
           const slot = slots.get(event.output_index ?? 0);
           if (slot !== undefined && slot.type === "function_call") {
             const args = event.item?.arguments;
-            yield {
+            pendingCalls.push({
               type: "tool_call",
               id: slot.callId,
               name: slot.name,
               arguments: typeof args === "string" && args.length > 0 ? args : slot.args,
-            };
+            });
             slots.delete(event.output_index ?? 0);
           }
+        } else if (event.type === "response.completed") {
+          completed = true;
+        } else if (event.type === "response.incomplete") {
+          // 未完成：不得交付任何工具调用。
+          throw new Error("OPENAI_RESPONSES_INCOMPLETE: 响应未完成，未提交工具调用");
         } else if (event.type === "error") {
           throw new Error(`OPENAI_RESPONSES_ERROR ${event.code ?? "unknown"}: ${event.message ?? "no message"}`);
         } else if (event.type === "response.failed") {
@@ -158,6 +166,11 @@ async function* parseResponsesSse(body: ReadableStream<Uint8Array>): AsyncIterab
       }
     }
   }
+  if (!completed) {
+    // 裸 EOF 或 [DONE] 而未收到成功终态：不交付待定工具调用，作为失败上抛。
+    throw new Error("OPENAI_RESPONSES_NO_COMPLETION: 未收到成功终态，未提交工具调用");
+  }
+  for (const call of pendingCalls) yield call;
   for (const slot of slots.values()) {
     if (slot.name.length === 0) continue;
     yield { type: "tool_call", id: slot.callId, name: slot.name, arguments: slot.args };
