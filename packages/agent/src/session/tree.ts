@@ -85,9 +85,10 @@ export function createSessionTree(options: SessionTreeOptions): SessionTree {
   }
 
   function appendEntry(entry: JsonlEntry): JsonlEntry {
+    // 先持久化再发布内存状态：写盘失败时 leaf/entries/血缘都不推进。
+    persist(entry);
     entries = [...entries, entry];
     leafId = entry.id;
-    persist(entry);
     return entry;
   }
 
@@ -145,8 +146,8 @@ export function createSessionTree(options: SessionTreeOptions): SessionTree {
     },
     compact(recap, uris) {
       const lineage = makeLineage(recap, uris);
-      lineages.push(lineage);
-      return appendEntry({
+      // appendEntry 先持久化；血缘只在写盘成功后发布。
+      const entry = appendEntry({
         id: makeId(),
         parentId: leafId ?? null,
         kind: "recap",
@@ -154,6 +155,8 @@ export function createSessionTree(options: SessionTreeOptions): SessionTree {
         uris: [...uris],
         lineage,
       });
+      lineages.push(lineage);
+      return entry;
     },
     summarizeBranch(recap) {
       return tree.compact(recap, []);
