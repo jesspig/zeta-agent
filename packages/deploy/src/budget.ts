@@ -17,7 +17,10 @@ export const DEFAULT_PERFORMANCE_BUDGET: PerformanceBudget = Object.freeze({
 });
 
 function assertBudget(budget: PerformanceBudget): void {
-  for (const [name, value] of Object.entries(budget)) {
+  // 固定字段逐一校验：缺字段不能用 Object.entries 跳过，否则会与 undefined 比较后放行。
+  const fields: readonly (keyof PerformanceBudget)[] = ["maxStartupMs", "maxMemBytes", "maxTokenCost"];
+  for (const name of fields) {
+    const value = budget[name];
     if (!Number.isFinite(value) || value <= 0) {
       throw new Error(`INVALID_BUDGET: ${name} must be a positive finite number`);
     }
@@ -25,7 +28,9 @@ function assertBudget(budget: PerformanceBudget): void {
 }
 
 function assertMetrics(metrics: PerfMetrics): void {
-  for (const [name, value] of Object.entries(metrics)) {
+  const fields: readonly (keyof PerfMetrics)[] = ["startupMs", "memBytes", "tokenCost"];
+  for (const name of fields) {
+    const value = metrics[name];
     if (!Number.isFinite(value) || value < 0) {
       throw new Error(`INVALID_METRIC: ${name} must be a non-negative finite number`);
     }
