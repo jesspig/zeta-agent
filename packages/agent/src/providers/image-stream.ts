@@ -15,7 +15,11 @@ interface ImagePart {
   readonly type: "image";
   readonly source: ImageSource;
 }
-type ContentPart = TextPart | ImagePart;
+interface ImageUrlPart {
+  readonly type: "image_url";
+  readonly image_url?: { readonly url?: string };
+}
+type ContentPart = TextPart | ImagePart | ImageUrlPart;
 
 function isContentParts(content: unknown): content is readonly ContentPart[] {
   return Array.isArray(content);
@@ -32,6 +36,10 @@ function toChatMessage(message: AgentMessage): ChatMessage {
     const parts = message.content.map((part) => {
       if (part.type === "image") {
         return { type: "image_url", image_url: { url: encodeImage(part.source).dataUrl } };
+      }
+      if (part.type === "image_url") {
+        // imageMessage helper 产出的原生格式，直接透传，避免图片被降成文本。
+        return { type: "image_url", image_url: { url: part.image_url?.url ?? "" } };
       }
       return { type: "text", text: part.text };
     });
