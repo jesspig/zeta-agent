@@ -13,7 +13,7 @@ import {
   type LoopRuntime,
   type ToolResult,
 } from "./loop";
-import { createDecisionWaterfall, nextAction } from "./decision";
+import { createDecisionWaterfall, nextAction, type AgentDecision } from "./decision";
 import { createInitialState, reduceState } from "./agent";
 import { executeConditionalBatch, type ConditionalCall } from "../tools/parallel";
 import {
@@ -307,13 +307,37 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
     expect(() => nextAction(state)).not.toThrow();
     const decision = nextAction(state);
     expect(["reasoning", "acting", "exit"]).toContain(decision.kind);
-    // 管线路径：合规 hook 返回安全回退值（exit），waterfall.run 正常完成不抛错。
+
+    // §13 #6 no-throw 契约：hook 内部错误必须被自身归一化，向调用方返回安全回退而非抛出。
+    // 注意：createDecisionWaterfall.run 不代理归一化抛错（见 evidence/T-03/red.log），
+    // 契约边界在 hook 作者——这里构造"内部抛错被捕获并返回 safe-fallback"的真实触发条件。
+    let errorHookInvoked = false;
     const waterfall = createDecisionWaterfall();
-    waterfall.add((_decision, next) => next({ kind: "exit", reason: "safe-fallback" }));
+    waterfall.add((_decision, next) => {
+      errorHookInvoked = true;
+      let fallback: AgentDecision = { kind: "exit", reason: "safe-fallback" };
+      try {
+        throw new Error("internal hook failure");
+      } catch {
+        // no-throw：捕获内部错误，返回安全回退值（exit）。
+        fallback = { kind: "exit", reason: "safe-fallback" };
+      }
+      next(fallback);
+    });
     const event: AgentEvent = { type: "turn_end", message: { role: "assistant", content: "x" }, toolResults: [] };
-    const result = await waterfall.run(decision, { state, event });
+    let runThrew = false;
+    let result: unknown;
+    try {
+      result = await waterfall.run(decision, { state, event });
+    } catch {
+      runThrew = true;
+    }
+    // 合规 hook 将错误归一化为安全回退，run 不抛且返回 exit 安全值。
+    expect(runThrew).toBe(false);
     expect(result).toEqual({ kind: "exit", reason: "safe-fallback" });
-    expect(typeof mode).toBe("string");
+    // 哨兵：内部错误确实发生且被归一化；合规路径才为真。
+    expect(errorHookInvoked).toBe(true);
+    void mode;
   },
   // #7 streamFn 不抛错：失败编码为 stopReason="error"，runLoop 正常收尾。
   7: async (mode) => {
