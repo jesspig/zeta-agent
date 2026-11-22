@@ -2,6 +2,8 @@ import { CliRenderer } from "@opentui/core";
 import { render as openTuiRender, useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createKeymap } from "./keymap";
+import { ConnectDialog } from "./components/connect-dialog";
+import { ModelPicker } from "./components/model-picker";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
@@ -9,7 +11,7 @@ import { ThemeProvider, useTheme } from "./theme-context";
 import { createOscBridge } from "./osc";
 import { CommandPaletteView, type Command } from "./command-palette";
 import {
-  ModelSelector,
+  SelectDialog,
   SettingsSelector,
   ThemeSelector,
   type SelectOption,
@@ -21,11 +23,11 @@ import { createAgentSignals, type AgentSignals, type EventSource } from "./signa
 import { Transcript, type TranscriptResources } from "./components/transcript";
 import { ZetaEditor } from "./components/editor";
 import { ViewportLayout } from "./components/layout-view";
-import type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
+import type { RuntimeMessage, RuntimeModelOption, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 import type { SlashCommand } from "./slash";
 import type { TuiThemeName } from "./runtime-types";
 
-export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions, RuntimeResources } from "./runtime-types";
+export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions, RuntimeResources, RuntimeModelOption } from "./runtime-types";
 
 function messageLine(message: RuntimeMessage): string {
   return `${message.role}: ${String(message.content)}`;
@@ -108,6 +110,18 @@ export interface ZetaAppProps {
   readonly provider?: string;
   readonly resources?: TranscriptResources;
   readonly theme?: TuiThemeName;
+  /** 连接回调：宿主设置连接并异步拉取模型列表。 */
+  readonly onConnect?: (url: string, key: string) => void;
+  /** 连接对话框初始值（环境变量兜底）。 */
+  readonly connection?: { readonly url?: string; readonly key?: string };
+  /** 当前可选模型选项（宿主异步刷新后经 handle.setModelOptions 更新）。 */
+  readonly modelList?: readonly RuntimeModelOption[];
+  /** 当前模型（宿主异步更新）。 */
+  readonly currentModel?: string;
+  /** 当前思考强度档位。 */
+  readonly reasoningEffort?: string;
+  /** 思考强度变更回调。 */
+  readonly onEffortChange?: (effort: string) => void;
 }
 
 /** 根界面：视口（对话）+ 停靠区（编辑器/footer）+ 覆盖层。 */
@@ -119,8 +133,9 @@ export function ZetaApp(props: ZetaAppProps) {
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [themeName, setThemeName] = createSignal<TuiThemeName>(props.theme ?? "dark");
   const [activeModel, setActiveModel] = createSignal<string | undefined>(props.model);
+  const [effort, setEffort] = createSignal<string | undefined>(props.reasoningEffort);
   const [resetKey, setResetKey] = createSignal(0);
-  type SelectorKind = "model" | "theme" | "settings";
+  type SelectorKind = "model" | "theme" | "settings" | "connect";
   const [selectorOpen, setSelectorOpen] = createSignal<SelectorKind | undefined>(undefined);
   const { BoundSlot } = useZetaSlots(props.plugins);
   const [status, setStatus] = createSignal<"idle" | "streaming" | "tool">("idle");
@@ -142,19 +157,27 @@ export function ZetaApp(props: ZetaAppProps) {
     model: "选择模型",
     theme: "主题",
     settings: "设置",
+    connect: "连接 API",
   };
 
   const modelOptions = (): readonly SelectOption[] => {
-    const provided = props.models ?? [];
-    if (provided.length > 0) return provided.map((id) => ({ value: id, label: id }));
-    return [
-      { value: "gpt-4o", label: "GPT-4o" },
-      { value: "claude-sonnet", label: "Claude Sonnet" },
-    ];
+    const provided = props.modelList;
+    if (provided !== undefined && provided.length > 0) {
+      return provided.map((option) => ({
+        value: option.value,
+        label: option.label ?? option.value,
+        ...(option.description !== undefined ? { description: option.description } : {}),
+      }));
+    }
+    const ids = props.models ?? [];
+    if (ids.length > 0) return ids.map((id) => ({ value: id, label: id }));
+    // 未配置 API/Key 时不显示任何模型（无模型目录兜底）。
+    return [];
   };
 
   const DEMO_OPTIONS = (): Readonly<Record<SelectorKind, readonly SelectOption[]>> => ({
     model: modelOptions(),
+    connect: [],
     theme: [
       { value: "system", label: "system" },
       { value: "dark", label: "dark" },
@@ -174,6 +197,7 @@ export function ZetaApp(props: ZetaAppProps) {
       { name: "model", description: "选择模型", argumentHint: "[model]" },
       { name: "theme", description: "切换主题", argumentHint: "[system|dark|light]" },
       { name: "settings", description: "打开设置" },
+      { name: "connect", description: "设置 API 并拉取模型列表" },
       { name: "compact", description: "压缩会话上下文" },
       { name: "export", description: "导出会话" },
       { name: "quit", description: "退出" },
@@ -238,6 +262,9 @@ export function ZetaApp(props: ZetaAppProps) {
       case "settings":
         setSelectorOpen("settings");
         return true;
+      case "connect":
+        setSelectorOpen("connect");
+        return true;
       default:
         return false;
     }
@@ -262,6 +289,7 @@ export function ZetaApp(props: ZetaAppProps) {
   keymap.register({ combo: "escape", action: "abort", layer: "app" });
   keymap.register({ combo: "ctrl+d", action: "exit", layer: "app" });
   keymap.register({ combo: "ctrl+l", action: "model-selector", layer: "app" });
+  keymap.register({ combo: "ctrl+k", action: "connect", layer: "app" });
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
   keymap.register({ combo: "ctrl+o", action: "toggle-tools", layer: "tui" });
@@ -336,6 +364,12 @@ export function ZetaApp(props: ZetaAppProps) {
       setSelectorOpen((kind) => (kind === "model" ? undefined : "model"));
       return;
     }
+    if (action === "connect") {
+      key.preventDefault();
+      key.stopPropagation();
+      setSelectorOpen((kind) => (kind === "connect" ? undefined : "connect"));
+      return;
+    }
   });
 
   return (
@@ -385,8 +419,17 @@ export function ZetaApp(props: ZetaAppProps) {
                 const kind = selectorOpen() as SelectorKind;
                 const options = DEMO_OPTIONS()[kind];
                 const shared = {
-                  options: options.length > 0 ? options : [{ value: "default", label: "默认" }],
+                  options:
+                    options.length > 0
+                      ? options
+                      : kind === "model"
+                        ? [{ value: "__connect__", label: "未配置 API — 请用 /connect 连接" }]
+                        : [{ value: "default", label: "默认" }],
                   onSelect: (option: SelectOption) => {
+                    if (option.value === "__connect__") {
+                      setSelectorOpen("connect");
+                      return;
+                    }
                     setSelectorOpen(undefined);
                     if (kind === "theme") {
                       const next = option.value as TuiThemeName;
@@ -399,7 +442,49 @@ export function ZetaApp(props: ZetaAppProps) {
                   },
                   onCancel: () => setSelectorOpen(undefined),
                 };
-                if (kind === "model") return <ModelSelector {...shared} title={SELECTOR_TITLES[kind]} />;
+                if (kind === "connect") {
+                  return (
+                    <ConnectDialog
+                      initialUrl={props.connection?.url}
+                      initialKey={props.connection?.key}
+                      onSubmit={(url, key) => {
+                        setSelectorOpen(undefined);
+                        props.onConnect?.(url, key);
+                      }}
+                      onCancel={() => setSelectorOpen(undefined)}
+                    />
+                  );
+                }
+                if (kind === "model") {
+                  const models = props.modelList ?? [];
+                  if (models.length === 0) {
+                    return (
+                      <SelectDialog
+                        title="选择模型"
+                        options={[{ value: "__connect__", label: "未配置 API — 请用 /connect 连接" }]}
+                        onSelect={() => setSelectorOpen("connect")}
+                        onCancel={() => setSelectorOpen(undefined)}
+                      />
+                    );
+                  }
+                  return (
+                    <ModelPicker
+                      models={models}
+                      current={props.currentModel ?? activeModel()}
+                      effort={props.reasoningEffort ?? effort()}
+                      onSelect={(value) => {
+                        setActiveModel(value);
+                        setSelectorOpen(undefined);
+                        props.onModelChange?.(value);
+                      }}
+                      onEffort={(next) => {
+                        setEffort(next);
+                        props.onEffortChange?.(next);
+                      }}
+                      onCancel={() => setSelectorOpen(undefined)}
+                    />
+                  );
+                }
                 if (kind === "theme") return <ThemeSelector {...shared} title={SELECTOR_TITLES[kind]} />;
                 return <SettingsSelector {...shared} title={SELECTOR_TITLES[kind]} />;
               }}
@@ -407,10 +492,10 @@ export function ZetaApp(props: ZetaAppProps) {
             <BoundSlot name="footer" mode="replace">
               <FooterBridge
                 source={props.source}
-                model={activeModel() ?? props.model ?? "zeta"}
+                model={props.currentModel ?? activeModel() ?? props.model ?? "zeta"}
                 pwd={props.cwd}
                 provider={props.provider}
-                modelId={activeModel() ?? props.model}
+                modelId={props.currentModel ?? activeModel() ?? props.model}
               />
             </BoundSlot>
           </>
@@ -473,6 +558,9 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   });
   let push: (message: RuntimeMessage) => void = () => {};
   let destroyed = false;
+  // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
+  const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
+  const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
 
   const signals: AgentSignals | undefined = options.source
     ? createAgentSignals(options.source)
@@ -520,6 +608,12 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
             cwd={options.cwd}
             model={options.model}
             models={options.models}
+            modelList={modelList()}
+            currentModel={currentModel()}
+            reasoningEffort={options.reasoningEffort}
+            onEffortChange={options.onEffortChange}
+            onConnect={options.onConnect}
+            connection={options.connection}
             onModelChange={options.onModelChange}
             provider={options.provider}
             resources={options.resources}
@@ -542,6 +636,15 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   return {
     appendMessage(message) {
       push(message);
+    },
+    setModels(models) {
+      setModelList(models.map((value) => ({ value })));
+    },
+    setModelOptions(options) {
+      setModelList(options);
+    },
+    setModel(model) {
+      setCurrentModel(model);
     },
     waitForExit() {
       return closed;

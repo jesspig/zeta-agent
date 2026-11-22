@@ -7,6 +7,10 @@ export interface TuiHostOptions {
   readonly provider?: string;
   readonly models?: readonly string[];
   readonly onModelChange?: (model: string) => void;
+  readonly onConnect?: (url: string, key: string) => void;
+  readonly connection?: { readonly url?: string; readonly key?: string };
+  readonly reasoningEffort?: string;
+  readonly onEffortChange?: (effort: string) => void;
   readonly resources?: RuntimeResources;
   readonly commandCatalog?: RuntimeTuiOptions["commandCatalog"];
   readonly onCommand?: (text: string) => void | Promise<void>;
@@ -37,6 +41,10 @@ export function buildTuiOptions(
     model: host.model,
     models: host.models,
     onModelChange: host.onModelChange,
+    onConnect: host.onConnect,
+    connection: host.connection,
+    reasoningEffort: host.reasoningEffort,
+    onEffortChange: host.onEffortChange,
     provider: host.provider,
     resources: host.resources,
   };
