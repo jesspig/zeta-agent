@@ -25,7 +25,10 @@ export interface TimelineAssistantEntry {
 
 export interface TimelineToolEntry {
   readonly kind: "tool";
+  /** 显示身份（每条卡片唯一），与 provider 的调用 id 分离。 */
   readonly id: string;
+  /** provider 侧的工具调用 id，用于关联 start/update/end；历史夹具可缺省。 */
+  readonly toolCallId?: string;
   readonly name: string;
   readonly args: unknown;
   readonly status: "running" | "done" | "error";
@@ -169,6 +172,24 @@ function replaceEntry(
   return entries.map((entry) => (entry.id === id ? update(entry) : entry));
 }
 
+function isToolEntry(entry: TimelineEntry): entry is TimelineToolEntry {
+  return entry.kind === "tool";
+}
+
+function toolDisplayId(entries: readonly TimelineEntry[], toolCallId: string): string {
+  const count = entries.filter((e) => isToolEntry(e) && (e.toolCallId ?? e.id) === toolCallId).length;
+  return count === 0 ? toolCallId : `${toolCallId}#${count + 1}`;
+}
+
+/** 找到最近一条仍在运行、且 provider 调用 id 匹配的卡片。 */
+function runningToolIndex(entries: readonly TimelineEntry[], toolCallId: string): number {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (entry && isToolEntry(entry) && (entry.toolCallId ?? entry.id) === toolCallId && entry.status === "running") return i;
+  }
+  return -1;
+}
+
 /** 纯归约：不产生副作用，可独立测试。 */
 export function applyTimelineEvent(state: TimelineState, event: AgentEvent): TimelineState {
   switch (event.type) {
@@ -290,41 +311,37 @@ export function applyTimelineEvent(state: TimelineState, event: AgentEvent): Tim
     }
 
     case "tool_execution_start": {
-      const existing = state.entries.find(
-        (entry) => entry.kind === "tool" && entry.id === event.toolCallId,
-      );
-      if (existing !== undefined) {
+      const index = runningToolIndex(state.entries, event.toolCallId);
+      if (index >= 0) {
         return {
           ...state,
           status: "tool",
-          entries: replaceEntry(state.entries, event.toolCallId, (entry) =>
-            entry.kind === "tool"
+          entries: state.entries.map((entry, i) =>
+            i === index && isToolEntry(entry)
               ? { ...entry, name: event.toolName, args: event.args, status: "running" }
               : entry,
           ),
         };
       }
+      // 跨轮复用同一 provider 调用 id 时生成新的显示身份，避免覆盖旧卡片。
+      const id = toolDisplayId(state.entries, event.toolCallId);
       return {
         ...state,
         status: "tool",
         entries: [
           ...state.entries,
-          {
-            kind: "tool",
-            id: event.toolCallId,
-            name: event.toolName,
-            args: event.args,
-            status: "running",
-          },
+          { kind: "tool", id, toolCallId: event.toolCallId, name: event.toolName, args: event.args, status: "running" },
         ],
       };
     }
 
     case "tool_execution_update": {
+      const index = runningToolIndex(state.entries, event.toolCallId);
+      if (index < 0) return state;
       return {
         ...state,
-        entries: replaceEntry(state.entries, event.toolCallId, (entry) =>
-          entry.kind === "tool"
+        entries: state.entries.map((entry, i) =>
+          i === index && isToolEntry(entry)
             ? {
                 ...entry,
                 args: entry.args ?? event.args,
@@ -337,8 +354,14 @@ export function applyTimelineEvent(state: TimelineState, event: AgentEvent): Tim
     }
 
     case "tool_execution_end": {
-      const hasEntry = state.entries.some((entry) => entry.kind === "tool" && entry.id === event.toolCallId);
-      if (!hasEntry) {
+      const index = runningToolIndex(state.entries, event.toolCallId);
+      if (index < 0) {
+        // 没有在途卡片：已完成卡片再次收到 end 属重复事件，保持幂等不再追加。
+        const alreadyDone = state.entries.some(
+          (e) => isToolEntry(e) && (e.toolCallId ?? e.id) === event.toolCallId && e.status !== "running",
+        );
+        if (alreadyDone) return state;
+        const id = toolDisplayId(state.entries, event.toolCallId);
         return {
           ...state,
           status: "streaming",
@@ -346,7 +369,8 @@ export function applyTimelineEvent(state: TimelineState, event: AgentEvent): Tim
             ...state.entries,
             {
               kind: "tool",
-              id: event.toolCallId,
+              id,
+              toolCallId: event.toolCallId,
               name: event.toolName,
               args: {},
               status: event.isError ? "error" : "done",
@@ -359,8 +383,8 @@ export function applyTimelineEvent(state: TimelineState, event: AgentEvent): Tim
       return {
         ...state,
         status: "streaming",
-        entries: replaceEntry(state.entries, event.toolCallId, (entry) =>
-          entry.kind === "tool"
+        entries: state.entries.map((entry, i) =>
+          i === index && isToolEntry(entry)
             ? {
                 ...entry,
                 name: entry.name.length > 0 ? entry.name : event.toolName,
