@@ -254,8 +254,11 @@ export function ZetaApp(props: ZetaAppProps) {
           setSelectorOpen("theme");
         }
         return true;
-      case "model":
-        if (rest.length > 0 && (props.models ?? []).includes(rest)) {
+      case "model": {
+        // 优先从动态发现的 modelList 选择，兼容旧宿主只传 models 的情况。
+        const known = (props.modelList ?? []).map((option) => option.value);
+        const candidates = known.length > 0 ? known : (props.models ?? []);
+        if (rest.length > 0 && candidates.includes(rest)) {
           setActiveModel(rest);
           props.onModelChange?.(rest);
           notify(`model: ${rest}`);
@@ -263,6 +266,7 @@ export function ZetaApp(props: ZetaAppProps) {
           setSelectorOpen("model");
         }
         return true;
+      }
       case "settings":
         setSelectorOpen("settings");
         return true;
@@ -293,7 +297,7 @@ export function ZetaApp(props: ZetaAppProps) {
   keymap.register({ combo: "escape", action: "abort", layer: "app" });
   keymap.register({ combo: "ctrl+d", action: "exit", layer: "app" });
   keymap.register({ combo: "ctrl+l", action: "model-selector", layer: "app" });
-  keymap.register({ combo: "ctrl+k", action: "connect", layer: "app" });
+  // Ctrl+K 归编辑器 kill-line 使用；连接改由 /connect 命令打开，避免快捷键冲突。
   keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
   keymap.register({ combo: "ctrl+o", action: "toggle-tools", layer: "tui" });
@@ -368,12 +372,7 @@ export function ZetaApp(props: ZetaAppProps) {
       setSelectorOpen((kind) => (kind === "model" ? undefined : "model"));
       return;
     }
-    if (action === "connect") {
-      key.preventDefault();
-      key.stopPropagation();
-      setSelectorOpen((kind) => (kind === "connect" ? undefined : "connect"));
-      return;
-    }
+    // 连接对话框统一由 /connect 命令打开，不再占用 Ctrl+K。
   });
 
   return (
@@ -580,17 +579,23 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     return options.onSubmit?.(text);
   };
 
-  const exit = (): void => {
+  const cleanup = (): void => {
     if (destroyed) return;
     destroyed = true;
-    try {
-      releaseOsc?.();
-      signals?.dispose();
-      renderer.destroy();
-    } finally {
-      resolveClosed();
-    }
+    releaseOsc?.();
+    signals?.dispose();
+    resolveClosed();
   };
+
+  const exit = (): void => {
+    if (destroyed) return;
+    cleanup();
+    renderer.destroy();
+  };
+
+  // 渲染器自行关闭（原生会话失败/退出信号）时也走同一收尾路径，
+  // 避免宿主 waitForExit() 永久挂起。
+  void renderer.closed.then(cleanup, cleanup);
 
   try {
     await openTuiRender(

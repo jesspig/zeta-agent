@@ -45,13 +45,18 @@ test("模型选择器多列展示名称/上下文/价格", async () => {
   }
 });
 
-test("右键调高思考强度并触发回调", async () => {
+test("右键调高思考强度先暂存显示，确认模型后才提交", async () => {
   const { setup, effort } = await renderPicker();
   try {
     await setup.renderOnce();
     expect(effort()).toBe("medium");
     setup.mockInput.pressArrow("right");
     await setup.waitForFrame((frame) => frame.includes("Extra High"));
+    // 仅展示变化，宿主状态尚未提交
+    expect(effort()).toBe("medium");
+    // Enter 确认后提交
+    setup.mockInput.pressEnter();
+    await new Promise((r) => setTimeout(r, 30));
     expect(effort()).toBe("xhigh");
   } finally {
     setup.renderer.destroy();

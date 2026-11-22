@@ -52,8 +52,12 @@ export function ConnectDialog(props: ConnectDialogProps) {
       setCurrent(current().slice(0, -1));
       return;
     }
-    if (name.length === 1 && !event.ctrl && !event.meta) {
-      setCurrent(current() + name);
+    // 优先使用保留原始文本的 sequence（传统键盘路径下 name 会被规范化为小写），
+    // 仅在 sequence 不是单字符打印文本时回退到 name，避免丢失凭据大小写。
+    const typed = event.sequence;
+    const character = typeof typed === "string" && typed.length === 1 ? typed : name;
+    if (character.length === 1 && !event.ctrl && !event.meta) {
+      setCurrent(current() + character);
     }
   });
 

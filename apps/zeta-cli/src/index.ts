@@ -34,7 +34,7 @@ const HELP = [
   "数据目录: ~/.zeta-agent/（当前仅内存态，持久化后续接入）",
   "",
   "模型与连接:",
-  "  TUI 内按 /connect（或 Ctrl+K）现场输入 API Base URL 与 Key（仅内存，不落盘），",
+  "  TUI 内按 /connect 现场输入 API Base URL 与 Key（仅内存，不落盘），",
   "  连接后自动从 {baseUrl}/models 拉取真实模型列表；模型的价格/上下文/多模态",
   "  等元数据来自内置 models.dev 目录（官方实验室去重数据）。无连接则不显示模型。",
   "  环境变量（headless 与 TUI 通用）: ZETA_BASE_URL / ZETA_API_KEY / ZETA_MODEL。",

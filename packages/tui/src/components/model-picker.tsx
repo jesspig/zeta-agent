@@ -46,6 +46,8 @@ export function ModelPicker(props: ModelPickerProps) {
   const [cursor, setCursor] = createSignal(0);
   const [scrollTop, setScrollTop] = createSignal(0);
   const [group, setGroup] = createSignal<string>("All");
+  // 档位先暂存，只有确认模型时才提交给宿主；取消或 Esc 不落地。
+  const [draftEffort, setDraftEffort] = createSignal<string | undefined>(props.effort);
   const width = createMemo(() => clampWidth(Math.max(MIN_WIDTH, dimensions().width - 4), dimensions().width));
   const height = createMemo(() => clampHeight(MAX_VISIBLE + 3, dimensions().height));
 
@@ -76,7 +78,7 @@ export function ModelPicker(props: ModelPickerProps) {
 
   const activeEffortLabel = (model: RuntimeModelOption): string => {
     if (model.effort === undefined || model.effort.length === 0) return "-";
-    return effortLabel(props.effort ?? model.effort[0]!);
+    return effortLabel(draftEffort() ?? model.effort[0]!);
   };
 
   const move = (delta: number): void => {
@@ -93,10 +95,10 @@ export function ModelPicker(props: ModelPickerProps) {
     const model = selected();
     const levels = model?.effort ?? [];
     if (levels.length === 0) return;
-    const currentEffort = props.effort ?? levels[0]!;
+    const currentEffort = draftEffort() ?? levels[0]!;
     const index = levels.indexOf(currentEffort);
     const next = Math.min(Math.max(0, (index < 0 ? 0 : index) + delta), levels.length - 1);
-    props.onEffort(levels[next]!);
+    setDraftEffort(levels[next]!);
   };
 
   const keymap = createKeymap();
@@ -143,7 +145,12 @@ export function ModelPicker(props: ModelPickerProps) {
       key.preventDefault();
       key.stopPropagation();
       const model = selected();
-      if (model !== undefined) props.onSelect(model.value);
+      if (model !== undefined) {
+        // 确认时一并提交暂存的档位；模型不支持档位时不提交。
+        const draft = draftEffort();
+        if (draft !== undefined && (model.effort ?? []).includes(draft)) props.onEffort(draft);
+        props.onSelect(model.value);
+      }
       return;
     }
     if (action === "cancel") {
@@ -185,7 +192,7 @@ export function ModelPicker(props: ModelPickerProps) {
 
   const row = (model: RuntimeModelOption): string => {
     const levels = model.effort ?? [];
-    const bar = levels.length > 0 ? effortBar(levels, props.effort ?? levels[0]!) : "-";
+    const bar = levels.length > 0 ? effortBar(levels, draftEffort() ?? levels[0]!) : "-";
     return (
       `${graphemeSafeTruncate(model.name ?? model.value, nameWidth()).padEnd(nameWidth())} ` +
       `${graphemeSafeTruncate(bar, effortWidth()).padEnd(effortWidth())} ` +
