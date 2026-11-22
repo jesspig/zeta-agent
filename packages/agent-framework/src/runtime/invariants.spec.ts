@@ -59,8 +59,13 @@ interface RuntimeOptions {
 function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
   const stream = createEventStream();
   const order: string[] = [];
+  const startCallIds: string[] = [];
+  const endCallIds: string[] = [];
   stream.subscribe((event: AgentEvent) => {
     order.push(event.type);
+    // tool_execution_start 按 toolCalls 源码顺序 emit；end 按结果完成顺序 emit。
+    if (event.type === "tool_execution_start") startCallIds.push(event.toolCallId);
+    if (event.type === "tool_execution_end") endCallIds.push(event.toolCallId);
   });
   const inbox = createInbox();
   const response: AssistantResult = {
@@ -102,6 +107,8 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
     stream,
     inbox,
     order,
+    startCallIds,
+    endCallIds,
     getRequestCount: () => requestCount,
     getStreamCount: () => streamCount,
   };
@@ -222,22 +229,25 @@ const CHECKS: Record<number, (mode: "legacy" | "plugin") => void | Promise<void>
       { id: "c1", name: "tool", args: {} },
       { id: "c2", name: "tool", args: {} },
     ];
+    // 结果以反序返回：c2 先完成、c1 后完成，与 toolCalls 源码顺序相反。
     const results: ToolResult[] = [
       { callId: "c2", message: { role: "toolResult", content: "second" } },
       { callId: "c1", message: { role: "toolResult", content: "first" } },
     ];
-    const { runtime, order } = makeRuntime(mode, {
+    const { runtime, startCallIds, endCallIds } = makeRuntime(mode, {
       response: { toolCalls: calls, stopReason: "stop" },
       toolResults: results,
+      // 单轮结束，避免 continue 语义下重复批次污染顺序探针。
+      ...(mode === "legacy" ? { finishTurnLegacy: () => ({ action: "end" as const }) } : {}),
     });
     await runLoop(runtime);
-    const endIds = order.filter((e) => e === "message_end");
-    // 两条 assistant/tool message_end：assistant 1 条 + toolResult 2 条 = 3 条。
-    expect(endIds.length).toBeGreaterThanOrEqual(3);
-    // 事件完成顺序（tool_execution_end 的 callId）与结果数组解耦由顺序数组体现。
-    // continue 语义下会进入下一轮，因此只断言首批工具事件存在且顺序稳定。
-    expect(order.filter((e) => e === "tool_execution_end").length).toBeGreaterThanOrEqual(2);
-    expect(order.indexOf("agent_end")).toBe(order.length - 1);
+    // §13 #2：tool_execution_start 按源码顺序，tool_execution_end 按完成顺序（反序）。
+    expect(startCallIds).toEqual(["c1", "c2"]);
+    expect(endCallIds).toEqual(["c2", "c1"]);
+    // 哨兵：只有真正观察到"完成顺序与源码顺序相反"才为真，status-quo 的 >=2 数量断言无法区分。
+    const reverseOrderObserved =
+      startCallIds.join(",") === "c1,c2" && endCallIds.join(",") === "c2,c1";
+    expect(reverseOrderObserved).toBe(true);
   },
   // #4 {action:"end"} 不轮询队列、不 prepareNextTurn、不清队列。
   4: async (mode) => {
