@@ -88,8 +88,11 @@ export function createExtensionLoader(): ExtensionLoader {
   return {
     async load(paths) {
       generation += 1;
+      const gen = generation;
       registry = [...paths];
       const result = await evaluateAll(registry);
+      // 旧操作晚完成时不得覆盖更新的快照。
+      if (gen !== generation) return { entries, failures, generation };
       entries = result.entries;
       failures = result.failures;
       return { entries, failures, generation };
@@ -101,7 +104,9 @@ export function createExtensionLoader(): ExtensionLoader {
         return { entries, failures, generation };
       }
       generation += 1;
+      const gen = generation;
       const result = await evaluateAll(registry);
+      if (gen !== generation) return { entries, failures, generation };
       entries = result.entries;
       failures = result.failures;
       return { entries, failures, generation };
