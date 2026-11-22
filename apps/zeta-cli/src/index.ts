@@ -4,8 +4,9 @@ import { join } from "node:path";
 import {
   createAgent,
   createCommandRegistry,
-  createModelRegistry,
   createOpenAiStreamFn,
+  decorateModels,
+  fetchModelIds,
   MODES,
   parseCommand,
   type Agent,
@@ -32,11 +33,12 @@ const HELP = [
   "",
   "数据目录: ~/.zeta-agent/（当前仅内存态，持久化后续接入）",
   "",
-  "模型配置（环境变量，headless 与 TUI 通用）:",
-  "  ZETA_BASE_URL   OpenAI 兼容 API 基址，如 https://host/v1",
-  "  ZETA_API_KEY    Bearer 令牌",
-  "  ZETA_MODEL      模型名，如 provider/model",
-  "  三项齐全时用真实模型；否则回退 echo（无网络）。密钥勿写入仓库。",
+  "模型与连接:",
+  "  TUI 内按 /connect（或 Ctrl+K）现场输入 API Base URL 与 Key（仅内存，不落盘），",
+  "  连接后自动从 {baseUrl}/models 拉取真实模型列表；模型的价格/上下文/多模态",
+  "  等元数据来自内置 models.dev 目录（官方实验室去重数据）。无连接则不显示模型。",
+  "  环境变量（headless 与 TUI 通用）: ZETA_BASE_URL / ZETA_API_KEY / ZETA_MODEL。",
+  "  未配置连接时回退 echo（无网络）。密钥勿写入仓库。",
 ].join("\n");
 
 function echoStream(): AgentStreamFn {
@@ -46,44 +48,57 @@ function echoStream(): AgentStreamFn {
   };
 }
 
+interface Connection {
+  readonly baseUrl: string;
+  readonly apiKey: string;
+}
+
 interface AgentBundle {
   readonly agent: Agent;
   readonly model: string;
+  /** 已配置时才有模型；未配置 API/Key 时为空（不显示任何模型）。 */
   readonly models: readonly string[];
+  readonly connection: Connection | undefined;
+  readonly initialModel: string | undefined;
   setModel(model: string): void;
+  /** 设置内存连接配置（不落盘）。 */
+  connect(baseUrl: string, apiKey: string): void;
 }
 
 function makeAgent(): AgentBundle {
   const resolution = resolveModelConfig(process.env);
+  let connection: Connection | undefined =
+    resolution.kind === "configured"
+      ? { baseUrl: resolution.config.baseUrl, apiKey: resolution.config.apiKey }
+      : undefined;
   let modelName = resolution.kind === "configured" ? resolution.config.model : "echo";
-  let streamFn: AgentStreamFn;
-  if (resolution.kind === "configured") {
-    const config = resolution.config;
-    // 每次请求按当前模型构造，使 /model 切换能立即生效。
-    streamFn = (request) => createOpenAiStreamFn({ ...config, model: modelName })(request);
-  } else {
-    process.stderr.write(
-      `zeta: 模型配置缺失 ${resolution.missing.join(", ")}，回退 echo（无网络）。设置这三项以连接真实模型。\n`,
-    );
-    streamFn = echoStream();
-  }
+  const streamFn: AgentStreamFn = (request) => {
+    if (connection !== undefined) {
+      return createOpenAiStreamFn({ ...connection, model: modelName })(request);
+    }
+    return echoStream()(request);
+  };
   const agent = createAgent({
     streamFn,
-    // 文件工具只在工作目录内可用；否则内置 read/write/edit 会一律拒绝。
     allowedDirectories: [process.cwd()],
   });
-  const catalog = createModelRegistry().list().map((model) => model.id);
-  const models = resolution.kind === "configured"
-    ? [...new Set([modelName, ...catalog])].slice(0, 24)
-    : ["echo"];
   return {
     agent,
     get model() {
       return modelName;
     },
-    models,
+    // 未配置 API/Key 时不显示任何模型。
+    models: [],
+    get connection() {
+      return connection;
+    },
+    initialModel: resolution.kind === "configured" ? modelName : undefined,
     setModel(next: string) {
       modelName = next;
+    },
+    connect(baseUrl: string, apiKey: string) {
+      connection = { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey };
+      modelName = modelName === "echo" ? "" : modelName;
     },
   };
 }
@@ -108,6 +123,15 @@ async function runTui(args: CliArgs): Promise<number> {
     tui?.appendMessage({ role: "notice", content: text });
   };
 
+  registry.register({
+    name: "connect",
+    description: "设置 API Base URL 与 Key（仅内存）",
+    category: "session",
+    handler: () => {
+      // 实际交互由 TUI 的 /connect 本地命令打开连接对话框处理。
+      notice("请用 /connect 打开连接对话框，输入 Base URL 与 API Key");
+    },
+  });
   registry.register({
     name: "session",
     description: "查看会话信息",
@@ -139,6 +163,32 @@ async function runTui(args: CliArgs): Promise<number> {
 
   const hostCommands = new Set(["session", "compact", "export"]);
 
+  /** 设置内存连接并拉取 /v1/models；失败则报错且不显示任何模型。 */
+  const applyConnection = async (baseUrl: string, apiKey: string): Promise<void> => {
+    notice(`连接 ${baseUrl}：正在拉取模型列表…`);
+    try {
+      const ids = await fetchModelIds({ baseUrl, apiKey });
+      bundle.connect(baseUrl, apiKey);
+      const options = decorateModels(ids);
+      tui?.setModelOptions(options);
+      const first = ids[0];
+      if (first !== undefined && bundle.model === "echo") {
+        bundle.setModel(first);
+        tui?.setModel(first);
+      } else {
+        tui?.setModel(bundle.model);
+      }
+      notice(`已连接：${ids.length} 个模型（/model 选择，元数据来自 models.dev）`);
+    } catch (error) {
+      notice(`连接失败：${(error as Error).message}；请用 /connect 重新设置 API 与 Key`);
+    }
+  };
+
+  // 若启动时已配置环境变量，尝试拉取真实模型列表。
+  if (bundle.connection !== undefined) {
+    void applyConnection(bundle.connection.baseUrl, bundle.connection.apiKey);
+  }
+
   const handleCommand = async (text: string): Promise<void> => {
     if (!text.startsWith("/")) {
       if (agent.state.isStreaming || agent.state.pendingToolCalls.size > 0) {
@@ -166,6 +216,18 @@ async function runTui(args: CliArgs): Promise<number> {
       model: bundle.model,
       models: bundle.models,
       onModelChange: (model) => bundle.setModel(model),
+      onConnect: (url, key) => {
+        void applyConnection(url, key);
+      },
+      connection: {
+        url: bundle.connection?.baseUrl,
+        // 不把真实 key 传给对话框做回显（仅 URL 兜底）。
+      },
+      reasoningEffort: agent.reasoningEffort,
+      onEffortChange: (effort) => {
+        agent.setReasoningEffort(effort);
+        notice(`思考强度: ${effort}`);
+      },
       commandCatalog: registry.list().map((command) => ({
         name: command.name,
         description: command.description,
