@@ -11,6 +11,21 @@ export interface RuntimeMessage {
 export type CommandHandler = (command: string) => void | Promise<void>;
 export type TuiThemeName = "system" | "dark" | "light";
 
+/** 模型选项：分列元数据供多列对齐展示。 */
+export interface RuntimeModelOption {
+  readonly value: string;
+  readonly name?: string;
+  readonly context?: string;
+  readonly price?: string;
+  readonly effort?: readonly string[];
+  readonly reasoning?: boolean;
+  readonly vision?: boolean;
+  readonly group?: string;
+  /** 兼容旧调用：单行描述。 */
+  readonly label?: string;
+  readonly description?: string;
+}
+
 export interface RuntimeResources {
   readonly models?: readonly string[];
   readonly prompts?: readonly string[];
@@ -43,11 +58,24 @@ export interface RuntimeTuiOptions {
   readonly models?: readonly string[];
   /** 选择模型后回调（宿主据此切换实际 streamFn）。 */
   readonly onModelChange?: (model: string) => void;
+  /** 连接对话框提交回调（宿主设置连接并拉取模型）。 */
+  readonly onConnect?: (url: string, key: string) => void;
+  /** 连接对话框初始值（环境变量兜底）。 */
+  readonly connection?: { readonly url?: string; readonly key?: string };
+  /** 思考强度档位与变更回调。 */
+  readonly reasoningEffort?: string;
+  readonly onEffortChange?: (effort: string) => void;
   readonly resources?: RuntimeResources;
 }
 
 export interface RuntimeTuiHandle {
   appendMessage(message: RuntimeMessage): void;
+  /** 异步刷新可选模型 id 列表（如拉取 /v1/models 成功后）。 */
+  setModels(models: readonly string[]): void;
+  /** 异步刷新带元数据的模型选项。 */
+  setModelOptions(options: readonly RuntimeModelOption[]): void;
+  /** 异步更新当前模型显示。 */
+  setModel(model: string): void;
   waitForExit(): Promise<void>;
   destroy(): Promise<void>;
   getSignals(): AgentSignals | undefined;
