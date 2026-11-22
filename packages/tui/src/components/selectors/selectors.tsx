@@ -43,9 +43,12 @@ export function SelectDialog(props: SelectDialogProps) {
   const dimensions = useTerminalDimensions();
   const [query, setQuery] = createSignal("");
   const [cursor, setCursor] = createSignal(0);
+  const [scrollTop, setScrollTop] = createSignal(0);
   const results = createMemo(() => filterOptions(props.options, query()));
   const width = createMemo(() => clampWidth(props.width ?? DEFAULT_WIDTH, dimensions().width));
   const height = createMemo(() => clampHeight(MAX_VISIBLE + 2, dimensions().height));
+  const visibleCount = createMemo(() => Math.max(1, Math.min(MAX_VISIBLE, height() - 4)));
+  const visible = createMemo(() => results().slice(scrollTop(), scrollTop() + visibleCount()));
   const maxLabelWidth = createMemo(() => Math.max(1, width() - 6));
   const hint = createMemo(() => "[↑↓] 选择  [Enter] 确认  [Esc] 取消");
 
@@ -61,16 +64,17 @@ export function SelectDialog(props: SelectDialogProps) {
     if (key.eventType === "release") return;
     const combo = key.ctrl ? `ctrl+${key.name}` : key.name;
     const action = keymap.resolve(combo)?.action;
-    if (action === "move-up") {
+    if (action === "move-up" || action === "move-down") {
       key.preventDefault();
       key.stopPropagation();
-      setCursor((value) => Math.max(0, value - 1));
-      return;
-    }
-    if (action === "move-down") {
-      key.preventDefault();
-      key.stopPropagation();
-      setCursor((value) => Math.min(Math.max(0, results().length - 1), value + 1));
+      const delta = action === "move-down" ? 1 : -1;
+      setCursor((value) => {
+        const next = Math.min(Math.max(0, results().length - 1), Math.max(0, value + delta));
+        const top = scrollTop();
+        if (next < top) setScrollTop(next);
+        else if (next >= top + visibleCount()) setScrollTop(next - visibleCount() + 1);
+        return next;
+      });
       return;
     }
     if (action === "confirm") {
@@ -91,6 +95,7 @@ export function SelectDialog(props: SelectDialogProps) {
       key.stopPropagation();
       setQuery((value) => value.slice(0, -1));
       setCursor(0);
+      setScrollTop(0);
       return;
     }
     if (key.name.length === 1 && !key.ctrl && !key.meta) {
@@ -98,6 +103,7 @@ export function SelectDialog(props: SelectDialogProps) {
       key.stopPropagation();
       setQuery((value) => value + key.name);
       setCursor(0);
+      setScrollTop(0);
     }
   });
 
@@ -113,12 +119,15 @@ export function SelectDialog(props: SelectDialogProps) {
       <text fg={theme.color("accent")}>
         {`> ${query() || (props.placeholder ?? "搜索…")}`}
       </text>
-      <For each={results().slice(0, MAX_VISIBLE)}>
-        {(option, index) => (
-          <text fg={index() === cursor() ? theme.color("accent") : theme.color("text")}>
-            {`${index() === cursor() ? "> " : "  "}${graphemeSafeTruncate(optionText(option), maxLabelWidth())}`}
-          </text>
-        )}
+      <For each={visible()}>
+        {(option, index) => {
+          const absolute = () => scrollTop() + index();
+          return (
+            <text fg={absolute() === cursor() ? theme.color("accent") : theme.color("text")}>
+              {`${absolute() === cursor() ? "> " : "  "}${graphemeSafeTruncate(optionText(option), maxLabelWidth())}`}
+            </text>
+          );
+        }}
       </For>
     </box>
   );

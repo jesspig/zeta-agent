@@ -18,17 +18,34 @@ export interface DeployHandle {
   readonly stop: Disposer;
 }
 
-function stableStringify(value: unknown): string {
+function stableStringify(value: unknown, seen: WeakSet<object> = new WeakSet()): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return JSON.stringify(value);
   }
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value instanceof Date) return `Date(${value.toISOString()})`;
+  if (value instanceof Map) {
+    const entries = [...value.entries()]
+      .map(([k, v]) => `${stableStringify(k, seen)}=>${stableStringify(v, seen)}`)
+      .sort();
+    return `Map{${entries.join(",")}}`;
+  }
+  if (value instanceof Set) {
+    const items = [...value.values()].map((v) => stableStringify(v, seen)).sort();
+    return `Set{${items.join(",")}}`;
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    return `[${value.map((v) => stableStringify(v, seen)).join(",")}]`;
+  }
   if (typeof value === "object") {
+    if (seen.has(value)) return "{Circular}";
+    seen.add(value);
     const record = value as Record<string, unknown>;
     const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key], seen)}`).join(",")}}`;
   }
   return JSON.stringify(String(value));
 }

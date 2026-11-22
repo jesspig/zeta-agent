@@ -162,7 +162,14 @@ export function resultToText(result: unknown): string {
   if (typeof record.replacements === "number") {
     return record.replacements === 0 ? "No replacements" : `${record.replacements} replacement${record.replacements === 1 ? "" : "s"}`;
   }
-  return JSON.stringify(record);
+  // 不可序列化（BigInt/循环引用等）时降级为占位字符串，保证工具卡渲染不抛错。
+  try {
+    const text = JSON.stringify(record);
+    if (typeof text === "string") return text;
+  } catch {
+    // 落到下面的占位。
+  }
+  return "[unserializable tool result]";
 }
 
 function clipped(lines: readonly string[], max: number, keep: "start" | "end", hint: string):
