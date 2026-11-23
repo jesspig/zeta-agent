@@ -93,9 +93,11 @@ export class Agent {
 }
 
 export interface AgentPlugin {
+  readonly kind: "AgentPlugin";
   readonly name: string;
   readonly version?: string;
-  install(api: AgentPluginApi): void | (() => void);  // 返回 disposer = 逆
+  readonly contributions: readonly PluginContribution[]; // 声明式装配正途：core 只读此数组
+  install(): Disposer;                                  // 生命周期 disposer，无参数（不接收 api）
 }
 
 export interface AgentPluginApi {
@@ -128,7 +130,9 @@ export interface Capabilities {
 type LayerState = 'active' | 'degraded' | 'unsupported' | 'disabled';
 ```
 
-> `defineServicePlugin`（security/observability 使用）是 `AgentPlugin` 的一个便利构造器：其 `install(api)` 收到的就是上面的 `AgentPluginApi`，通过 `api.capabilities()/onEffect()/addRedactor()` 接入；这些方法的默认实现为 no-op/`active`，由 `@zeta-agent/framework` 的对应组件（health/observability/security）在 facade 层提供。因此能力探测与观测既不需要插件深入内核，也能被 A21/A22 验证。
+> **契约对齐（以代码为准）**：实现见 `packages/agent-framework/src/plugins/types.ts` 与 `runtime/core.ts`。`AgentPlugin.install(): Disposer` **无参数**，只提供生命周期逆操作；`core.ts` 装配时**只遍历 `plugin.contributions`**（tool/hook 等声明式贡献），从不调用 `install`。因此**声明式 `contributions` 是装配正途**，`install()` 仅为生命周期 disposer 钩子；`AgentPluginApi` 是 `createAgent`/core 在装配时对外提供的 hook 表面，不由 `install` 接收。
+>
+> `defineServicePlugin`（security/observability 使用）是 `AgentPlugin` 的一个便利构造器：其产出声明式 `contributions`；`capabilities()/onEffect()/addRedactor()` 由上述 `AgentPluginApi` 提供，默认实现为 no-op/`active`，由 `@zeta-agent/framework` 的对应组件（health/observability/security）在 facade 层提供。因此能力探测与观测既不需要插件深入内核，也能被 A21/A22 验证。
 
 **每个注册都返回 disposer**——这是论文 revertible effect 的直接落地（[cordis-paper §4](../research/cordis-paper-theory.md#4-可撤销效应revertible-effects)）：插件卸载时，逆按 LIFO 撤销它的全部注册。若上层注入了 `ctx`，插件也可用 `ctx.effect` 把这些注册纳入 fiber 生命周期，实现 agent 插件的热重载。
 
@@ -245,6 +249,26 @@ async function* agentIterator(input: AgentInput, api: AgentPluginApi): EffectIte
 
 **注意**：上述顺序必须与 [pi-baseline §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时) 的 11 步逐字对应；任何改动都需要 §13 的等价测试。
 
+### 5.3 pi 11 步与 inbox/step 机制映射表
+
+§5.2 的 11 步是 pi agent-core 的**运行时顺序模型**；[目录时序图](./README.md#时序图一次-prompt-的完整链路) 的 `agent/pre-step`、`step/start`、`agent/turn-stopping`、`turn/end` 与 inbox 的 `nextTurn/nextStep` 双队列是**装配/调度模型**。两套模型的逐项对应关系如下（步骤编号同 [pi-baseline §4.3](../research/pi-baseline.md#4-earendil-workspi-agent-core极简-agent-运行时)）：
+
+| # | pi 11 步 | inbox / step 事件图对应机制 | loop.ts 实现（`RUN_LOOP_STEPS` + `AgentEvent`） |
+| --- | --- | --- | --- |
+| 1 | `prepareNextTurn(lastCompletedTurn)` → 再轮询 steering → `turn_start` | `inbox.steer()` 写 `nextTurn`、`inject()` 写 `nextStep`；`QueueMode="step"` 每轮只取一条；`agent/pre-step` waterfall（reject → `turn/end` 无 step，enter → `step/start`） | `prepareNextTurn`（仅 `lastTurn !== undefined` 时进入 step1）、`inbox.poll("nextTurn")`、`emit(turn_start)`；首轮的 `turn_start` 与初始轮询在循环前完成 |
+| 2 | `declareToolChanges` 产出待发消息 | `step/start` 之后的声明边界；工具/提示词插件的 `contributions` 在此进入 transcript | `declareToolChanges`、`message_start/message_end`（声明消息 + steering 消息） |
+| 3 | `prepareRequest`（此处不轮询队列） | 请求构造阶段，inbox 不参与 | `prepareRequest`、`getState().messages` 组装请求 |
+| 4 | `streamAssistantResponse` | 流式事件映射到 `message_*` | `streamAssistant`、`message_start/message_update/message_end` |
+| 5 | `error/aborted` 硬退出：`finishTurn` → `turn_end` → `agent_end` | `agent/turn-stopping` 的硬退出分支；`turn/end` 不可被 continue 推翻 | `hardExitCheck`、`turn_end`、`agent_end`，直接 return |
+| 6 | 提取 toolCalls；`length` 一律失败，否则 `executeToolCalls` | [目录活动图](./README.md#活动图工具流水线) 的 `tools/pre-execute → guard → execute → post-execute` | `executeToolCalls`、`toolPipeline.executeBatch`、`tool_execution_start/update/end` |
+| 7 | 构造 lastCompletedTurn → `finishTurn` → `turn_end` | toolResult 消息落盘；`agent/turn-stopping` 串行屏障 | `appendToolResultsAndFinishTurn`（完成通知与 transcript 顺序解耦）、`turn_end`、`lastTurn = turn` |
+| 8 | decision `end` → `agent_end` → return | `turn/end → 等下一条输入`（不轮询队列、不清队列） | `decisionEnd`、`emitAgentEnd`、return |
+| 9 | decision `continue` → 再轮询 steering | `agent/turn-stopping` 不拦截；续跑轮次由 inbox 决定 | `decisionContinue`、`explicitContinuation` 判定；下一轮 step1 再 `poll` |
+| 10 | 内层退出：followUp → pending；否则 explicitContinuation → 一次 context-only；否则 break | `inbox.followUp()` 写 `nextTurn`；`QueueMode="step"` 决定每轮取几条；外层 while 处理 follow-up | `outerFollowUpOrBreak`、`inbox.size("nextTurn")`、`pollFollowUp?.() ?? inbox.poll("nextTurn")`、break |
+| 11 | 统一 `emit agent_end` | `agent_end` 后 `waitForIdle` 等 listener 屏障（≠ idle） | `emitAgentEnd`（幂等 `ended` 门） |
+
+> **边界说明**：`agent/pre-step`、`step/start`、`agent/turn-stopping`、`turn/end` 是框架事件组件（cordis 风格）的内部 hook 名，**不是** `AgentEvent` 的变体；§3.1 的 10 种 `AgentEvent` 是 loop 对外发出的运行时事件。`nextTurn/nextStep` 双队列只决定"何时把哪条消息交给下一轮"，不决定流的顺序——顺序由上表 11 步固定。§5.2 伪代码与本表任一处改动都需 §13 等价测试。
+
 
 ## 6 取消与中断
 
@@ -284,7 +308,9 @@ classDiagram
     }
     class AgentPlugin {
       +name: string
-      +install(api) Disposer
+      +kind: "AgentPlugin"
+      +contributions: PluginContribution[]
+      +install() Disposer
     }
     class AgentPluginApi {
       +addBeforeToolCall(fn, opts) Disposer
@@ -294,7 +320,7 @@ classDiagram
     Agent --> AgentState
     Agent --> AgentPluginManager
     AgentPluginManager o-- AgentPlugin
-    AgentPlugin --> AgentPluginApi : install
+    AgentPlugin o-- PluginContribution : contributions（声明式装配正途）
     Agent --> AgentEvent : emits
     AgentState o-- AgentTool
 ```
