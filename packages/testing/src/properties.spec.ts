@@ -15,6 +15,11 @@ import {
   type Disposable,
   type ResidueContext,
 } from "./assertions";
+import {
+  createEffectBridge,
+  setActiveEffectBridge,
+  type EffectMeta,
+} from "../../components/observability/src/index";
 
 const SEEDS = [0x1a2b3c4d, 0x5eed1234, 0x0badf00d, 0x12345678, 0xdecafbad, 0x9e3779b9] as const;
 
@@ -388,5 +393,55 @@ describe("A5 guard 撤回延迟", () => {
         expect(expired).toContain(CAPABILITY_EXPIRED);
       });
     }
+  });
+});
+
+describe("A21 观测开关一致性", () => {
+  function effectSystem(): FiberSystem {
+    const system = new FiberSystem();
+    const svc = key("a21-svc");
+    system.create({ uid: "a21-provider", inject: [], provide: [svc] });
+    system.create({
+      uid: "a21-consumer",
+      inject: [svc],
+      provide: [],
+      apply: (ctx) => ctx.effect(() => () => {}, "a21-child"),
+    });
+    return system;
+  }
+
+  test("有无 effect 观测时汇合状态一致，且仅在开启时向 bridge 发 meta", async () => {
+    const bridge = createEffectBridge("run-a21");
+    const metas: EffectMeta[] = [];
+    const stop = bridge.onEffect((meta) => metas.push(meta));
+    const orders = [
+      ["a21-provider", "a21-consumer"],
+      ["a21-consumer", "a21-provider"],
+    ];
+    const results = new Map<string, unknown>();
+
+    for (const observed of [false, true]) {
+      const restore = setActiveEffectBridge(observed ? bridge : null);
+      try {
+        for (const order of orders) {
+          results.set(`${observed}:${order.join(",")}`, await settleInOrder(effectSystem(), order));
+        }
+      } finally {
+        restore();
+      }
+    }
+    stop();
+
+    for (const observed of [false, true]) {
+      replayConfig(orders, (order) => results.get(`${observed}:${order.join(",")}`));
+    }
+    expect(results.get(`false:${orders[0]!.join(",")}`)).toEqual(
+      results.get(`true:${orders[0]!.join(",")}`)
+    );
+    expect(metas.length).toBeGreaterThan(0);
+    expect(metas.every((meta) => meta.label === "a21-child")).toBe(true);
+    expect(metas[0]!.runId).toBe("run-a21");
+    expect(metas[0]!.fiberUid).toBe("a21-consumer");
+    expect(Array.isArray(metas[0]!.children)).toBe(true);
   });
 });

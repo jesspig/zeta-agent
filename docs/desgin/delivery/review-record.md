@@ -37,7 +37,7 @@
 
 | ID | 遗留 | 处理建议 | 优先级 |
 | --- | --- | --- | --- |
-| P1-4 | §5.2 pi 兼容 11 步伪代码 vs inbox+step 事件图两套 loop 模型未映射 | 阶段 1 落地时补映射表（inbox 组件 ↔ pi 10 事件） | P1 |
+| P1-4 | ~~§5.2 pi 兼容 11 步伪代码 vs inbox+step 事件图两套 loop 模型未映射~~ **已关单** | 已补逐项映射表：[runtime.md §5.3](../agent-framework/runtime.md#53-pi-11-步与-inboxstep-机制映射表)（pi 11 步 ↔ inbox 双队列 / step 内部 hook / `AgentEvent`）；步骤 1 已条件化并由 `loop.spec.ts` 的 onStep 顺序断言覆盖 | P1（已关单） |
 | P1-13 | B0-B3/C0-C3/阶段 0-6 四套批次无映射；部分 DSH 建议（AgentHandle/surface/ConversationNode/boot graph）未落地正文 | 建"建议 ID → 阶段 → 目标文档"映射表；未落地项标延期 | P1 |
 | P2-1 | 6 个新文档模板与其余 20 个不统一 | 统一元信息块 + 文档关系表；overview/README 的重复 UML 改引用 | P2 |
 | P2-2 | 研究文档建议表残留 03/04/05 旧编号 | 替换为文档名+锚点 | P2 |

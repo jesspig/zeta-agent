@@ -53,6 +53,8 @@ export interface Component<
   readonly version?: string;
   readonly inject: D;
   readonly provide: R;
+  /** 可接受的 coeffect 版本：键为键描述（或键名），值为可接受的版本字符串。 */
+  readonly accepts?: Record<string, string>;
   apply(ctx: FiberContext, config: P): Effect | Promise<Effect>;
 }
 

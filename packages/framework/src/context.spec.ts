@@ -3,12 +3,15 @@ import type { CoeffectKey } from "./types";
 import {
   contribute,
   createContext,
+  createView,
   defineComponent,
   defineKey,
   defineRegistry,
   notify,
+  on,
   resolveRegistry,
   use,
+  VERSION_MISMATCH,
 } from "./index";
 
 describe("framework facade 运行时", () => {
@@ -155,5 +158,139 @@ describe("framework facade 运行时", () => {
     expect(forward).toEqual(reversed);
     expect(forward.values).toEqual(["L", "R"]);
     expect(forward.states).toEqual(["ACTIVE", "ACTIVE"]);
+  });
+
+  test("G02/G04 provider 撤销后经 production committed view 抛 CAPABILITY_EXPIRED", async () => {
+    const cap = defineKey<string>("@zeta-agent/context-test", "revocable-cap");
+    const ctx = createContext();
+    const revoke = ctx.provide(cap, "secret");
+    expect(ctx.get(cap)).toBe("secret");
+
+    revoke();
+    // STORE 已恢复为空；只能由 production 写入的 node.committed 提供 Impl，
+    // 其 check 因 provider 撤销返回 false → CAPABILITY_EXPIRED（而非 INACTIVE_ACCESS）。
+    expect(() => ctx.get(cap)).toThrow("CAPABILITY_EXPIRED");
+    await ctx.dispose();
+  });
+
+  test("G04 facade Proxy 门禁：已声明键按 committed view 解析，未声明键被拒", async () => {
+    const declared = defineKey<string>("@zeta-agent/context-test", "proxy-declared");
+    const undeclared = defineKey<string>("@zeta-agent/context-test", "proxy-undeclared");
+    const ctx = createContext();
+    ctx.provide(declared, "visible");
+
+    const view = createView<{ [k: symbol]: unknown }>(ctx);
+    expect(view[declared.symbol]).toBe("visible");
+    expect(() => view[undeclared.symbol]).toThrow("UNDECLARED_ACCESS");
+
+    const viaCtx = ctx.proxy<{ [k: symbol]: unknown }>();
+    expect(viaCtx[declared.symbol]).toBe("visible");
+    await ctx.dispose();
+  });
+
+  test("G01 defineComponent 保留 accepts 版本映射", () => {
+    const component = defineComponent<unknown>({
+      name: "versioned",
+      accepts: { "@zeta-agent/context-test:svc": "1.0" },
+      apply: () => () => {},
+    });
+    expect(component.accepts).toEqual({ "@zeta-agent/context-test:svc": "1.0" });
+  });
+
+  test("G01 accepts 匹配时消费者 ACTIVE，不匹配时 FAILED 且不执行 apply", async () => {
+    const svc = defineKey<string>("@zeta-agent/context-test", "accepts-svc");
+    const provider = defineComponent<string>({
+      name: "provider-v1",
+      version: "1.0",
+      inject: [],
+      provide: [svc],
+      apply: () => () => {},
+    });
+    const applied: string[] = [];
+    const consumer = (accepted: string) =>
+      defineComponent({
+        name: `consumer-${accepted}`,
+        inject: [svc],
+        provide: [],
+        accepts: { [svc.symbol.description ?? svc.name]: accepted },
+        apply: () => {
+          applied.push(accepted);
+          return () => {};
+        },
+      });
+
+    const ctxOk = createContext();
+    ctxOk.use(provider);
+    const ok = ctxOk.use(consumer("1.0"));
+    await ctxOk.notify();
+    await ok.ready;
+    expect(ok.state.kind).toBe("ACTIVE");
+    expect(applied).toEqual(["1.0"]);
+    await ctxOk.dispose();
+
+    const ctxBad = createContext();
+    ctxBad.use(provider);
+    const bad = ctxBad.use(consumer("2.0"));
+    await ctxBad.notify();
+    await bad.ready;
+    expect(bad.state.kind).toBe("FAILED");
+    if (bad.state.kind === "FAILED") {
+      expect((bad.state.error as Error).message).toContain(VERSION_MISMATCH);
+    }
+    expect(applied).toEqual(["1.0"]);
+    await ctxBad.dispose();
+  });
+
+  test("G01 accepts 支持短键名，未声明 accepts 的消费者不做校验", async () => {
+    const svc = defineKey<string>("@zeta-agent/context-test", "accepts-short-name");
+    const ctx = createContext();
+    ctx.use(
+      defineComponent({
+        name: "provider-v3",
+        version: "3",
+        inject: [],
+        provide: [svc],
+        apply: () => () => {},
+      })
+    );
+    const applied: string[] = [];
+    const byShortName = ctx.use(
+      defineComponent({
+        name: "consumer-short",
+        inject: [svc],
+        provide: [],
+        accepts: { [svc.name]: "3" },
+        apply: () => {
+          applied.push("short");
+          return () => {};
+        },
+      })
+    );
+    const unversioned = ctx.use(
+      defineComponent({
+        name: "consumer-none",
+        inject: [svc],
+        provide: [],
+        apply: () => {
+          applied.push("none");
+          return () => {};
+        },
+      })
+    );
+    await ctx.notify();
+    expect(byShortName.state.kind).toBe("ACTIVE");
+    expect(unversioned.state.kind).toBe("ACTIVE");
+    expect(applied.sort()).toEqual(["none", "short"]);
+    await ctx.dispose();
+  });
+
+  test("G08 facade 导出 on：函数式入口等价于 ctx.on", () => {
+    const ctx = createContext();
+    const seen: unknown[] = [];
+    const off = on(ctx, "facade-on", (payload) => seen.push(payload));
+    ctx.emit("facade-on", 1);
+    off();
+    ctx.emit("facade-on", 2);
+    expect(seen).toEqual([1]);
   });
 });

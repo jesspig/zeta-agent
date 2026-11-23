@@ -9,7 +9,7 @@ import type {
   DecisionWaterfall,
 } from "./decision";
 import { nextAction } from "./decision";
-import type { Inbox } from "./inbox";
+import type { Inbox, InboxMessage } from "./inbox";
 import type { ToolPipeline } from "../tools/pipeline";
 import type {
   LoopToolCall,
@@ -119,11 +119,23 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
     await emit({ type: "agent_end", messages: runtime.getState().messages });
   }
 
+  // pi 基线：首轮 turn_start 与初始 steering 轮询发生在 runLoop 之前
+  // （runAgentLoop 前置 emit + 进入循环前的 getSteeringMessages）；
+  // step1（prepareNextTurn → 再轮询 steering → turn_start）只在存在
+  // lastCompletedTurn 的后续轮次进入，避免首轮误触发与重复 turn_start。
+  // 首轮保留一次 prepareNextTurn?.(undefined) 兼容调用：A6 #4 既有断言要求
+  // 每个 prompt 至少触发一次 hook；该调用不属于 step1（不记录 onStep、不轮询、不发 turn_start）。
+  runtime.prepareNextTurn?.(undefined);
+  await emit({ type: "turn_start" });
+  let steering: readonly InboxMessage[] = inbox.poll("nextTurn");
+
   while (true) {
-    runtime.onStep?.("prepareNextTurn");
-    runtime.prepareNextTurn?.(lastTurn);
-    const steering = inbox.poll("nextTurn");
-    await emit({ type: "turn_start" });
+    if (lastTurn !== undefined) {
+      runtime.onStep?.("prepareNextTurn");
+      runtime.prepareNextTurn?.(lastTurn);
+      steering = inbox.poll("nextTurn");
+      await emit({ type: "turn_start" });
+    }
 
     runtime.onStep?.("declareToolChanges");
     const declared = runtime.declareToolChanges?.();

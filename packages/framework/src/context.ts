@@ -17,7 +17,9 @@ import {
   type EffectHost,
 } from "../../components/cordis/src/effect";
 import {
+  commit as reflectCommit,
   createNode,
+  createProxy,
   get as reflectGet,
   intercept as reflectIntercept,
   isolate as reflectIsolate,
@@ -75,6 +77,14 @@ export function defineKey<T = unknown>(
   };
 }
 
+/** accepts 版本不匹配：fiber 进入 FAILED，不把错版本数据喂给消费者。 */
+export const VERSION_MISMATCH = "VERSION_MISMATCH";
+
+/** accepts 的键支持完整键描述（@scope:name）与短键名两种写法。 */
+function acceptedVersion(accepts: Record<string, string>, key: CoeffectKey<any>): string | undefined {
+  return accepts[key.symbol.description ?? key.name] ?? accepts[key.name];
+}
+
 export interface ComponentSpec<
   P,
   D extends CoeffectKey<any>[] = CoeffectKey<any>[],
@@ -84,6 +94,7 @@ export interface ComponentSpec<
   readonly version?: string;
   readonly inject?: D;
   readonly provide?: R;
+  readonly accepts?: Record<string, string>;
   readonly apply: (ctx: FiberContext, config: P) => Effect | Promise<Effect>;
 }
 
@@ -98,6 +109,7 @@ export function defineComponent<
     version: spec.version,
     inject: (spec.inject ?? []) as D,
     provide: (spec.provide ?? []) as R,
+    ...(spec.accepts === undefined ? {} : { accepts: spec.accepts }),
     apply: (ctx, config) => spec.apply(ctx, config),
   };
 }
@@ -161,6 +173,8 @@ export interface Context extends FiberContext {
   emit(name: string, payload?: unknown): void;
   notify(keys?: readonly CoeffectKey<any>[]): Promise<void>;
   readonly dispose: Disposer;
+  /** Proxy 门禁：symbol 属性按 committed view 解析，未声明访问抛 UNDECLARED_ACCESS。 */
+  readonly proxy: <T extends object>() => T;
 }
 
 interface Internals {
@@ -171,6 +185,8 @@ interface Internals {
   readonly providers: Map<symbol, Fiber>;
   readonly listeners: Map<string, Set<(payload: unknown) => void>>;
   readonly intercepted: Map<symbol, unknown>;
+  /** accepts 校验用的版本注册表：provider fiber 在 use 装配时登记其声明版本。 */
+  readonly providerVersions: Map<symbol, { uid: string; version?: string }>;
   readonly uidSeed: { value: number };
   /** 派生 context（isolate/intercept/组件 fiber）不自动注册 provider fiber。 */
   readonly registerProvider: boolean;
@@ -192,30 +208,44 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
 
   const get = <T>(key: CoeffectKey<T>): T => reflectGet(internals.node, key) as T;
 
+  /** Proxy 门禁入口：symbol 属性访问走 committed view 解析并强制声明检查。 */
+  const proxy = <T extends object>(): T => createProxy<T>(internals.node);
+
   const set = <T>(key: CoeffectKey<T>, value: T): Disposer => reflectSet(internals.node, key, value);
 
   const provide = <T>(key: CoeffectKey<T>, value: T): Disposer => {
     const restore = reflectSet(internals.node, key, value);
-    if (!internals.registerProvider) return restore;
+    // G04：production 也写入 node.committed，使 ctx.get 的 committed 分支真正可达；
+    // G02：check 由 provider 撤销态注入，撤销后读取抛 CAPABILITY_EXPIRED。
+    let revoked = false;
+    let dependents = new Set<string>();
+    let fiber: Fiber | undefined;
 
-    const previous = internals.providers.get(key.symbol);
-    if (previous) previous.remove();
-    const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
-    const fiber = internals.system.create({
-      uid,
-      inject: [],
-      provide: [key],
-      apply: () => NOOP,
-    });
-    internals.providers.set(key.symbol, fiber);
-    track(internals, fiber.refresh());
+    if (internals.registerProvider) {
+      const previous = internals.providers.get(key.symbol);
+      if (previous) previous.remove();
+      const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
+      fiber = internals.system.create({
+        uid,
+        inject: [],
+        provide: [key],
+        apply: () => NOOP,
+      });
+      internals.providers.set(key.symbol, fiber);
+      // G03：committed Impl.dependents 与 provider fiber 的 dependents 共享载体。
+      dependents = fiber.committedDependents;
+      track(internals, fiber.refresh());
+    }
+
+    reflectCommit(internals.node, key, value, key.symbol, () => !revoked, dependents);
 
     let armed = true;
     return () => {
       if (!armed) return;
       armed = false;
+      revoked = true;
       restore();
-      if (internals.providers.get(key.symbol) === fiber) {
+      if (fiber && internals.providers.get(key.symbol) === fiber) {
         fiber.remove();
         internals.providers.delete(key.symbol);
       }
@@ -236,13 +266,32 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
     const uid = `fiber:${++internals.uidSeed.value}`;
     const fiberNode = createNode(uid, internals.node, [...component.inject, ...component.provide]);
     const fiberCtx = makeContext(internals, fiberNode, false);
+    // 版本注册表在装配期登记；accepts 在 apply 时校验（此时 provider 已进入 ACTIVE）。
+    for (const key of component.provide) {
+      internals.providerVersions.set(key.symbol, { uid, version: component.version });
+    }
     const spec: FiberSpec = {
       uid,
       inject: component.inject,
       provide: component.provide,
       config,
       // config 通过 FiberSpec 下发，Component.apply 收到的是调用方传入的配置。
-      apply: (_host, appliedConfig) => component.apply(fiberCtx, appliedConfig as P),
+      apply: (_host, appliedConfig) => {
+        if (component.accepts !== undefined) {
+          for (const key of component.inject) {
+            const expected = acceptedVersion(component.accepts, key);
+            if (expected === undefined) continue;
+            const provider = internals.providerVersions.get(key.symbol);
+            if (provider?.version !== expected) {
+              const id = key.symbol.description ?? key.name;
+              throw new Error(
+                `${VERSION_MISMATCH}: ${component.name} accepts ${id}@${expected}, provider=${provider?.version ?? "<unversioned>"}`
+              );
+            }
+          }
+        }
+        return component.apply(fiberCtx, appliedConfig as P);
+      },
     };
     const fiber = internals.system.create(spec);
     const ready = fiber.refresh();
@@ -254,7 +303,14 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
       },
       ready,
       update: () => fiber.update(),
-      remove: () => fiber.remove(),
+      remove: () => {
+        for (const key of component.provide) {
+          if (internals.providerVersions.get(key.symbol)?.uid === uid) {
+            internals.providerVersions.delete(key.symbol);
+          }
+        }
+        fiber.remove();
+      },
     };
   };
 
@@ -307,6 +363,7 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
     emit,
     notify,
     dispose,
+    proxy,
   };
   return context;
 }
@@ -324,6 +381,7 @@ export function createContext(options: { uid?: string } = {}): Context {
     providers: new Map(),
     listeners: new Map(),
     intercepted: new Map(),
+    providerVersions: new Map(),
     uidSeed: { value: 0 },
     registerProvider: true,
   });
@@ -334,8 +392,18 @@ export function notify(ctx: Context, keys?: readonly CoeffectKey<any>[]): Promis
   return ctx.notify(keys);
 }
 
+/** 可导入的 Proxy 门禁入口：createView(ctx) 等价于 ctx.proxy()。 */
+export function createView<T extends object>(ctx: Context): T {
+  return ctx.proxy<T>();
+}
+
 /** 可导入的函数式入口：use(ctx, component, config) 等价于 ctx.use(component, config)。 */
 export function use<P>(ctx: Context, component: Component<P>, config?: P): ContextFiber {
   return ctx.use(component, config);
+}
+
+/** 可导入的函数式入口：on(ctx, name, listener) 等价于 ctx.on(name, listener)。 */
+export function on(ctx: Context, name: string, listener: (payload: unknown) => void): Disposer {
+  return ctx.on(name, listener);
 }
 

@@ -41,7 +41,11 @@ export class FiberSystem {
       const impl: Impl = {
         uid: provider.uid,
         value: name.name,
-        dependents: new Set<string>(),
+        // G03：committed Impl.dependents 与 provider 的 Fiber.dependents 共享同一集合实例，
+        // 使 Thm 70 的撤回延迟有可观测的运行时载体（登记写入见 reload/remove/unload）。
+        dependents: provider.committedDependents,
+        // G02：动态能力判定由 provider 撤销态注入；provider 非 ACTIVE 时读取抛 CAPABILITY_EXPIRED。
+        check: () => provider.state.kind === "ACTIVE",
         isolate: name.symbol,
       };
       view.set(name, impl);
@@ -64,6 +68,8 @@ export class Fiber {
   target: View | null = null;
   inertia: Promise<void> | null = null;
   readonly dependents = new Set<Fiber>();
+  /** committed Impl.dependents 的共享载体：与 dependents 同步登记 fiber uid。 */
+  readonly committedDependents = new Set<string>();
   readonly host: EffectHost;
 
   get uid(): string {
@@ -113,7 +119,11 @@ export class Fiber {
     if (this.state.kind === "DISPOSED") return;
     this.target = null;
     for (const name of this.spec.inject) {
-      this.system.providerOf(name, this.uid)?.dependents.delete(this);
+      const provider = this.system.providerOf(name, this.uid);
+      if (provider) {
+        provider.dependents.delete(this);
+        provider.committedDependents.delete(this.uid);
+      }
     }
     this.state = { kind: "DISPOSED" };
   }
@@ -125,10 +135,28 @@ export class Fiber {
         ? this.spec.apply(this.host, this.spec.config)
         : NOOP);
       const dispose: Disposer = await execute(source, () => this.target === target);
-      for (const name of this.spec.inject) {
-        this.system.providerOf(name, this.uid)?.dependents.add(this);
+      if (this.target === target) {
+        for (const name of this.spec.inject) {
+          const provider = this.system.providerOf(name, this.uid);
+          if (provider) {
+            provider.dependents.add(this);
+            provider.committedDependents.add(this.uid);
+          }
+        }
+        this.state = { kind: "ACTIVE", dispose, committed: target };
+      } else {
+        // G06：guard 因 target 改变而中断（L-Divert），不能无条件落地为 ACTIVE。
+        // 按 core-semantics §7.2 reload 的 else 分支进入 UNLOADING，惯性链入 unload
+        // 统一回收已累积的逆，再由 unload 依 target 决定回 PENDING 或重入 reload。
+        const previous = this.state;
+        this.state = {
+          kind: "UNLOADING",
+          dispose,
+          committed: "committed" in previous ? previous.committed : target,
+        };
+        this.inertia = this.unload();
+        await this.inertia;
       }
-      this.state = { kind: "ACTIVE", dispose, committed: target };
     } catch (error) {
       this.state = { kind: "FAILED", error };
     }
@@ -154,7 +182,11 @@ export class Fiber {
       (this.host.effects as Disposer[]).length = 0;
     }
     for (const name of this.spec.inject) {
-      this.system.providerOf(name, this.uid)?.dependents.delete(this);
+      const provider = this.system.providerOf(name, this.uid);
+      if (provider) {
+        provider.dependents.delete(this);
+        provider.committedDependents.delete(this.uid);
+      }
     }
     this.state = { kind: "PENDING" };
     if (this.target !== null) {
