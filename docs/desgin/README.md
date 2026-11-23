@@ -146,4 +146,5 @@ flowchart TB
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ⏳ 代码尚未开工，按 [delivery/roadmap.md](./delivery/roadmap.md) 阶段 0-6 执行。
+- ✅ 阶段 0-4 已有实现并通过全量测试（679 pass / 0 fail）；阶段 5（HMR / 对象运行时 / 自演化护栏）与阶段 6（递归自演化研究轨）为后续可选项，**尚未完成**，仍按阶段边界推进，不作已完成声明。
+- ⏳ 当前差距与下一批处置见执行文档（不在版本库内）；交付节奏与验收判据以 [delivery/roadmap.md](./delivery/roadmap.md) 为准。
