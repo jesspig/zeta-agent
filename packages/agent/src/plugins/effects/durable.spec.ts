@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { createDurableEffects, createStepLedger, replayToolCall, type AgentTool } from "./durable";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createDurableEffects,
+  createFileDurableJournal,
+  createStepLedger,
+  replayToolCall,
+  type AgentTool,
+} from "./durable";
 
 describe("T-24 durable effects and replay semantics", () => {
   test("replay never reuses verified facts without re-executing", async () => {
@@ -123,5 +132,61 @@ describe("T-24 durable effects and replay semantics", () => {
 
     expect(calls).toBe(0);
     expect(outcome).toEqual({ action: "verified-fact", value: "written-fact" });
+  });
+});
+
+describe("A15 durable outbox/journal 崩溃重启恢复", () => {
+  test("显式注入文件 journal：重启后重放 pending，幂等键不产生重复派发", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "zeta-durable-"));
+    const file = join(dir, "outbox.json");
+    try {
+      const dispatched: string[] = [];
+      const dispatch = async (intent: { seq: number; kind: string; key: string }) => {
+        dispatched.push(`${intent.seq}:${intent.kind}:${intent.key}`);
+        return "ok";
+      };
+
+      const first = createDurableEffects(dispatch, { journal: createFileDurableJournal(file) });
+      first.enqueue("message", "m1", { text: "hello" });
+      first.enqueue("message", "m1", { text: "duplicate" });
+      first.enqueue("file", "f1", "data");
+      expect(first.pending().map((intent) => intent.seq)).toEqual([1, 2]);
+      expect(existsSync(file)).toBe(true);
+
+      // 模拟进程崩溃：pending 未 commit，下一进程用同一 journal 恢复。
+      const restarted = createDurableEffects(dispatch, { journal: createFileDurableJournal(file) });
+      const recovered = restarted.recover();
+      expect(recovered).toEqual({ restored: true, pending: 2, receipts: 0 });
+      expect(restarted.pending().map((intent) => intent.key)).toEqual(["m1", "f1"]);
+
+      const receipts = await restarted.commit();
+      expect(receipts.map((receipt) => receipt.key)).toEqual(["m1", "f1"]);
+      expect(dispatched).toEqual(["1:message:m1", "2:file:f1"]);
+
+      // 二次重启：回执保留，重复幂等键不再入队也不再派发。
+      const again = createDurableEffects(dispatch, { journal: createFileDurableJournal(file) });
+      expect(again.recover()).toEqual({ restored: true, pending: 0, receipts: 2 });
+      again.enqueue("message", "m1", { text: "again" });
+      again.enqueue("file", "f1", "again");
+      expect(again.pending()).toEqual([]);
+      expect(await again.commit()).toEqual([]);
+      expect(dispatched).toEqual(["1:message:m1", "2:file:f1"]);
+      expect(again.receipts()).toHaveLength(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("默认内存 journal 不落盘，实例之间状态隔离", () => {
+    const fresh = createDurableEffects(() => 1);
+    expect(fresh.recover()).toEqual({ restored: false, pending: 0, receipts: 0 });
+
+    const one = createDurableEffects(() => 1);
+    one.enqueue("message", "m1", "hello");
+    expect(one.pending()).toHaveLength(1);
+
+    const other = createDurableEffects(() => 1);
+    expect(other.pending()).toEqual([]);
+    expect(other.receipts()).toEqual([]);
   });
 });

@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
 export interface ExperienceEntry {
   readonly id: string;
   readonly candidate: string;
@@ -35,6 +38,16 @@ export interface ExperienceStore {
   diff(a: string, b: string): ExperienceDiff;
   snapshot(): string;
   restore(snapshot: string): void;
+}
+
+/** 可注入的 evidence 存储适配器；默认内存实现保留，研究 seam 不进默认装配。 */
+export interface ExperiencePersistence {
+  load(): readonly ExperienceEntry[] | undefined;
+  save(entries: readonly ExperienceEntry[]): void;
+}
+
+export interface ExperienceStoreOptions {
+  readonly persistence?: ExperiencePersistence;
 }
 
 const LEAKAGE_KEYS = new Set([
@@ -84,8 +97,44 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(String(value));
 }
 
-export function createExperienceStore(): ExperienceStore {
+export function createInMemoryExperiencePersistence(): ExperiencePersistence {
+  let stored: readonly ExperienceEntry[] | undefined;
+  return {
+    load: () => stored,
+    save: (entries) => {
+      stored = structuredClone(entries) as ExperienceEntry[];
+    },
+  };
+}
+
+/** 文件适配器：code/scores/traces 等 evidence 字段完整 JSON 落盘，不持有有损摘要。 */
+export function createFileExperiencePersistence(filePath: string): ExperiencePersistence {
+  if (typeof filePath !== "string" || filePath.length === 0) throw new Error("INVALID_EXPERIENCE_PATH");
+  return {
+    load() {
+      if (!existsSync(filePath)) return undefined;
+      return JSON.parse(readFileSync(filePath, "utf8")) as ExperienceEntry[];
+    },
+    save(entries) {
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, JSON.stringify(entries), "utf8");
+    },
+  };
+}
+
+export function createExperienceStore(options: ExperienceStoreOptions = {}): ExperienceStore {
+  const persistence = options.persistence ?? createInMemoryExperiencePersistence();
   const entries = new Map<string, ExperienceEntry>();
+  const restored = persistence.load();
+  if (restored !== undefined) {
+    for (const item of restored) {
+      assertEntry(item);
+      entries.set(item.id, structuredClone(item) as ExperienceEntry);
+    }
+  }
+  const persist = (): void => {
+    persistence.save([...entries.values()]);
+  };
 
   function requireEntry(id: string): ExperienceEntry {
     const found = entries.get(id);
@@ -97,6 +146,7 @@ export function createExperienceStore(): ExperienceStore {
     put(entry) {
       assertEntry(entry);
       entries.set(entry.id, structuredClone(entry) as ExperienceEntry);
+      persist();
     },
     get(id) {
       return entries.get(id);
@@ -162,6 +212,7 @@ export function createExperienceStore(): ExperienceStore {
         assertEntry(candidate);
         entries.set(candidate.id, candidate);
       }
+      persist();
     },
   };
 }

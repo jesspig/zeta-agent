@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { listAssembly } from "../facade";
 import {
   createExperienceStore,
+  createFileExperiencePersistence,
   replayExperience,
   type ExperienceEntry,
   type ExperienceOp,
@@ -97,5 +101,44 @@ describe("T-30 experience store and non-Markovian retrieval", () => {
     for (const id of assembly) {
       expect(id).not.toMatch(/research|experience|promotion|fitness|evolution|seam|evidence/i);
     }
+  });
+});
+
+describe("A27 evidence 完整落盘与取回（显式注入）", () => {
+  test("code/scores/traces 落盘后由新实例无损取回，检索仍可用", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zeta-experience-"));
+    const file = join(dir, "evidence.json");
+    try {
+      const full = entry({
+        id: "e-disk",
+        code: "const reward = meanAuc - weight * penalty;",
+        scores: { fitness: 0.87, cost: 3 },
+        traces: ["probe-a", "probe-b"],
+        lineage: ["base", "mutant"],
+      });
+      const first = createExperienceStore({ persistence: createFileExperiencePersistence(file) });
+      first.put(full);
+
+      expect(existsSync(file)).toBe(true);
+      const onDisk = JSON.parse(readFileSync(file, "utf8")) as ExperienceEntry[];
+      expect(onDisk).toHaveLength(1);
+      expect(onDisk[0]!.code).toBe(full.code);
+      expect(onDisk[0]!.scores).toEqual(full.scores);
+      expect(onDisk[0]!.traces).toEqual(full.traces);
+
+      const second = createExperienceStore({ persistence: createFileExperiencePersistence(file) });
+      expect(second.get("e-disk")).toEqual(full);
+      expect(second.all()).toEqual([full]);
+      expect(second.query({ regex: "meanAuc" }).map((item) => item.id)).toEqual(["e-disk"]);
+      expect(second.snapshot()).toBe(first.snapshot());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("默认内存适配器不落盘，实例间状态隔离", () => {
+    const one = createExperienceStore();
+    one.put(entry({ id: "only-in-memory" }));
+    expect(createExperienceStore().get("only-in-memory")).toBeUndefined();
   });
 });
