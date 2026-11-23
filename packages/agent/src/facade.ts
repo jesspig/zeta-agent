@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   createEventStream,
   createInbox,
+  declareToolChanges,
   runLoop,
   AgentPluginManager,
   type AgentEvent,
@@ -14,7 +15,6 @@ import {
   type AgentToolCallRecord,
   type AssistantMessageEvent,
   type AssistantResult,
-  type Capabilities,
   type CompatExtensionApi,
   type ContextTransform,
   type Converter,
@@ -55,7 +55,8 @@ import {
   type SinkResolution,
 } from "@zeta-agent/observability";
 import {
-  createExecutionBackend,
+  createEgressPolicy,
+  createUnconnectedBackend,
   isCriticalLayerDegraded,
   isEgressAllowed,
   verifyAuditChain,
@@ -195,27 +196,10 @@ export interface AgentStreamRequest {
 
 export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<AgentStreamChunk>;
 
-const ACTIVE_CAPABILITIES: Capabilities = Object.freeze({
-  isolation: "active",
-  seccomp: "active",
-  fsConfinement: "active",
-  auditSink: "active",
-  egressDefaultDeny: "active",
-});
-
 function defaultSecurityBackend(): ExecutionBackend {
-  // 占位后端没有连接真实隔离执行器：命令不能被执行，更不能报告成功。
-  // 返回非零退出码与明确原因，使命令工具走 COMMAND_FAILED 分支，而不是伪造成功。
-  return createExecutionBackend({
-    name: "facade-default-placeholder",
-    capabilities: { ...ACTIVE_CAPABILITIES },
-    executor: () => ({
-      exitCode: 1,
-      stdout: "",
-      stderr: "NO_REAL_EXECUTION_BACKEND: 未配置真实隔离执行后端，命令未执行",
-      isolated: null,
-    }),
-  });
+  // 未接入真实隔离执行器：能力声明为 unsupported，能力探测即失败关闭。
+  // 不再把"未执行"伪装成 active 并报告成功。
+  return createUnconnectedBackend({ name: "facade-default-placeholder" });
 }
 
 function defaultLoggerOptions(): LoggerOptions {
@@ -254,6 +238,26 @@ function deriveEgressTarget(args: Readonly<Record<string, unknown>>): EgressTarg
   return undefined;
 }
 
+type EgressVerdict =
+  | { readonly status: "none" }
+  | { readonly status: "allowed"; readonly target: EgressTarget }
+  | { readonly status: "denied" };
+
+/**
+ * 对所有工具调用统一做 egress 判定，而不只限发射工具。
+ * 没有携带网络目标参数的调用无外联可校验（none）；
+ * 一旦携带 url/target 却无法解析或未获策略允许，则 fail-closed 拒绝。
+ */
+function checkEgress(args: Readonly<Record<string, unknown>>, policy: EgressPolicy): EgressVerdict {
+  const hasNetworkArg =
+    typeof args.url === "string" ||
+    (typeof args.target === "object" && args.target !== null);
+  if (!hasNetworkArg) return { status: "none" };
+  const target = deriveEgressTarget(args);
+  if (target === undefined || !isEgressAllowed(policy, target)) return { status: "denied" };
+  return { status: "allowed", target };
+}
+
 /** createProviderStreamFn 的 facade 投影；凭据由 Agent 注入，调用方无需重复传递。 */
 export interface AgentProviderConfig {
   readonly provider: string;
@@ -269,6 +273,19 @@ export interface AuditFinalization {
   readonly path?: string;
   readonly entries: number;
   readonly verified: boolean;
+}
+
+/** ASK 决策的确认请求：阶段、工具与参数交给注入方裁决。 */
+export interface ConfirmRequest {
+  readonly stage: string;
+  readonly tool: string;
+  readonly args: Readonly<Record<string, unknown>>;
+  readonly reason?: string;
+}
+
+/** 注入式确认通道：返回 true 表示批准 ASK；false 或抛错维持 fail-closed。 */
+export interface ConfirmChannel {
+  confirm(request: ConfirmRequest): Promise<boolean>;
 }
 
 export interface AgentOptions {
@@ -298,6 +315,11 @@ export interface AgentOptions {
   /** 门禁 authorize 使用的阶段名；缺省 "plan"。 */
   readonly permissionStage?: string;
   /**
+   * 可选 ASK 确认通道：注入后 ASK 决策经此通道确认；未注入时 ASK 维持 fail-closed（等同拒绝）。
+   * DENY 决策不受影响，始终拒绝。
+   */
+  readonly confirmChannel?: ConfirmChannel;
+  /**
    * 发射策略：默认 "withhold"（发射类工具批次内 enqueue、commit 统一派发）；
    * "direct" 是兼容开关，完全绕过 withhold，保持 T-06 之前的直接执行行为。
    */
@@ -307,7 +329,10 @@ export interface AgentOptions {
    * 缺省且策略为 withhold 时，facade 自动创建默认 DurableEffects（dispatcher 调用原始工具执行）。
    */
   readonly durableEffects?: DurableEffects;
-  /** 可选 egress 门禁：仅对发射目标生效；不注入时不新增任何拒绝。 */
+  /**
+   * egress 门禁：缺省即默认拒绝（无任何 allow 规则）；
+   * 对所有工具调用生效，非发射工具的外联目标同样受控。
+   */
   readonly egressPolicy?: EgressPolicy;
   /** 视作发射工具的工具名集合；缺省时由 emissionPolicy 决定（withhold 用默认清单，direct 为空）。 */
   readonly emissionTools?: readonly string[];
@@ -324,6 +349,10 @@ export interface AgentOptions {
 export interface Agent extends PluginApiSurface {
   prompt(text: string): Promise<readonly AgentMessage[]>;
   continue(): Promise<readonly AgentMessage[]>;
+  /** 运行中注入 steer 消息：下一轮轮首进入 transcript，无需等待新 prompt。 */
+  steer(message: AgentMessage): void;
+  /** 运行中注入 followUp 消息：按队列语义留到下一次轮首消费。 */
+  followUp(message: AgentMessage): void;
   subscribe(listener: AgentListener): Disposer;
   abort(): void;
   /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
@@ -359,6 +388,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const securityBackend = options.securityBackend ?? defaultSecurityBackend();
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
+  const confirmChannel = options.confirmChannel;
   const allowedDirectories = options.allowedDirectories ?? [];
   const emissionPolicy = options.emissionPolicy ?? "withhold";
   const emissionTools = new Set(
@@ -367,10 +397,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const withholdEnabled = emissionPolicy !== "direct" && emissionTools.size > 0;
   /** 默认发射工具的真实执行入口；每次 runTurn 重建工具表后立即刷新。 */
   let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>> = new Map();
+  // D6（延期）：框架 createToolPipeline 原语可用，facade 当前仅装配 declareToolChanges 声明 hook；
+  // 完整以 toolPipeline 替换 executeToolCalls 涉及权限/withhold/durable 逻辑耦合，按 O-03 裁决延期。
   /** 只有未注入 durableEffects 且启用 withhold 时，才为默认清单创建内置效果。 */
   const usesDefaultEffects = options.durableEffects === undefined && withholdEnabled;
   const durableEffects = options.durableEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
-  const egressPolicy = options.egressPolicy;
+  // 未注入策略时采用默认拒绝：没有显式 allow 规则，任何可推导的外联目标都被挡下。
+  const egressPolicy = options.egressPolicy ?? createEgressPolicy();
   const credentialVault = options.credentialVault;
   const secretBroker = options.secretBroker;
   const auditSink = options.auditSink;
@@ -477,6 +510,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
   const pluginManager = new AgentPluginManager();
   const events = createEventBus();
+  /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
+  const inbox: Inbox = createInbox();
 
   function addDisposer(dispose: () => void): () => void {
     return pluginManager.addDisposer(dispose);
@@ -507,6 +542,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     for (const name of declaredLoadout.keys()) names.add(name);
     return [...names];
   }
+
+  /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
+  let declaredToolNames: readonly string[] = [...toolNamesSnapshot()];
 
   const api: PluginApiSurface = {
     registerTool(tool) {
@@ -606,7 +644,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" });
 
-    const inbox: Inbox = createInbox();
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
     for (const source of steeringSources) {
       inbox.steer(source.next() as AgentMessage);
@@ -639,6 +676,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
       getState: () => stream.getState(),
       prepareNextTurn: () => {
         for (const fn of prepareNextTurnFns) fn(stream.getState());
+      },
+      declareToolChanges: () => {
+        const next = toolNamesSnapshot();
+        const delta = declareToolChanges(declaredToolNames, next);
+        declaredToolNames = next;
+        // 权限策略热更新不改变工具集合时返回 undefined，避免无意义的 system 声明/reload。
+        return delta.messages.length > 0 ? delta : undefined;
       },
       prepareRequest: (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
@@ -793,47 +837,62 @@ export function createAgent(options: AgentOptions = {}): Agent {
                 // 每次执行都读取 gate 当前状态：增删 hook / declareTools 后立即生效，无需 reload。
                 const decision = await permissionGate.authorize(permissionStage, call.name, args);
                 if (decision.behavior !== "ALLOW") {
-                  denied = true;
-                  isError = true;
                   const reason = decision.reason ?? "PERMISSION_DENIED";
-                  // DENY 与 ASK 一律 fail-closed（ASK 的确认渠道属 T-06，尚未接线）。
-                  output = {
-                    ok: false,
-                    error: "PERMISSION_DENIED",
-                    reason,
-                    stage: permissionStage,
-                    tool: call.name,
-                  };
-                  denialReason = `PERMISSION_DENIED: ${reason}`;
-                  recordAudit(call.name, argsDigest, "PERMISSION_DENIED", reason, call.id ?? "");
-                  // 审计走既有机制：logger 写 sink，loop 随后发带 isError 的 tool_execution_end。
-                  fiberLogger.warn(`PERMISSION_DENIED stage=${permissionStage} tool=${call.name} reason=${reason}`);
+                  // DENY 始终拒绝；ASK 仅在注入确认通道且确认通过时放行，否则维持 fail-closed。
+                  const approved = decision.behavior === "ASK" && confirmChannel !== undefined
+                    ? await confirmChannel.confirm({
+                        stage: permissionStage,
+                        tool: call.name,
+                        args,
+                        ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+                      })
+                    : false;
+                  if (!approved) {
+                    denied = true;
+                    isError = true;
+                    output = {
+                      ok: false,
+                      error: "PERMISSION_DENIED",
+                      reason,
+                      stage: permissionStage,
+                      tool: call.name,
+                    };
+                    denialReason = `PERMISSION_DENIED: ${reason}`;
+                    recordAudit(call.name, argsDigest, "PERMISSION_DENIED", reason, call.id ?? "");
+                    // 审计走既有机制：logger 写 sink，loop 随后发带 isError 的 tool_execution_end。
+                    fiberLogger.warn(`PERMISSION_DENIED stage=${permissionStage} tool=${call.name} reason=${reason}`);
+                  } else {
+                    recordAudit(call.name, argsDigest, "ASK_APPROVED", reason, call.id ?? "");
+                  }
                 }
               }
               if (!denied) {
-                if (isEmission) {
-                  // 发射工具：事务内只 enqueue，真实副作用留到批次结束的 commit 统一派发。
+                const verdict = checkEgress(args, egressPolicy);
+                if (verdict.status === "denied") {
+                  // egress 默认拒绝覆盖所有路径：发射工具写失败回执，非发射工具直接拒绝执行。
+                  isError = true;
+                  denialReason = "EGRESS_DENIED";
                   const key = `${call.name}:${argsDigest}`;
-                  const target = deriveEgressTarget(args);
-                  const egressDenied = egressPolicy !== undefined && (target === undefined || !isEgressAllowed(egressPolicy, target));
-                  if (egressDenied) {
+                  recordAudit(call.name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", call.id ?? "");
+                  if (isEmission) {
                     const receipt: Receipt = { kind: call.name, key, ok: false, value: { error: "EGRESS_DENIED" } };
                     failedEmissionReceipts.push(receipt);
-                    recordAudit(call.name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", call.id ?? "");
-                    isError = true;
-                    denialReason = "EGRESS_DENIED";
                     output = { ok: false, error: "EGRESS_DENIED", tool: call.name, key };
                   } else {
-                    durableEffects.enqueue(call.name, key, {
-                      tool: call.name,
-                      args,
-                      ...(target !== undefined ? { target } : {}),
-                    });
-                    emissionSlots.set(index, key);
-                    enqueuedEmission = true;
-                    recordAudit(call.name, argsDigest, "EMISSION_WITHHELD", key, call.id ?? "");
-                    output = { ok: true, withheld: true, tool: call.name, key };
+                    output = { ok: false, error: "EGRESS_DENIED", tool: call.name };
                   }
+                } else if (isEmission) {
+                  // 发射工具：事务内只 enqueue，真实副作用留到批次结束的 commit 统一派发。
+                  const key = `${call.name}:${argsDigest}`;
+                  durableEffects.enqueue(call.name, key, {
+                    tool: call.name,
+                    args,
+                    ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
+                  });
+                  emissionSlots.set(index, key);
+                  enqueuedEmission = true;
+                  recordAudit(call.name, argsDigest, "EMISSION_WITHHELD", key, call.id ?? "");
+                  output = { ok: true, withheld: true, tool: call.name, key };
                 } else {
                   // 非发射工具（或 direct 策略）走原路径，行为与基线完全一致。
                   for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
@@ -924,6 +983,14 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return runTurn(text);
     },
     continue: () => runTurn(),
+    steer: (message) => {
+      inbox.steer(message);
+    },
+    followUp: (message) => {
+      inbox.followUp(message);
+    },
+    // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
+    // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
     abort() {
       aborted = true;
@@ -933,6 +1000,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       aborted = false;
       abortController = undefined;
       lastTurnHadNativeTools = false;
+      inbox.clear("nextTurn");
+      inbox.clear("nextStep");
       stream.reset();
     },
     waitForIdle: () => stream.waitForIdle(),

@@ -1,10 +1,9 @@
 import { createSignal, onCleanup } from "solid-js";
 import { createAgentSignals, type EventSource, type AgentStatus, type StatusMessage } from "../signal";
 import { contextBudget, type ContextBudget } from "../hud";
-import { FooterView, type FooterMetrics } from "./footer";
-
-const ESTIMATED_TOKENS_PER_MESSAGE = 2000;
-const CONTEXT_LIMIT = 128000;
+import { DEFAULT_CONTEXT_LIMIT } from "../usage";
+import type { AgentUsageTelemetry } from "../telemetry-types";
+import { FooterView } from "./footer";
 
 export interface FooterBridgeProps {
   readonly source?: EventSource;
@@ -13,17 +12,8 @@ export interface FooterBridgeProps {
   readonly pwd?: string;
   readonly provider?: string;
   readonly modelId?: string;
-  /** 遥测覆盖：真实 token/成本/分支来自宿主时由此注入。 */
-  readonly telemetry?: {
-    readonly pwd?: string;
-    readonly home?: string;
-    readonly branch?: string;
-    readonly session?: string;
-    readonly metrics?: FooterMetrics;
-    readonly provider?: string;
-    readonly modelId?: string;
-    readonly thinking?: boolean;
-  };
+  /** 真实遥测：token/成本/分支/会话由宿主或 agent 事件源提供。 */
+  readonly telemetry?: AgentUsageTelemetry;
 }
 
 const STATUS_LABEL: Readonly<Record<string, string>> = {
@@ -44,26 +34,31 @@ function defaultTelemetry() {
 export function FooterBridge(props: FooterBridgeProps) {
   const [status, setStatus] = createSignal<AgentStatus>("idle");
   const [statusMessage, setStatusMessage] = createSignal<StatusMessage>(null);
-  const [messageCount, setMessageCount] = createSignal(0);
 
   const signals = props.source === undefined ? undefined : createAgentSignals(props.source);
   if (signals !== undefined) {
     const offStatus = signals.status.subscribe(setStatus);
     const offStatusMessage = signals.statusMessage.subscribe(setStatusMessage);
-    const offMessages = signals.messages.subscribe((list) => setMessageCount(list.length));
     onCleanup(() => {
       offStatus();
       offStatusMessage();
-      offMessages();
       signals.dispose();
     });
   }
 
+  const telemetry = () => props.telemetry;
+  const usedTokens = (): number => {
+    const current = telemetry();
+    const metrics = current?.metrics;
+    return (
+      current?.usedTokens ??
+      (metrics === undefined ? 0 : metrics.inputTokens + metrics.cacheReadTokens + metrics.cacheWriteTokens)
+    );
+  };
   const budget = (): ContextBudget =>
-    contextBudget(messageCount() * ESTIMATED_TOKENS_PER_MESSAGE, CONTEXT_LIMIT);
+    contextBudget(usedTokens(), telemetry()?.contextLimit ?? DEFAULT_CONTEXT_LIMIT);
 
   const defaults = defaultTelemetry();
-  const telemetry = props.telemetry;
 
   return (
     <FooterView
@@ -71,15 +66,15 @@ export function FooterBridge(props: FooterBridgeProps) {
       status={status()}
       budget={budget()}
       retry={STATUS_LABEL[statusMessage() ?? ""] || undefined}
-      statusText={telemetry ? STATUS_LABEL[statusMessage() ?? ""] || undefined : undefined}
-      pwd={telemetry?.pwd ?? props.pwd ?? defaults.pwd}
-      home={telemetry?.home ?? defaults.home}
-      branch={telemetry?.branch}
-      session={telemetry?.session}
-      metrics={telemetry?.metrics}
-      provider={telemetry?.provider}
-      modelId={telemetry?.modelId ?? props.model}
-      thinking={telemetry?.thinking}
+      statusText={telemetry() ? STATUS_LABEL[statusMessage() ?? ""] || undefined : undefined}
+      pwd={telemetry()?.pwd ?? props.pwd ?? defaults.pwd}
+      home={telemetry()?.home ?? defaults.home}
+      branch={telemetry()?.branch}
+      session={telemetry()?.session}
+      metrics={telemetry()?.metrics}
+      provider={telemetry()?.provider}
+      modelId={telemetry()?.modelId ?? props.model}
+      thinking={telemetry()?.thinking}
     />
   );
 }

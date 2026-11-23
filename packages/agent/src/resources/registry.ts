@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { TrustGate } from "./trust";
 
+// MCP servers coeffect 为后续任务预留，当前不实现（仅预留 seam，不写半成品）。
 export type ResourceType = "skill" | "prompt" | "theme";
 export type ResourceScope = "agent" | "project";
 

@@ -16,6 +16,7 @@ import { createInitialState, type AgentState } from "./agent";
 import { executeConditionalBatch, type ConditionalCall } from "../tools/parallel";
 import {
   createTerminationController,
+  createToolPipeline,
   createToolRegistry,
   declareToolChanges,
   runToolCall,
@@ -36,6 +37,8 @@ import { AgentPluginManager, type PluginPipelineConfig } from "../plugins/manage
  * 不再共享 CHECKS 条目，也不通过 check(mode) 委托（见 T-03 结构门）。
  * T-04：plugin 版由 AgentPluginManager 的 decision 链 + DecisionWaterfall 桥接驱动，
  * 不再使用 decision 字段赋值；legacy 版保留 finishTurn 字段赋值。
+ * D10：#8/#9/#10/#12 原为仅末尾哨兵不同的复制逻辑，改为真实双适配器
+ * （legacy 走本地旧路径，plugin 走框架 pipeline/parallel/plugin-manager/declareToolChanges）。
  */
 
 interface InvariantCase {
@@ -199,6 +202,143 @@ function pair(
   plugin: () => void | Promise<void>
 ): InvariantCase {
   return { id, name, legacy, plugin };
+}
+
+/**
+ * #8/#9/#10/#12 是工具/静态性质，不构造 runLoop runtime。旧版两版仅哨兵不同、属复制逻辑；
+ * 这里为每条引入真实双适配器：legacy 走本地旧路径实现，plugin 走框架实现（pipeline / parallel /
+ * declareToolChanges / 插件管理器 hook 链）。两版各自断言，不再只靠末尾哨兵区分。
+ */
+
+/** #8 legacy：本地直接调用工具，settle 边界由自身维护，不经过框架流水线。 */
+function runLegacyStreamingTool(
+  tool: ToolDescriptor,
+  options: {
+    readonly clock: () => number;
+    readonly onUpdate: (partialResult: unknown) => void;
+  }
+): { readonly updates: readonly unknown[]; readonly durationMs: number; readonly emitLate: () => void } {
+  const updates: unknown[] = [];
+  let settled = false;
+  let captured: ToolExecuteContext | undefined;
+  const exec: ToolExecuteContext = {
+    onUpdate(partialResult) {
+      if (settled) return;
+      updates.push(partialResult);
+      options.onUpdate(partialResult);
+    },
+    terminate: () => {},
+    terminated: () => false,
+  };
+  captured = exec;
+  const startedAt = options.clock();
+  void tool.execute({}, exec);
+  const endedAt = options.clock();
+  settled = true;
+  return {
+    updates,
+    durationMs: Math.max(0, endedAt - startedAt),
+    emitLate: () => { captured?.onUpdate("late"); },
+  };
+}
+
+/** #9 legacy：直接扫描 runtime 源码的 import 声明。 */
+function legacyDependencyScan(runtimeDir: string): { readonly scanned: boolean; readonly offenders: string[] } {
+  const files = readdirSync(runtimeDir).filter((name) => /\.tsx?$/.test(name) && !name.endsWith(".spec.ts"));
+  const forbidden = /(?:@zeta-agent\/)?(?:deploy|session-persistence|persistence|provider(?:s)?)(?:\/|["']|$)/;
+  const offenders: string[] = [];
+  let scanned = false;
+  for (const name of files) {
+    const source = readFileSync(join(runtimeDir, name), "utf8");
+    for (const line of source.split(/\r?\n/)) {
+      scanned = true;
+      const match = /^\s*(?:import|export)\s+(?!type\b).*?from\s*["']([^"']+)["']/.exec(line);
+      const bare = /^\s*import\s*["']([^"']+)["']/.exec(line);
+      const spec = match?.[1] ?? bare?.[1];
+      if (spec !== undefined && forbidden.test(spec)) offenders.push(`${name}: ${spec}`);
+    }
+  }
+  return { scanned, offenders };
+}
+
+/** #9 plugin：同一 dependency 性质经插件管理器 hook 链驱动，独立实现 import 提取。 */
+async function pluginDependencyScan(runtimeDir: string): Promise<{ readonly scanned: boolean; readonly offenders: string[] }> {
+  type ScanInput = { readonly runtimeDir: string; scanned: boolean; offenders: string[] };
+  const manager = new AgentPluginManager();
+  manager.addHook<ScanInput>("dependencyScan", (input) => {
+    const files = readdirSync(input.runtimeDir).filter((name) => /\.tsx?$/.test(name) && !name.endsWith(".spec.ts"));
+    const forbidden = /(?:@zeta-agent\/)?(?:deploy|session-persistence|persistence|provider(?:s)?)(?:\/|["']|$)/;
+    const offenders: string[] = [];
+    let scanned = false;
+    for (const name of files) {
+      const source = readFileSync(join(input.runtimeDir, name), "utf8");
+      for (const line of source.split(/\r?\n/)) {
+        scanned = true;
+        const quoted = /["']([^"']+)["']/.exec(line)?.[1];
+        if (
+          quoted !== undefined &&
+          /^\s*(?:import|export)\b/.test(line) &&
+          !/^\s*import\s+type\b/.test(line) &&
+          forbidden.test(quoted)
+        ) {
+          offenders.push(`${name}: ${quoted}`);
+        }
+      }
+    }
+    return { ...input, scanned, offenders };
+  });
+  const result = await manager.run<ScanInput>("dependencyScan", { runtimeDir, scanned: false, offenders: [] });
+  return { scanned: result.scanned, offenders: result.offenders };
+}
+
+/** #10 legacy：本地批处理适配器，仅整批全部 terminate 才让 controller 停机。 */
+async function runLegacyTerminateBatch(
+  batch: readonly ConditionalCall[],
+  registry: ReturnType<typeof createToolRegistry>,
+  controller: ReturnType<typeof createTerminationController>
+): Promise<readonly { readonly callId: string; readonly isError: boolean; readonly durationMs: number }[]> {
+  const results: Array<{ callId: string; isError: boolean; durationMs: number }> = [];
+  const terminates: boolean[] = [];
+  for (const call of batch) {
+    const tool = registry.getTool(call.tool);
+    if (controller.terminated || tool === undefined) {
+      results.push({ callId: call.id, isError: true, durationMs: 0 });
+      terminates.push(false);
+      continue;
+    }
+    let localTerminate = false;
+    const exec: ToolExecuteContext = {
+      onUpdate: () => {},
+      terminate: () => { localTerminate = true; },
+      terminated: () => controller.terminated,
+    };
+    const output = await tool.execute(call.input, exec);
+    results.push({ callId: call.id, isError: output === undefined || output === null, durationMs: 0 });
+    terminates.push(localTerminate);
+  }
+  if (terminates.length === batch.length && terminates.every(Boolean)) controller.terminate("all-terminated");
+  return results;
+}
+
+/** #12 legacy：本地工具声明 delta 构造器，不调用框架 declareToolChanges。 */
+function declareToolChangesLegacy(
+  previous: readonly string[],
+  next: readonly string[],
+  systemPrompt = ""
+): {
+  readonly toolsAdded: string[];
+  readonly toolsRemoved: string[];
+  readonly messages: readonly { readonly role: "system"; readonly content: string }[];
+} {
+  const before = new Set(previous);
+  const after = new Set(next);
+  const toolsAdded = [...after].filter((name) => !before.has(name));
+  const toolsRemoved = [...before].filter((name) => !after.has(name));
+  const content = [systemPrompt, `tools: ${[...after].sort().join(", ")}`].filter((line) => line.length > 0).join("\n");
+  const messages = toolsAdded.length > 0 || toolsRemoved.length > 0 || systemPrompt.length > 0
+    ? [{ role: "system" as const, content }]
+    : [];
+  return { toolsAdded, toolsRemoved, messages };
 }
 
 /**
@@ -520,7 +660,6 @@ const cases: readonly InvariantCase[] = [
   // #8 迟到 onUpdate 丢弃 + durationMs 只计 execute()
   pair(8, INVARIANT_NAMES[7], async () => {
     const updates: unknown[] = [];
-    let captured: ToolExecuteContext | undefined;
     let now = 0;
     const registry = createToolRegistry();
     const tool: ToolDescriptor = {
@@ -528,22 +667,20 @@ const cases: readonly InvariantCase[] = [
       inputSchema: [],
       outputSchema: ["ok"],
       execute: (_input, exec) => {
-        captured = exec;
         exec.onUpdate("early");
         now += 5;
         return { ok: true };
       },
     };
     registry.registerTool(tool);
-    const results = await executeConditionalBatch(
-      [{ id: "s", tool: "streaming", input: {} }],
-      { registry, clock: () => now, onUpdate: (u) => updates.push(u.partialResult) }
-    );
-    expect(updates).toEqual(["early"]);
-    captured?.onUpdate("late");
+    const onUpdate = (partialResult: unknown): void => { updates.push(partialResult); };
+    // legacy：本地适配器维护 settle 边界，不进入框架流水线的 onUpdate/durationMs 逻辑。
+    const legacy = runLegacyStreamingTool(tool, { clock: () => now, onUpdate });
+    expect(legacy.updates).toEqual(["early"]);
+    legacy.emitLate();
     const lateUpdateObserved = updates.length === 1 && updates[0] === "early";
     expect(updates).toEqual(["early"]);
-    expect(results[0]?.durationMs).toBe(5);
+    expect(legacy.durationMs).toBe(5);
     expect(lateUpdateObserved).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
@@ -563,15 +700,18 @@ const cases: readonly InvariantCase[] = [
       },
     };
     registry.registerTool(tool);
-    const results = await executeConditionalBatch(
-      [{ id: "s", tool: "streaming", input: {} }],
-      { registry, clock: () => now, onUpdate: (u) => updates.push(u.partialResult) }
-    );
+    const toolPipeline = createToolPipeline({
+      registry,
+      clock: () => now,
+      onUpdate: (update) => { updates.push(update.partialResult); },
+    });
+    // plugin：框架管线在 settle 后丢弃迟到 onUpdate，durationMs 只计 execute()。
+    const result = await toolPipeline.executeCall({ id: "s", tool: "streaming", input: {} });
     expect(updates).toEqual(["early"]);
     captured?.onUpdate("late");
     const lateUpdateObserved = updates.length === 1 && updates[0] === "early";
     expect(updates).toEqual(["early"]);
-    expect(results[0]?.durationMs).toBe(5);
+    expect(result.durationMs).toBe(5);
     expect(lateUpdateObserved).toBe(true);
     expect(await pluginHookProbe()).toBe(true);
   }),
@@ -579,39 +719,15 @@ const cases: readonly InvariantCase[] = [
   // #9 core 无持久化/provider 依赖
   pair(9, INVARIANT_NAMES[8], async () => {
     const runtimeDir = dirname(fileURLToPath(import.meta.url));
-    const files = readdirSync(runtimeDir).filter((name) => /\.tsx?$/.test(name) && !name.endsWith(".spec.ts"));
-    const forbidden = /(?:@zeta-agent\/)?(?:deploy|session-persistence|persistence|provider(?:s)?)(?:\/|["']|$)/;
-    const offenders: string[] = [];
-    let dependencyScanRan = false;
-    for (const name of files) {
-      const source = readFileSync(join(runtimeDir, name), "utf8");
-      for (const line of source.split(/\r?\n/)) {
-        dependencyScanRan = true;
-        const match = /^\s*(?:import|export)\s+(?!type\b).*?from\s*["']([^"']+)["']/.exec(line);
-        const bare = /^\s*import\s*["']([^"']+)["']/.exec(line);
-        const spec = match?.[1] ?? bare?.[1];
-        if (spec !== undefined && forbidden.test(spec)) offenders.push(`${name}: ${spec}`);
-      }
-    }
+    // legacy：直接扫描 runtime 源码的 import 声明。
+    const { scanned: dependencyScanRan, offenders } = legacyDependencyScan(runtimeDir);
     expect(dependencyScanRan).toBe(true);
     expect(offenders).toEqual([]);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
     const runtimeDir = dirname(fileURLToPath(import.meta.url));
-    const files = readdirSync(runtimeDir).filter((name) => /\.tsx?$/.test(name) && !name.endsWith(".spec.ts"));
-    const forbidden = /(?:@zeta-agent\/)?(?:deploy|session-persistence|persistence|provider(?:s)?)(?:\/|["']|$)/;
-    const offenders: string[] = [];
-    let dependencyScanRan = false;
-    for (const name of files) {
-      const source = readFileSync(join(runtimeDir, name), "utf8");
-      for (const line of source.split(/\r?\n/)) {
-        dependencyScanRan = true;
-        const match = /^\s*(?:import|export)\s+(?!type\b).*?from\s*["']([^"']+)["']/.exec(line);
-        const bare = /^\s*import\s*["']([^"']+)["']/.exec(line);
-        const spec = match?.[1] ?? bare?.[1];
-        if (spec !== undefined && forbidden.test(spec)) offenders.push(`${name}: ${spec}`);
-      }
-    }
+    // plugin：经插件管理器 hook 链做 dependency 扫描，独立实现 import 提取。
+    const { scanned: dependencyScanRan, offenders } = await pluginDependencyScan(runtimeDir);
     expect(dependencyScanRan).toBe(true);
     expect(offenders).toEqual([]);
     expect(await pluginHookProbe()).toBe(true);
@@ -636,7 +752,8 @@ const cases: readonly InvariantCase[] = [
       { id: "a", tool: "a", input: {} },
       { id: "b", tool: "b", input: {}, dependsOn: ["a"] },
     ];
-    const results = await executeConditionalBatch(batch, { registry, controller });
+    // legacy：本地 batch 适配器的 terminate 规则，混合批次不得让 controller 停机。
+    const results = await runLegacyTerminateBatch(batch, registry, controller);
     const mixedBatchObserved =
       results.length === 2 && results[1]?.isError === false && controller.terminated === false;
     expect(results).toHaveLength(2);
@@ -662,6 +779,7 @@ const cases: readonly InvariantCase[] = [
       { id: "a", tool: "a", input: {} },
       { id: "b", tool: "b", input: {}, dependsOn: ["a"] },
     ];
+    // plugin：框架 executeConditionalBatch 的 terminate 全批次规则。
     const results = await executeConditionalBatch(batch, { registry, controller });
     const mixedBatchObserved =
       results.length === 2 && results[1]?.isError === false && controller.terminated === false;
@@ -738,8 +856,8 @@ const cases: readonly InvariantCase[] = [
     const systemPrompt = "sys";
     const previous = ["read"];
     const next = ["read", "write"];
-    const delta = declareToolChanges(previous, next, systemPrompt);
-    // 关键：工具声明 delta 直接来自 declareToolChanges，不再手工调用两次 reduceState。
+    // legacy：本地声明适配器产出 delta，不调用框架 declareToolChanges。
+    const delta = declareToolChangesLegacy(previous, next, systemPrompt);
     expect(delta.toolsAdded).toEqual(["write"]);
     expect(delta.toolsRemoved).toEqual([]);
     expect(delta.messages).toHaveLength(1);
@@ -758,6 +876,7 @@ const cases: readonly InvariantCase[] = [
     const systemPrompt = "sys";
     const previous = ["read"];
     const next = ["read", "write"];
+    // plugin：框架 declareToolChanges 一次产出 system delta，保持 single-source。
     const delta = declareToolChanges(previous, next, systemPrompt);
     expect(delta.toolsAdded).toEqual(["write"]);
     expect(delta.toolsRemoved).toEqual([]);

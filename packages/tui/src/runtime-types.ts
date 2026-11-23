@@ -2,6 +2,8 @@ import type { AgentSignals, EventSource } from "./signal";
 import type { SolidPlugin } from "./slots-native";
 import type { ZetaNativeSlots } from "./slots-native";
 import type { SlashCommand } from "./slash";
+import type { SubmitMode } from "./components/editor";
+import type { AgentUsageTelemetry } from "./telemetry-types";
 
 export interface RuntimeMessage {
   readonly role: string;
@@ -36,7 +38,7 @@ export interface RuntimeResources {
 export interface RuntimeTuiOptions {
   readonly title?: string;
   readonly messages?: readonly RuntimeMessage[];
-  readonly onSubmit?: (text: string) => void | Promise<void>;
+  readonly onSubmit?: (text: string, mode?: SubmitMode) => void | Promise<void>;
   readonly onExit?: () => void;
   /** Esc：中止当前运行。 */
   readonly onAbort?: () => void;
@@ -68,6 +70,8 @@ export interface RuntimeTuiOptions {
   /** /new：宿主执行真实会话替换；未提供时保持旧的纯视图行为。 */
   readonly onNewSession?: () => void | Promise<void>;
   readonly resources?: RuntimeResources;
+  /** 真实遥测（token/成本/分支/会话）：运行时从事件源补齐 token，再交给 footer。 */
+  readonly telemetry?: AgentUsageTelemetry;
 }
 
 export interface RuntimeTuiHandle {

@@ -21,6 +21,16 @@ export function oscHyperlink(uri: string, params: Readonly<Record<string, string
   return `\x1b]8;;${prefix}${uri}\x1b\\`;
 }
 
+/** 提取 Markdown 内联链接 URL，供产线渲染时触发 OSC 8 超链接。 */
+export function extractMarkdownLinks(text: string): string[] {
+  const urls: string[] = [];
+  for (const match of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+    const url = match[1];
+    if (url !== undefined && url.length > 0) urls.push(url);
+  }
+  return urls;
+}
+
 export interface KittyModifiers {
   readonly ctrl: boolean;
   readonly shift: boolean;

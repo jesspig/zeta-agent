@@ -133,6 +133,7 @@ describe("T-06 安全组件接入真实工具/provider 路径（系统级证据�
     const harness = emissionHarness({
       calls: [{ name: "emit", args: { url: "https://sink.test/notify" } }],
       emissionTools: ["emit"],
+      egressPolicy: createEgressPolicy({ allow: [{ host: "sink.test", port: 443 }] }),
       effects,
     });
 
@@ -162,6 +163,7 @@ describe("T-06 安全组件接入真实工具/provider 路径（系统级证据�
         { name: "emit", args: { url: "https://sink.test/other" } },
       ],
       emissionTools: ["emit"],
+      egressPolicy: createEgressPolicy({ allow: [{ host: "sink.test", port: 443 }] }),
     });
 
     await harness.agent.prompt("go");

@@ -12,7 +12,14 @@ import {
   type Agent,
   type AgentStreamFn,
 } from "@zeta-agent/agent";
-import { renderTui, type RuntimeMessage, type RuntimeTuiHandle } from "@zeta-agent/tui";
+import {
+  detectGitBranch,
+  renderTui,
+  type RuntimeMessage,
+  type RuntimeTuiHandle,
+  type SubmitMode,
+  type UsagePricing,
+} from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
 import { resolveDataDir } from "./runtime";
@@ -76,6 +83,17 @@ function echoStream(): AgentStreamFn {
     const last = request.messages.at(-1);
     if (last?.role === "user") yield `[echo] ${String(last.content)}`;
   };
+}
+
+/** 把 models.dev 的 "$input/output"（每百万 token）定价串解析为遥测计价。 */
+export function parseModelPrice(price: string | undefined): UsagePricing | undefined {
+  if (price === "free") return { inputPerMillion: 0, outputPerMillion: 0 };
+  if (price === undefined || price === "-") return undefined;
+  const match = /^\$([\d.]+)\/([\d.]+)$/.exec(price);
+  const input = match?.[1];
+  const output = match?.[2];
+  if (input === undefined || output === undefined) return undefined;
+  return { inputPerMillion: Number(input), outputPerMillion: Number(output) };
 }
 
 interface Connection {
@@ -223,8 +241,14 @@ async function runTui(args: CliArgs): Promise<number> {
     void applyConnection(bundle.connection.baseUrl, bundle.connection.apiKey);
   }
 
-  const handleCommand = async (text: string): Promise<void> => {
+  const handleCommand = async (text: string, mode: SubmitMode = "steer"): Promise<void> => {
     if (!text.startsWith("/")) {
+      if (mode === "follow-up") {
+        // follow-up 进 agent 的下一轮队列，不打断当前回合（与 steer 双队列语义对应）。
+        agent.followUp({ role: "user", content: text });
+        notice(`已排队 follow-up：${text}`);
+        return;
+      }
       if (agent.state.isStreaming || agent.state.pendingToolCalls.size > 0) {
         notice("正在运行中：请等待完成，或按 Esc 中止后再发送");
         return;
@@ -271,6 +295,12 @@ async function runTui(args: CliArgs): Promise<number> {
       // /new：清空真实会话上下文，使下一轮请求不再携带旧消息。
       onNewSession: () => agent.reset(),
       resources: { models: bundle.models.slice(0, 4) },
+      telemetry: {
+        cwd: process.cwd(),
+        branch: detectGitBranch(process.cwd()),
+        session: `zeta-${process.pid}`,
+        pricing: parseModelPrice(decorateModels([bundle.model])[0]?.price),
+      },
     }),
     messages: toRuntimeMessages(agent.state.messages),
   });

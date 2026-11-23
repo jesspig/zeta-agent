@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createAgent } from "./facade";
 
-/** CR-03：默认占位后端不得把未执行的命令报告为成功。 */
+/** CR-03：默认占位后端能力声明为 unsupported，不得把未执行的命令报告为成功。 */
 describe("T-03 默认安全后端失败关闭", () => {
-  test("未注入真实后端时命令工具返回失败而非成功", async () => {
+  test("未注入真实后端时命令工具因能力降级失败关闭，绝不报告成功", async () => {
     let turn = 0;
     const agent = createAgent({
       streamFn: async function* () {
@@ -19,6 +19,6 @@ describe("T-03 默认安全后端失败关闭", () => {
       ? (content as Record<string, unknown>)
       : {};
     expect(record.ok).toBe(false);
-    expect(String(record.error ?? "")).toMatch(/COMMAND_FAILED|NO_REAL_EXECUTION_BACKEND/i);
+    expect(String(record.error ?? "")).toMatch(/CRITICAL_LAYER_DEGRADED|COMMAND_FAILED|NO_REAL_EXECUTION_BACKEND/i);
   });
 });

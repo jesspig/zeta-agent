@@ -96,13 +96,17 @@ describe("T-11 内置工具真实化", () => {
 
   test("write 在受控目录内写文件并返回结构化结果", async () => {
     const file = join(root, "out.txt");
-    const content = await runTool("write", { path: file, content: "written" });
+    const calls: string[][] = [];
+    const content = await runTool("write", { path: file, content: "written" }, {
+      securityBackend: recordingBackend(calls, { exitCode: 0, stdout: "", stderr: "", isolated: null }),
+    });
     expect(isRecord(content)).toBe(true);
     if (isRecord(content)) {
       expect(content.ok).toBe(true);
       expect(content.path).toBe(file);
       expect(content.bytes).toBe(7);
     }
+    expect(calls.some((argv) => argv[0] === "fs:write" && argv[1] === file)).toBe(true);
     const { readFileSync } = await import("node:fs");
     expect(readFileSync(file, "utf8")).toBe("written");
   });
@@ -110,12 +114,16 @@ describe("T-11 内置工具真实化", () => {
   test("edit 对受控目录文件做精确替换", async () => {
     const file = join(root, "edit.txt");
     writeFileSync(file, "foo bar foo");
-    const content = await runTool("edit", { path: file, from: "foo", to: "baz" });
+    const calls: string[][] = [];
+    const content = await runTool("edit", { path: file, from: "foo", to: "baz" }, {
+      securityBackend: recordingBackend(calls, { exitCode: 0, stdout: "", stderr: "", isolated: null }),
+    });
     expect(isRecord(content)).toBe(true);
     if (isRecord(content)) {
       expect(content.ok).toBe(true);
       expect(content.replacements).toBe(2);
     }
+    expect(calls.some((argv) => argv[0] === "fs:edit" && argv[1] === file)).toBe(true);
     const { readFileSync } = await import("node:fs");
     expect(readFileSync(file, "utf8")).toBe("baz bar baz");
   });

@@ -328,7 +328,7 @@ describe("T-10 完整 AgentPluginApi 契约", () => {
 
   test("capabilities/onEffect/addRedactor 经 api 委托到既有后端", () => {
     const agent = createAgent();
-    expect(agent.api.capabilities().isolation).toBe("active");
+    expect(agent.api.capabilities().isolation).toBe("unsupported");
 
     const seen: string[] = [];
     const stopEffect = agent.api.onEffect((meta) => {

@@ -15,6 +15,8 @@ import {
 } from "../timeline";
 import { presentTool, type StyledLine, type StyledRun } from "../tool-view";
 import { parseMarkdown } from "../markdown-blocks";
+import { extractMarkdownLinks } from "../osc";
+import { useOsc } from "../osc-context";
 import { useTheme } from "../theme-context";
 
 
@@ -59,7 +61,12 @@ export function StyledLineText(props: { readonly line: StyledLine }) {
 /** 一段 Markdown：逐行投影为样式化文本。 */
 export function MarkdownView(props: { readonly text: string; readonly italic?: boolean; readonly token?: StyledRun["token"] }) {
   const theme = useTheme();
+  const osc = useOsc();
   const lines = createMemo(() => parseMarkdown(props.text));
+  // 产线触发 OSC 8：每显示一条 Markdown 链接，就向终端登记对应 URL 的超链接。
+  createEffect(() => {
+    for (const url of extractMarkdownLinks(props.text)) osc.link(url);
+  });
   return (
     <box flexDirection="column">
       <For each={lines()}>

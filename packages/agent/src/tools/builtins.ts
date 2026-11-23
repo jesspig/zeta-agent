@@ -87,6 +87,19 @@ function ok(extra: Readonly<Record<string, unknown>>): Record<string, unknown> {
   return { ok: true, ...extra };
 }
 
+/** 文件变更与 bash/powershell 共用同一条后端执行边界：能力探测 + backend.run 登记。 */
+async function authorizeFileMutation(
+  backend: ExecutionBackend,
+  guard: () => void,
+  operation: "write" | "edit",
+  path: string
+): Promise<void> {
+  guard();
+  // 后端是命令执行抽象，结构化写入由工具层在 realpath 校验后执行；
+  // 此处取 backend.run 的强制门禁语义，不以其 exitCode 判定写入结果。
+  await backend.run({ argv: [`fs:${operation}`, path] });
+}
+
 function parameters(...definitions: ToolParameter[]): readonly ToolParameter[] {
   return definitions;
 }
@@ -116,7 +129,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function fileTools(allowed: readonly string[]): ToolDefinition[] {
+function fileTools(
+  allowed: readonly string[],
+  backend: ExecutionBackend,
+  guard: () => void
+): ToolDefinition[] {
   return [
     {
       name: "read",
@@ -139,10 +156,11 @@ function fileTools(allowed: readonly string[]): ToolDefinition[] {
         pathParameter("要写入的文件绝对路径"),
         { name: "content", type: "string", description: "文件内容", required: true }
       ),
-      execute(input) {
+      async execute(input) {
         const args = isRecord(input) ? input : {};
         const path = assertConfined(requireString(args, "path"), allowed);
         const content = requireString(args, "content");
+        await authorizeFileMutation(backend, guard, "write", path);
         writeFileSync(path, content, "utf8");
         return ok({ path, bytes: Buffer.byteLength(content, "utf8") });
       },
@@ -158,12 +176,13 @@ function fileTools(allowed: readonly string[]): ToolDefinition[] {
         { name: "from", type: "string", description: "被替换的原文本", required: true },
         { name: "to", type: "string", description: "替换后的文本", required: true }
       ),
-      execute(input) {
+      async execute(input) {
         const args = isRecord(input) ? input : {};
         const path = assertConfined(requireString(args, "path"), allowed);
         const from = requireString(args, "from");
         const to = requireString(args, "to");
         if (from.length === 0) throw new Error("TOOL_INPUT_INVALID: from must not be empty");
+        await authorizeFileMutation(backend, guard, "edit", path);
         const original = readFileSync(path, "utf8");
         let replacements = 0;
         let cursor = 0;
@@ -288,9 +307,10 @@ function commandTools(backend: ExecutionBackend, guard: () => void): ToolDefinit
 
 export function builtinToolDefinitions(options: BuiltinToolOptions): readonly ToolDefinition[] {
   const guard = (): void => assertEnforcement(options.securityBackend.capabilities());
+  const files = fileTools(options.allowedDirectories, options.securityBackend, guard);
   return [
-    ...fileTools(options.allowedDirectories).slice(0, 1),
+    ...files.slice(0, 1),
     ...commandTools(options.securityBackend, guard),
-    ...fileTools(options.allowedDirectories).slice(1),
+    ...files.slice(1),
   ];
 }

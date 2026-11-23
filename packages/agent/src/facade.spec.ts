@@ -120,15 +120,16 @@ describe("T-09 createAgent PluginApiSurface 装配", () => {
     const agent = facade.createAgent();
     const probed = agent.capabilities();
 
+    // 默认占位后端未接真实执行器，能力声明为 unsupported（与实际一致）。
     expect(probed).toEqual({
-      isolation: "active",
-      seccomp: "active",
-      fsConfinement: "active",
-      auditSink: "active",
-      egressDefaultDeny: "active",
+      isolation: "unsupported",
+      seccomp: "unsupported",
+      fsConfinement: "unsupported",
+      auditSink: "unsupported",
+      egressDefaultDeny: "unsupported",
     });
     probed.isolation = "degraded";
-    expect(agent.capabilities().isolation).toBe("active");
+    expect(agent.capabilities().isolation).toBe("unsupported");
   });
 
   test("onEffect() 注册 handler 并返回可撤销的 disposer", () => {
