@@ -2,39 +2,40 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import {
-  createEventStream,
-  type AgentEvent,
-  type AgentMessage,
-} from "./agent";
+import { createEventStream, type AgentEvent } from "./agent";
 import { createInbox } from "./inbox";
 import {
-  RUN_LOOP_STEPS,
   runLoop,
   type AssistantResult,
   type LastTurn,
   type LoopRuntime,
   type ToolResult,
 } from "./loop";
-import { createDecisionWaterfall, nextAction, type AgentDecision } from "./decision";
-import { createInitialState, reduceState } from "./agent";
+import { createDecisionWaterfall, type AgentDecision, type DecisionWaterfall } from "./decision";
+import { createInitialState, type AgentState } from "./agent";
 import { executeConditionalBatch, type ConditionalCall } from "../tools/parallel";
 import {
   createTerminationController,
   createToolRegistry,
+  declareToolChanges,
+  runToolCall,
+  type BatchContext,
   type ToolDescriptor,
   type ToolExecuteContext,
 } from "../tools/pipeline";
+import { AgentPluginManager, type PluginPipelineConfig } from "../plugins/manager";
 
 /**
  * agent-core 12 条不变量等价测试（state-and-events.md §13 / 基线约定 §9）。
  *
  * 与 tools/invariants.spec.ts 的工具流水线 12 条（inv-tool-）严格区分：
  * 本文件覆盖 agent-core 的 12 条，测试名统一使用 inv-core- 前缀。
- * 每条不变量提供 legacy（字段赋值 hook）与 plugin（管线 hook）两版独立断言。
+ * 每条不变量提供 legacy（字段赋值 hook）与 plugin（真 AgentPluginManager 管线）两版独立断言。
  *
  * CR-39 修复：两版各自构造本版 runtime、各自内联行为断言与接线哨兵，
  * 不再共享 CHECKS 条目，也不通过 check(mode) 委托（见 T-03 结构门）。
+ * T-04：plugin 版由 AgentPluginManager 的 decision 链 + DecisionWaterfall 桥接驱动，
+ * 不再使用 decision 字段赋值；legacy 版保留 finishTurn 字段赋值。
  */
 
 interface InvariantCase {
@@ -52,64 +53,37 @@ interface RuntimeOptions {
   readonly responses?: readonly Partial<AssistantResult>[];
   readonly toolResults?: readonly ToolResult[];
   readonly finishTurnLegacy?: (turn: LastTurn) => { action: "continue" | "end" } | undefined;
-  readonly decisionPlugin?: NonNullable<LoopRuntime["decision"]>;
+  readonly decisionPlugin?: (state: AgentState, turn: LastTurn) => AgentDecision;
   readonly prepareNextTurnCalls?: { count: number };
   readonly onRequest?: (request: unknown) => void;
+  /** #6 专用：legacy 版字段赋值一个抛错 hook 的 waterfall。 */
+  readonly waterfall?: DecisionWaterfall;
+  /** #6 专用：plugin 版插件管理器配置（关闭 fallback 使 hook 抛错传播到 runLoop）。 */
+  readonly managerConfig?: Partial<PluginPipelineConfig>;
 }
 
-/**
- * 构造 runLoop runtime，返回可观察探针：事件序列、请求次数、最终状态。
- * legacy 模式用 finishTurn 字段赋值；plugin 模式用 decision 字段（管线入口）。
- */
-function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
+/** 决策链在插件管理器中流转的输入。 */
+interface PluginDecisionInput {
+  readonly decision: AgentDecision;
+  readonly state: AgentState;
+  readonly turn: LastTurn;
+}
+
+/** 只负责观察（事件序列 / 工具 id / 计数），与行为断言体无关，两版共用不构成共享断言。 */
+function createProbes() {
   const stream = createEventStream();
   const order: string[] = [];
   const startCallIds: string[] = [];
   const endCallIds: string[] = [];
   stream.subscribe((event: AgentEvent) => {
     order.push(event.type);
-    // tool_execution_start 按 toolCalls 源码顺序 emit；end 按结果完成顺序 emit。
     if (event.type === "tool_execution_start") startCallIds.push(event.toolCallId);
     if (event.type === "tool_execution_end") endCallIds.push(event.toolCallId);
   });
   const inbox = createInbox();
-  const response: AssistantResult = {
-    message: { role: "assistant", content: "ok" },
-    toolCalls: [],
-    stopReason: "stop",
-    ...options.response,
-  };
   let requestCount = 0;
   let streamCount = 0;
-
-  const runtime: LoopRuntime = {
-    inbox,
-    emit: (event) => stream.emit(event),
-    getState: () => stream.getState(),
-    prepareRequest: (request) => {
-      requestCount += 1;
-      options.onRequest?.(request);
-      return request;
-    },
-    streamAssistant: async () => {
-      requestCount += 1;
-      streamCount += 1;
-      // 安全阀：continue 场景在若干轮后强制硬退出，避免断言用例无限循环。
-      if (streamCount > 3) return { ...response, stopReason: "error", toolCalls: [] };
-      const override = options.responses?.[streamCount - 1];
-      return override === undefined ? response : { ...response, ...override };
-    },
-    executeToolCalls: async () => options.toolResults ?? [],
-    prepareNextTurn: () => {
-      if (options.prepareNextTurnCalls) options.prepareNextTurnCalls.count += 1;
-    },
-    ...(mode === "legacy"
-      ? { finishTurn: options.finishTurnLegacy ?? (() => ({ action: "continue" })) }
-      : { decision: options.decisionPlugin ?? (() => ({ kind: "exit", reason: "end" })) }),
-  };
-
   return {
-    runtime,
     stream,
     inbox,
     order,
@@ -117,7 +91,105 @@ function makeRuntime(mode: "legacy" | "plugin", options: RuntimeOptions = {}) {
     endCallIds,
     getRequestCount: () => requestCount,
     getStreamCount: () => streamCount,
+    countRequest: () => { requestCount += 1; },
+    nextStream: () => { requestCount += 1; streamCount += 1; return streamCount; },
   };
+}
+
+function responseOf(options: RuntimeOptions): AssistantResult {
+  return {
+    message: { role: "assistant", content: "ok" },
+    toolCalls: [],
+    stopReason: "stop",
+    ...options.response,
+  };
+}
+
+function nextResponse(
+  probes: ReturnType<typeof createProbes>,
+  options: RuntimeOptions,
+  response: AssistantResult
+): AssistantResult {
+  const n = probes.nextStream();
+  // 安全阀：continue 场景在若干轮后强制硬退出，避免断言用例无限循环。
+  if (n > 3) return { ...response, stopReason: "error", toolCalls: [] };
+  const override = options.responses?.[n - 1];
+  return override === undefined ? response : { ...response, ...override };
+}
+
+/** legacy 版：hook 通过字段赋值驱动（finishTurn / waterfall 字段）。 */
+function makeLegacyRuntime(options: RuntimeOptions = {}) {
+  const probes = createProbes();
+  const response = responseOf(options);
+  const runtime: LoopRuntime = {
+    inbox: probes.inbox,
+    emit: (event) => probes.stream.emit(event),
+    getState: () => probes.stream.getState(),
+    prepareRequest: (request) => {
+      probes.countRequest();
+      options.onRequest?.(request);
+      return request;
+    },
+    streamAssistant: async () => nextResponse(probes, options, response),
+    executeToolCalls: async () => options.toolResults ?? [],
+    prepareNextTurn: () => {
+      if (options.prepareNextTurnCalls) options.prepareNextTurnCalls.count += 1;
+    },
+    finishTurn: options.finishTurnLegacy ?? (() => ({ action: "continue" })),
+    waterfall: options.waterfall,
+  };
+  return { ...probes, runtime };
+}
+
+/**
+ * plugin 版：hook 由真 AgentPluginManager 驱动。
+ * manager 的 decision 链负责产出决策，DecisionWaterfall 仅作桥接；不使用 decision 字段赋值。
+ */
+function makePluginRuntime(options: RuntimeOptions = {}) {
+  const probes = createProbes();
+  const response = responseOf(options);
+  const manager = new AgentPluginManager({ config: options.managerConfig });
+  const decisionFn = options.decisionPlugin ?? (() => ({ kind: "exit", reason: "end" }));
+
+  manager.addHook<PluginDecisionInput>("decision", (input) => {
+    const override = decisionFn(input.state, input.turn);
+    return override === undefined ? input : { ...input, decision: override };
+  });
+  manager.addHook("prepareNextTurn", () => {
+    if (options.prepareNextTurnCalls) options.prepareNextTurnCalls.count += 1;
+  });
+
+  const waterfall = createDecisionWaterfall();
+  waterfall.add(async (_decision, next, context) => {
+    const event = context.event;
+    const turn: LastTurn = event.type === "turn_end"
+      ? { message: event.message, toolResults: event.toolResults }
+      : { message: { role: "assistant", content: "" }, toolResults: [] };
+    const result = await manager.run<PluginDecisionInput>("decision", {
+      decision: _decision,
+      state: context.state,
+      turn,
+    });
+    next(result.decision);
+  });
+
+  const runtime: LoopRuntime = {
+    inbox: probes.inbox,
+    emit: (event) => probes.stream.emit(event),
+    getState: () => probes.stream.getState(),
+    prepareRequest: (request) => {
+      probes.countRequest();
+      options.onRequest?.(request);
+      return request;
+    },
+    streamAssistant: async () => nextResponse(probes, options, response),
+    executeToolCalls: async () => options.toolResults ?? [],
+    prepareNextTurn: () => {
+      void manager.run("prepareNextTurn", probes.stream.getState());
+    },
+    waterfall,
+  };
+  return { ...probes, runtime, manager };
 }
 
 function pair(
@@ -135,20 +207,25 @@ function pair(
  */
 export const INVARIANT_TEST_POINTS: Record<
   number,
-  { readonly point: string; readonly keywords: readonly string[]; readonly assertFragment: string }
+  {
+    readonly point: string;
+    readonly keywords: readonly string[];
+    readonly assertFragment: string;
+    readonly pluginFragment: string;
+  }
 > = {
-  1: { point: "assistant message_end 屏障", keywords: ["message_end", "preflight", "barrier"], assertFragment: "sawMessageEndBeforeTool" },
-  2: { point: "完成顺序 vs 源码顺序解耦", keywords: ["tool_execution_end", "callId", "reverse"], assertFragment: "reverseOrderObserved" },
-  3: { point: "error/aborted 硬退出", keywords: ["stopReason", "error", "continue"], assertFragment: "hardExitObserved" },
-  4: { point: "end 不清队列", keywords: ["prepareNextTurn", "queue", "agent_end"], assertFragment: "endKeepsQueueObserved" },
-  5: { point: "continue 保证一次请求", keywords: ["streamCount", "naturalRequest", "continue"], assertFragment: "naturalRequestSeen" },
-  6: { point: "hook no-throw", keywords: ["throw", "waterfall", "safe-fallback"], assertFragment: "errorHookInvoked" },
-  7: { point: "streamFn 不抛错", keywords: ["streamAssistant", "error", "agent_end"], assertFragment: "streamErrorObserved" },
-  8: { point: "迟到 onUpdate 丢弃 + durationMs 边界", keywords: ["onUpdate", "durationMs", "settle"], assertFragment: "lateUpdateObserved" },
-  9: { point: "core 无持久化/provider 依赖", keywords: ["import", "runtime", "dependency"], assertFragment: "dependencyScanRan" },
-  10: { point: "terminate 全批次规则", keywords: ["terminate", "batch", "controller"], assertFragment: "mixedBatchObserved" },
-  11: { point: "runToolCall 走 hooks 无事件", keywords: ["nested", "toolCall", "event"], assertFragment: "legacyNestedInvoked" },
-  12: { point: "system 消息单一事实源", keywords: ["system", "delta", "single-source"], assertFragment: "singleSourceVerified" },
+  1: { point: "assistant message_end 屏障", keywords: ["message_end", "preflight", "barrier"], assertFragment: "sawMessageEndBeforeTool", pluginFragment: "sawMessageEndBeforeTool" },
+  2: { point: "完成顺序 vs 源码顺序解耦", keywords: ["tool_execution_end", "callId", "reverse"], assertFragment: "reverseOrderObserved", pluginFragment: "reverseOrderObserved" },
+  3: { point: "error/aborted 硬退出", keywords: ["stopReason", "error", "continue"], assertFragment: "hardExitObserved", pluginFragment: "hardExitObserved" },
+  4: { point: "end 不清队列", keywords: ["prepareNextTurn", "queue", "agent_end"], assertFragment: "endKeepsQueueObserved", pluginFragment: "endKeepsQueueObserved" },
+  5: { point: "continue 保证一次请求", keywords: ["streamCount", "naturalRequest", "continue"], assertFragment: "naturalRequestSeen", pluginFragment: "naturalRequestSeen" },
+  6: { point: "hook no-throw", keywords: ["throw", "waterfall", "safe-fallback"], assertFragment: "errorHookInvoked", pluginFragment: "errorHookInvoked" },
+  7: { point: "streamFn 不抛错", keywords: ["streamAssistant", "error", "agent_end"], assertFragment: "streamErrorObserved", pluginFragment: "streamErrorObserved" },
+  8: { point: "迟到 onUpdate 丢弃 + durationMs 边界", keywords: ["onUpdate", "durationMs", "settle"], assertFragment: "lateUpdateObserved", pluginFragment: "lateUpdateObserved" },
+  9: { point: "core 无持久化/provider 依赖", keywords: ["import", "runtime", "dependency"], assertFragment: "dependencyScanRan", pluginFragment: "dependencyScanRan" },
+  10: { point: "terminate 全批次规则", keywords: ["terminate", "batch", "controller"], assertFragment: "mixedBatchObserved", pluginFragment: "mixedBatchObserved" },
+  11: { point: "runToolCall 走 hooks 无事件", keywords: ["nested", "toolCall", "event"], assertFragment: "legacyNestedInvoked", pluginFragment: "pluginNestedInvoked" },
+  12: { point: "system 消息单一事实源", keywords: ["system", "delta", "single-source"], assertFragment: "singleSourceVerified", pluginFragment: "singleSourceVerified" },
 };
 
 const INVARIANT_NAMES = [
@@ -168,11 +245,11 @@ const INVARIANT_NAMES = [
 
 /**
  * 接线哨兵：验证本版钩子确被 runLoop 读取。
- * legacy 走字段赋值 finishTurn；plugin 走管线入口 decision。两者不共用断言体。
+ * legacy 走字段赋值 finishTurn；plugin 走插件管理器 decision 链 + 桥接 waterfall。两者不共用断言体。
  */
 async function legacyHookProbe(): Promise<boolean> {
   let invoked = false;
-  const { runtime } = makeRuntime("legacy", {
+  const { runtime } = makeLegacyRuntime({
     finishTurnLegacy: (turn) => {
       invoked = turn.message.role === "assistant";
       return { action: "end" };
@@ -184,13 +261,15 @@ async function legacyHookProbe(): Promise<boolean> {
 
 async function pluginHookProbe(): Promise<boolean> {
   let invoked = false;
-  const { runtime } = makeRuntime("plugin", {
+  const { runtime, manager } = makePluginRuntime({
     decisionPlugin: () => {
       invoked = true;
       return { kind: "exit", reason: "dual-version-probe" };
     },
   });
   await runLoop(runtime);
+  // 哨兵强化：decision 钩子确实注册并运行在插件管理器的链上，而非字段赋值。
+  expect(manager.chain("decision").size).toBeGreaterThan(0);
   return invoked;
 }
 
@@ -201,7 +280,7 @@ async function pluginHookProbe(): Promise<boolean> {
 const cases: readonly InvariantCase[] = [
   // #1 message-end 屏障
   pair(1, INVARIANT_NAMES[0], async () => {
-    const { runtime, order, stream } = makeRuntime("legacy", {
+    const { runtime, order, stream } = makeLegacyRuntime({
       response: { toolCalls: [{ id: "c1", name: "tool", args: {} }], stopReason: "stop" },
       toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
     });
@@ -215,7 +294,7 @@ const cases: readonly InvariantCase[] = [
     expect(sawMessageEndBeforeTool).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
-    const { runtime, order, stream } = makeRuntime("plugin", {
+    const { runtime, order, stream } = makePluginRuntime({
       response: { toolCalls: [{ id: "c1", name: "tool", args: {} }], stopReason: "stop" },
       toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
     });
@@ -240,7 +319,7 @@ const cases: readonly InvariantCase[] = [
       { callId: "c2", message: { role: "toolResult", content: "second" } },
       { callId: "c1", message: { role: "toolResult", content: "first" } },
     ];
-    const { runtime, startCallIds, endCallIds } = makeRuntime("legacy", {
+    const { runtime, startCallIds, endCallIds } = makeLegacyRuntime({
       response: { toolCalls: calls, stopReason: "stop" },
       toolResults: results,
       finishTurnLegacy: () => ({ action: "end" as const }),
@@ -261,7 +340,7 @@ const cases: readonly InvariantCase[] = [
       { callId: "c2", message: { role: "toolResult", content: "second" } },
       { callId: "c1", message: { role: "toolResult", content: "first" } },
     ];
-    const { runtime, startCallIds, endCallIds } = makeRuntime("plugin", {
+    const { runtime, startCallIds, endCallIds } = makePluginRuntime({
       response: { toolCalls: calls, stopReason: "stop" },
       toolResults: results,
     });
@@ -276,7 +355,7 @@ const cases: readonly InvariantCase[] = [
 
   // #3 error/aborted 硬退出
   pair(3, INVARIANT_NAMES[2], async () => {
-    const { runtime, getStreamCount } = makeRuntime("legacy", {
+    const { runtime, getStreamCount } = makeLegacyRuntime({
       response: { stopReason: "error", toolCalls: [] },
       finishTurnLegacy: () => ({ action: "continue" }),
     });
@@ -286,7 +365,7 @@ const cases: readonly InvariantCase[] = [
     expect(hardExitObserved).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
-    const { runtime, getStreamCount } = makeRuntime("plugin", {
+    const { runtime, getStreamCount } = makePluginRuntime({
       response: { stopReason: "error", toolCalls: [] },
       decisionPlugin: () => ({ kind: "reasoning", note: "retry" }) as const,
     });
@@ -300,7 +379,7 @@ const cases: readonly InvariantCase[] = [
   // #4 {action:"end"} 不轮询队列、不 prepareNextTurn、不清队列
   pair(4, INVARIANT_NAMES[3], async () => {
     const prepare = { count: 0 };
-    const { runtime, inbox, order: runtimeOrder } = makeRuntime("legacy", {
+    const { runtime, inbox, order: runtimeOrder } = makeLegacyRuntime({
       prepareNextTurnCalls: prepare,
       finishTurnLegacy: () => ({ action: "end" }),
     });
@@ -314,7 +393,7 @@ const cases: readonly InvariantCase[] = [
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
     const prepare = { count: 0 };
-    const { runtime, inbox, order: runtimeOrder } = makeRuntime("plugin", {
+    const { runtime, inbox, order: runtimeOrder } = makePluginRuntime({
       prepareNextTurnCalls: prepare,
       decisionPlugin: () => ({ kind: "exit", reason: "end" }) as const,
     });
@@ -331,7 +410,7 @@ const cases: readonly InvariantCase[] = [
   // #5 {action:"continue"} 是"保证一次请求"，已有自然请求时不叠加
   pair(5, INVARIANT_NAMES[4], async () => {
     let finishCount = 0;
-    const { runtime, getStreamCount } = makeRuntime("legacy", {
+    const { runtime, getStreamCount } = makeLegacyRuntime({
       responses: [
         { toolCalls: [{ id: "c1", name: "tool", args: {} }], stopReason: "stop" },
         { toolCalls: [], stopReason: "stop" },
@@ -349,7 +428,7 @@ const cases: readonly InvariantCase[] = [
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
     let finishCount = 0;
-    const { runtime, getStreamCount } = makeRuntime("plugin", {
+    const { runtime, getStreamCount } = makePluginRuntime({
       responses: [
         { toolCalls: [{ id: "c1", name: "tool", args: {} }], stopReason: "stop" },
         { toolCalls: [], stopReason: "stop" },
@@ -367,70 +446,59 @@ const cases: readonly InvariantCase[] = [
     expect(await pluginHookProbe()).toBe(true);
   }),
 
-  // #6 hook no-throw：决策/转换钩子必须返回安全回退值而非抛错
+  // #6 hook no-throw：抛错 hook 不得击穿 runLoop，须被归一化为 safe-fallback
   pair(6, INVARIANT_NAMES[5], async () => {
-    const state = createInitialState({ messages: [{ role: "assistant", content: "x" }] });
-    expect(() => nextAction(state)).not.toThrow();
-    const decision = nextAction(state);
-    expect(["reasoning", "acting", "exit"]).toContain(decision.kind);
     let errorHookInvoked = false;
-    const waterfall = createDecisionWaterfall();
-    waterfall.add((_decision, next) => {
+    // legacy 版：字段赋值一个抛错的 waterfall hook，验证 runLoop 归一化而非内部自抛自捕。
+    const errorWaterfall = createDecisionWaterfall();
+    errorWaterfall.add(() => {
       errorHookInvoked = true;
-      let fallback: AgentDecision = { kind: "exit", reason: "safe-fallback" };
-      try {
-        throw new Error("internal hook failure");
-      } catch {
-        fallback = { kind: "exit", reason: "safe-fallback" };
-      }
-      next(fallback);
+      throw new Error("legacy hook throw");
     });
-    const event: AgentEvent = { type: "turn_end", message: { role: "assistant", content: "x" }, toolResults: [] };
+    const { runtime, order } = makeLegacyRuntime({
+      finishTurnLegacy: () => undefined,
+      waterfall: errorWaterfall,
+    });
     let runThrew = false;
-    let result: unknown;
+    let safeFallback = false;
     try {
-      result = await waterfall.run(decision, { state, event });
+      await runLoop(runtime);
+      safeFallback = order.includes("agent_end");
     } catch {
       runThrew = true;
     }
-    expect(runThrew).toBe(false);
-    expect(result).toEqual({ kind: "exit", reason: "safe-fallback" });
     expect(errorHookInvoked).toBe(true);
+    expect(runThrew).toBe(false);
+    expect(safeFallback).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
-    const state = createInitialState({ messages: [{ role: "assistant", content: "x" }] });
-    expect(() => nextAction(state)).not.toThrow();
-    const decision = nextAction(state);
-    expect(["reasoning", "acting", "exit"]).toContain(decision.kind);
     let errorHookInvoked = false;
-    const waterfall = createDecisionWaterfall();
-    waterfall.add((_decision, next) => {
-      errorHookInvoked = true;
-      let fallback: AgentDecision = { kind: "exit", reason: "safe-fallback" };
-      try {
-        throw new Error("internal hook failure");
-      } catch {
-        fallback = { kind: "exit", reason: "safe-fallback" };
-      }
-      next(fallback);
+    // plugin 版：抛错来自真插件管理器 decision 链；关闭 fallback 让错误传播到 runLoop。
+    const { runtime, order, manager } = makePluginRuntime({
+      managerConfig: { fallbackToLegacy: false },
+      decisionPlugin: () => {
+        errorHookInvoked = true;
+        throw new Error("plugin hook throw");
+      },
     });
-    const event: AgentEvent = { type: "turn_end", message: { role: "assistant", content: "x" }, toolResults: [] };
     let runThrew = false;
-    let result: unknown;
+    let safeFallback = false;
     try {
-      result = await waterfall.run(decision, { state, event });
+      await runLoop(runtime);
+      safeFallback = order.includes("agent_end");
     } catch {
       runThrew = true;
     }
-    expect(runThrew).toBe(false);
-    expect(result).toEqual({ kind: "exit", reason: "safe-fallback" });
     expect(errorHookInvoked).toBe(true);
+    expect(manager.chain("decision").size).toBeGreaterThan(0);
+    expect(runThrew).toBe(false);
+    expect(safeFallback).toBe(true);
     expect(await pluginHookProbe()).toBe(true);
   }),
 
   // #7 streamFn 不抛错：失败编码为 stopReason="error"，runLoop 正常收尾
   pair(7, INVARIANT_NAMES[6], async () => {
-    const { runtime, order } = makeRuntime("legacy", {
+    const { runtime, order } = makeLegacyRuntime({
       response: { stopReason: "error", toolCalls: [] },
     });
     await expect(runLoop(runtime)).resolves.toBeDefined();
@@ -439,7 +507,7 @@ const cases: readonly InvariantCase[] = [
     expect(streamErrorObserved).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
-    const { runtime, order } = makeRuntime("plugin", {
+    const { runtime, order } = makePluginRuntime({
       response: { stopReason: "error", toolCalls: [] },
     });
     await expect(runLoop(runtime)).resolves.toBeDefined();
@@ -604,92 +672,104 @@ const cases: readonly InvariantCase[] = [
     expect(await pluginHookProbe()).toBe(true);
   }),
 
-  // #11 嵌套 hook 调用走同一管线但不发事件/不加消息
+  // #11 嵌套调用 runToolCall 走同一管线但不发事件/不加消息
   pair(11, INVARIANT_NAMES[10], async () => {
-    const toolCall = { id: "c1", name: "tool", args: {} };
-    const toolResult: ToolResult = { callId: "c1", message: { role: "toolResult", content: "r" } };
     let legacyNestedInvoked = false;
-    const { runtime, order, stream } = makeRuntime("legacy", {
-      response: { toolCalls: [toolCall], stopReason: "stop" },
-      toolResults: [toolResult],
-      finishTurnLegacy: (turn) => {
-        const nested = createDecisionWaterfall();
-        nested.add((_d, next) => next({ kind: "reasoning", note: "nested-with-toolCall" }));
-        void nested.run(nextAction(stream.getState()), {
-          state: stream.getState(),
-          event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
-        });
+    const registry = createToolRegistry();
+    registry.registerTool({
+      name: "nested-tool",
+      inputSchema: [],
+      outputSchema: ["ok"],
+      execute: () => {
         legacyNestedInvoked = true;
-        return { action: "end" };
+        return { ok: true };
       },
     });
-    const before = stream.getState().messages.length;
+    const ctx: BatchContext = { registry };
+    const { runtime, order, stream } = makeLegacyRuntime({
+      response: { toolCalls: [{ id: "c1", name: "nested-tool", args: {} }], stopReason: "stop" },
+      toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
+      finishTurnLegacy: () => ({ action: "end" }),
+    });
     await runLoop(runtime);
+    const afterRunEvents = order.length;
+    const afterRunMessages = stream.getState().messages.length;
+    const nested = await runToolCall({ id: "c1", name: "nested-tool", args: {} }, ctx);
+    expect(nested.callId).toBe("c1");
+    expect(nested.isError).toBe(false);
+    expect("message" in nested).toBe(false);
     expect(legacyNestedInvoked).toBe(true);
-    expect(order.filter((e) => e === "agent_end")).toHaveLength(1);
-    expect(order.filter((e) => e === "turn_end")).toHaveLength(1);
-    expect(order.filter((e) => e === "tool_execution_end")).toHaveLength(1);
-    expect(stream.getState().messages.length).toBe(before + 2);
+    // 关键：嵌套 toolCall 不发事件、不加消息（与消息追加式调用相反）。
+    expect(order.length).toBe(afterRunEvents);
+    expect(stream.getState().messages.length).toBe(afterRunMessages);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
-    const toolCall = { id: "c1", name: "tool", args: {} };
-    const toolResult: ToolResult = { callId: "c1", message: { role: "toolResult", content: "r" } };
     let pluginNestedInvoked = false;
-    const { runtime, order, stream } = makeRuntime("plugin", {
-      response: { toolCalls: [toolCall], stopReason: "stop" },
-      toolResults: [toolResult],
-      decisionPlugin: (state, turn) => {
-        const nested = createDecisionWaterfall();
-        nested.add((_d, next) => next({ kind: "reasoning", note: "nested-with-toolCall" }));
-        void nested.run(nextAction(state), {
-          state,
-          event: { type: "turn_end", message: turn.message, toolResults: turn.toolResults },
-        });
+    const registry = createToolRegistry();
+    registry.registerTool({
+      name: "nested-tool",
+      inputSchema: [],
+      outputSchema: ["ok"],
+      execute: () => {
         pluginNestedInvoked = true;
-        return { kind: "exit", reason: "done" };
+        return { ok: true };
       },
     });
-    const before = stream.getState().messages.length;
+    const { runtime, order, stream, manager } = makePluginRuntime({
+      response: { toolCalls: [{ id: "c1", name: "nested-tool", args: {} }], stopReason: "stop" },
+      toolResults: [{ callId: "c1", message: { role: "toolResult", content: "r" } }],
+    });
+    const ctx: BatchContext = { registry, manager };
     await runLoop(runtime);
+    const afterRunEvents = order.length;
+    const afterRunMessages = stream.getState().messages.length;
+    const nested = await runToolCall({ id: "c1", name: "nested-tool", args: {} }, ctx);
+    expect(nested.callId).toBe("c1");
+    expect(nested.isError).toBe(false);
+    expect("message" in nested).toBe(false);
     expect(pluginNestedInvoked).toBe(true);
-    expect(order.filter((e) => e === "agent_end")).toHaveLength(1);
-    expect(order.filter((e) => e === "turn_end")).toHaveLength(1);
-    expect(order.filter((e) => e === "tool_execution_end")).toHaveLength(1);
-    expect(stream.getState().messages.length).toBe(before + 2);
+    expect(order.length).toBe(afterRunEvents);
+    expect(stream.getState().messages.length).toBe(afterRunMessages);
     expect(await pluginHookProbe()).toBe(true);
   }),
 
-  // #12 system 消息单一事实源
+  // #12 system 消息单一事实源：工具清单 delta 由 declareToolChanges 一次产出
   pair(12, INVARIANT_NAMES[11], async () => {
-    const authoritative = "sys (tools: read,write)";
-    let state = createInitialState({ systemPrompt: authoritative });
-    const startedFromSingleSource = state.messages.length === 0;
+    const systemPrompt = "sys";
+    const previous = ["read"];
+    const next = ["read", "write"];
+    const delta = declareToolChanges(previous, next, systemPrompt);
+    // 关键：工具声明 delta 直接来自 declareToolChanges，不再手工调用两次 reduceState。
+    expect(delta.toolsAdded).toEqual(["write"]);
+    expect(delta.toolsRemoved).toEqual([]);
+    expect(delta.messages).toHaveLength(1);
+    const systemMessage = delta.messages[0];
+    expect(systemMessage?.role).toBe("system");
+    expect(String(systemMessage?.content)).toBe("sys\ntools: read, write");
+    const startedFromSingleSource = createInitialState({ systemPrompt }).messages.length === 0;
+    const deltaAligned = delta.messages.length === 1 &&
+      String(systemMessage?.content).includes(`tools: ${next.join(", ")}`);
+    const singleSourceVerified = startedFromSingleSource && deltaAligned && delta.toolsAdded.length === 1;
     expect(startedFromSingleSource).toBe(true);
-    const declare = (prompt: string): AgentMessage => ({ role: "system", content: prompt });
-    state = reduceState(state, { type: "message_start", message: declare(state.systemPrompt) });
-    state = reduceState(state, { type: "message_end", message: declare(state.systemPrompt) });
-    const systems = state.messages.filter((m) => m.role === "system");
-    const deltaAligned = systems.length === 1 && String(systems[0]?.content) === authoritative;
-    expect(systems).toHaveLength(1);
-    expect(String(systems[0]?.content)).toBe(state.systemPrompt);
-    expect(state.systemPrompt).toBe(authoritative);
-    const singleSourceVerified = startedFromSingleSource && deltaAligned && systems.length === 1;
+    expect(deltaAligned).toBe(true);
     expect(singleSourceVerified).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
   }, async () => {
-    const authoritative = "sys (tools: read,write)";
-    let state = createInitialState({ systemPrompt: authoritative });
-    const startedFromSingleSource = state.messages.length === 0;
+    const systemPrompt = "sys";
+    const previous = ["read"];
+    const next = ["read", "write"];
+    const delta = declareToolChanges(previous, next, systemPrompt);
+    expect(delta.toolsAdded).toEqual(["write"]);
+    expect(delta.toolsRemoved).toEqual([]);
+    expect(delta.messages).toHaveLength(1);
+    expect(delta.messages[0]?.role).toBe("system");
+    expect(String(delta.messages[0]?.content)).toBe("sys\ntools: read, write");
+    const startedFromSingleSource = createInitialState({ systemPrompt }).messages.length === 0;
+    const deltaAligned = delta.messages.length === 1 &&
+      String(delta.messages[0]?.content).includes("tools: read, write");
+    const singleSourceVerified = startedFromSingleSource && deltaAligned && delta.toolsAdded.length === 1;
     expect(startedFromSingleSource).toBe(true);
-    const declare = (prompt: string): AgentMessage => ({ role: "system", content: prompt });
-    state = reduceState(state, { type: "message_start", message: declare(state.systemPrompt) });
-    state = reduceState(state, { type: "message_end", message: declare(state.systemPrompt) });
-    const systems = state.messages.filter((m) => m.role === "system");
-    const deltaAligned = systems.length === 1 && String(systems[0]?.content) === authoritative;
-    expect(systems).toHaveLength(1);
-    expect(String(systems[0]?.content)).toBe(state.systemPrompt);
-    expect(state.systemPrompt).toBe(authoritative);
-    const singleSourceVerified = startedFromSingleSource && deltaAligned && systems.length === 1;
+    expect(deltaAligned).toBe(true);
     expect(singleSourceVerified).toBe(true);
     expect(await pluginHookProbe()).toBe(true);
   }),
@@ -728,6 +808,27 @@ describe("T-03 CR-39 两版断言独立性", () => {
       // 两版各自调用本版接线哨兵，不交叉。
       expect(legacySrc).toContain("legacyHookProbe");
       expect(pluginSrc).toContain("pluginHookProbe");
+    }
+  });
+});
+
+// T-04 真插件管线门：plugin 版不得再用 decision 字段赋值，必须由 AgentPluginManager 驱动。
+describe("T-04 真插件管线边界", () => {
+  test("inv-core-plugin-pipeline: plugin 构造经插件管理器 decision 链，legacy 保留字段赋值", () => {
+    const pluginCtor = makePluginRuntime.toString();
+    expect(pluginCtor).toContain("AgentPluginManager");
+    expect(pluginCtor).toContain("addHook");
+    expect(pluginCtor).toContain("manager.run");
+    const legacyCtor = makeLegacyRuntime.toString();
+    expect(legacyCtor).toContain("finishTurn");
+    expect(legacyCtor).not.toContain("AgentPluginManager");
+  });
+
+  test("inv-core-no-decision-field: plugin 断言体不含 decision 字段赋值", () => {
+    for (const item of cases) {
+      const pluginSrc = item.plugin.toString();
+      expect(pluginSrc).not.toContain("decision:");
+      expect(pluginSrc).not.toMatch(/\.decision\s*=/);
     }
   });
 });
