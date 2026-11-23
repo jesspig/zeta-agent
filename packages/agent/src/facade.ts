@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createEventStream,
   createInbox,
@@ -35,6 +37,7 @@ import {
 } from "@zeta-agent/agent-framework";
 import type { Disposer } from "@zeta-agent/framework";
 import type { PermissionGate } from "./plugins/permissions/guard";
+import type { DurableEffects, Receipt } from "./plugins/effects/durable";
 import { builtinToolDefinitions, type ToolDefinition } from "./tools/builtins";
 import {
   createEffectBridge,
@@ -49,8 +52,18 @@ import {
 import {
   createExecutionBackend,
   isCriticalLayerDegraded,
+  isEgressAllowed,
+  verifyAuditChain,
+  type AuditRecord,
+  type AuditSink,
+  type CredentialVault,
+  type EgressPolicy,
+  type EgressTarget,
   type ExecutionBackend,
+  type FinalizedState,
+  type SecretBroker,
 } from "@zeta-agent/security";
+import { createProviderStreamFn } from "./providers/dispatch";
 
 export type {
   AgentEvent,
@@ -193,6 +206,55 @@ function defaultLoggerOptions(): LoggerOptions {
   return { runId: "agent", sink: () => {} };
 }
 
+/** 与 @zeta-agent/security 默认审计哈希一致（FNV-1a 32），用于本地链校验与摘要。 */
+function stableHash(input: string): string {
+  let value = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    value ^= input.charCodeAt(index);
+    value = Math.imul(value, 16777619);
+  }
+  return (value >>> 0).toString(16);
+}
+
+/** 从发射工具参数推导 egress 目标；支持显式 target 或 url。无法推导时返回 undefined（fail-closed）。 */
+function deriveEgressTarget(args: Readonly<Record<string, unknown>>): EgressTarget | undefined {
+  const target = args.target;
+  if (typeof target === "object" && target !== null) {
+    const record = target as { readonly host?: unknown; readonly port?: unknown };
+    if (typeof record.host === "string" && record.host.length > 0 && typeof record.port === "number") {
+      return { host: record.host, port: record.port };
+    }
+  }
+  const url = args.url;
+  if (typeof url === "string" && url.length > 0) {
+    try {
+      const parsed = new URL(url);
+      const port = parsed.port !== "" ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+      return { host: parsed.hostname, port };
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** createProviderStreamFn 的 facade 投影；凭据由 Agent 注入，调用方无需重复传递。 */
+export interface AgentProviderConfig {
+  readonly provider: string;
+  readonly model: string;
+  readonly apiKey?: string;
+  readonly baseUrl?: string;
+}
+
+export interface AuditFinalization {
+  readonly configured: boolean;
+  readonly finalized: FinalizedState | "not-configured";
+  /** 仅当注入 auditDir 时给出落盘文件路径。 */
+  readonly path?: string;
+  readonly entries: number;
+  readonly verified: boolean;
+}
+
 export interface AgentOptions {
   readonly streamFn?: AgentStreamFn;
   readonly plugins?: readonly AgentPlugin[];
@@ -219,6 +281,23 @@ export interface AgentOptions {
   readonly permissionGate?: PermissionGate;
   /** 门禁 authorize 使用的阶段名；缺省 "plan"。 */
   readonly permissionStage?: string;
+  /**
+   * 可选持久副作用：仅当注入且工具名命中 emissionTools 时，工具执行改为 enqueue，
+   * 批次结束后 commit 统一派发；不注入时工具路径与基线一致（O-9 默认行为未裁决，不改默认）。
+   */
+  readonly durableEffects?: DurableEffects;
+  /** 可选 egress 门禁：仅对发射目标生效；不注入时不新增任何拒绝。 */
+  readonly egressPolicy?: EgressPolicy;
+  /** 视作发射工具的工具名集合；缺省为空，即没有任何工具被 withhold。 */
+  readonly emissionTools?: readonly string[];
+  /** 可选凭据保管库，需与 secretBroker 成对注入才启用占位符路径。 */
+  readonly credentialVault?: CredentialVault;
+  /** 可选凭据代理，需与 credentialVault 成对注入才启用占位符路径。 */
+  readonly secretBroker?: SecretBroker;
+  /** 可选审计链：仅注入时为拒绝/发射/工具执行写 AuditRecord。 */
+  readonly auditSink?: AuditSink;
+  /** 可选审计落盘目录：配合 finalizeAudit(revision) 写带完整性标记的链文件。 */
+  readonly auditDir?: string;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -241,6 +320,12 @@ export interface Agent extends PluginApiSurface {
   readonly assembly: readonly string[];
   readonly reasoningEffort: string | undefined;
   setReasoningEffort(effort: string | undefined): void;
+  /** 发射回执快照：durableEffects 的真实回执 + egress 拒绝的失败回执。 */
+  emissionReceipts(): readonly Receipt[];
+  /** 把审计链与 finalized(revision) 结果写入 auditDir（若注入），返回可校验的完整性信息。 */
+  finalizeAudit(revision: number): AuditFinalization;
+  /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
+  createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
 }
 
 export function createAgent(options: AgentOptions = {}): Agent {
@@ -254,6 +339,31 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
   const allowedDirectories = options.allowedDirectories ?? [];
+  const durableEffects = options.durableEffects;
+  const egressPolicy = options.egressPolicy;
+  const emissionTools = new Set(options.emissionTools ?? []);
+  const credentialVault = options.credentialVault;
+  const secretBroker = options.secretBroker;
+  const auditSink = options.auditSink;
+  const auditDir = options.auditDir;
+  /** egress 拒绝等未进入 durableEffects 的失败回执，供调用方观测。 */
+  const failedEmissionReceipts: Receipt[] = [];
+
+  function recordAudit(toolName: string, argsDigest: string, decision: string, resultDigest: string, causalId: string): void {
+    if (auditSink === undefined) return;
+    const record: AuditRecord = {
+      ts: Date.now(),
+      actor: "agent",
+      tenant: "default",
+      pluginId: "facade",
+      toolName,
+      argsDigest,
+      decision,
+      resultDigest,
+      causalId,
+    };
+    auditSink.append(record);
+  }
   const toolDefinitions = includeBuiltins
     ? builtinTools({ securityBackend, allowedDirectories })
     : [];
@@ -608,6 +718,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
       async executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]> {
         const results: ToolResult[] = [];
+        let enqueuedEmission = false;
         for (const [index, call] of calls.entries()) {
           const updates = [{ partialResult: `executing ${call.name}` }];
           const execute = toolRegistry.get(call.name);
@@ -625,6 +736,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
               const args = typeof call.args === "object" && call.args !== null
                 ? (call.args as Readonly<Record<string, unknown>>)
                 : {};
+              const argsDigest = stableHash(JSON.stringify(args));
+              const isEmission = durableEffects !== undefined && emissionTools.has(call.name);
               let denied = false;
               if (permissionGate !== undefined) {
                 // 每次执行都读取 gate 当前状态：增删 hook / declareTools 后立即生效，无需 reload。
@@ -642,18 +755,51 @@ export function createAgent(options: AgentOptions = {}): Agent {
                     tool: call.name,
                   };
                   denialReason = `PERMISSION_DENIED: ${reason}`;
+                  recordAudit(call.name, argsDigest, "PERMISSION_DENIED", reason, call.id ?? "");
                   // 审计走既有机制：logger 写 sink，loop 随后发带 isError 的 tool_execution_end。
                   fiberLogger.warn(`PERMISSION_DENIED stage=${permissionStage} tool=${call.name} reason=${reason}`);
                 }
               }
               if (!denied) {
-                for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
-                const value = await execute(args);
-                // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
-                const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
-                if (failed) isError = true;
-                for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed });
-                output = value === undefined ? NO_TOOL_RESULT : value;
+                if (isEmission) {
+                  // 发射工具：事务内只 enqueue，真实副作用留到批次结束的 commit 统一派发。
+                  const key = `${call.name}:${argsDigest}`;
+                  const target = deriveEgressTarget(args);
+                  const egressDenied = egressPolicy !== undefined && (target === undefined || !isEgressAllowed(egressPolicy, target));
+                  if (egressDenied) {
+                    const receipt: Receipt = { kind: call.name, key, ok: false, value: { error: "EGRESS_DENIED" } };
+                    failedEmissionReceipts.push(receipt);
+                    recordAudit(call.name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", call.id ?? "");
+                    isError = true;
+                    denialReason = "EGRESS_DENIED";
+                    output = { ok: false, error: "EGRESS_DENIED", tool: call.name, key };
+                  } else {
+                    durableEffects.enqueue(call.name, key, {
+                      tool: call.name,
+                      args,
+                      ...(target !== undefined ? { target } : {}),
+                    });
+                    enqueuedEmission = true;
+                    recordAudit(call.name, argsDigest, "EMISSION_WITHHELD", key, call.id ?? "");
+                    output = { ok: true, withheld: true, tool: call.name, key };
+                  }
+                } else {
+                  // 非发射工具（或未注入 durableEffects）走原路径，行为与基线完全一致。
+                  for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
+                  const value = await execute(args);
+                  // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
+                  const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+                  if (failed) isError = true;
+                  for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed });
+                  output = value === undefined ? NO_TOOL_RESULT : value;
+                  recordAudit(
+                    call.name,
+                    argsDigest,
+                    failed || isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
+                    stableHash(JSON.stringify(output ?? "")),
+                    call.id ?? ""
+                  );
+                }
               }
             } catch (error) {
               isError = true;
@@ -672,6 +818,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
             ...(denialReason !== undefined ? { reason: denialReason } : {}),
             updates,
           });
+        }
+        // 工具批次结束：统一 commit，副作用只在此刻发生；重复 (kind,key) 由 durableEffects 去重。
+        if (enqueuedEmission && durableEffects !== undefined) {
+          const receipts = await durableEffects.commit();
+          for (const receipt of receipts) {
+            recordAudit(receipt.kind, receipt.key, receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED", receipt.ok ? "OK" : "FAILED", receipt.key);
+          }
         }
         return results;
       },
@@ -743,6 +896,46 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     setReasoningEffort(effort) {
       reasoningEffort = effort;
+    },
+    emissionReceipts() {
+      return [...(durableEffects?.receipts() ?? []), ...failedEmissionReceipts];
+    },
+    finalizeAudit(revision) {
+      if (auditSink === undefined) {
+        return { configured: false, finalized: "not-configured", entries: 0, verified: false };
+      }
+      const finalized = auditSink.finalized(revision);
+      const entries = auditSink.entries;
+      const verified = verifyAuditChain(entries, stableHash);
+      if (auditDir === undefined) {
+        return { configured: true, finalized, entries: entries.length, verified };
+      }
+      mkdirSync(auditDir, { recursive: true });
+      const path = join(auditDir, `audit-final-${revision}.json`);
+      const payload = {
+        schema: "zeta-audit-chain/v1",
+        revision,
+        finalized,
+        entries,
+        integrity: {
+          marker: "AUDIT_CHAIN_SEALED_V1",
+          seq: entries.length,
+          head: entries.length > 0 ? entries[entries.length - 1]!.hash : "0",
+          verified,
+        },
+      };
+      writeFileSync(path, JSON.stringify(payload, null, 2), "utf8");
+      return { configured: true, finalized, path, entries: entries.length, verified };
+    },
+    createProviderStreamFn(config, fetchImpl) {
+      return createProviderStreamFn(
+        {
+          ...config,
+          ...(credentialVault !== undefined ? { credentialVault } : {}),
+          ...(secretBroker !== undefined ? { secretBroker } : {}),
+        },
+        fetchImpl
+      );
     },
   };
 }
