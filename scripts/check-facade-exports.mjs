@@ -80,7 +80,11 @@ const importChecks = [
     "@zeta-agent/agent/providers/model-discovery": ["fetchModelIds"],
     "@zeta-agent/agent/providers/model-catalog": ["decorateModels"],
   }],
-  ["agent-framework", ["@zeta-agent/framework/types", "@zeta-agent/cordis", "@zeta-agent/events"], {}],
+  ["agent-framework", [
+    "@zeta-agent/agent-framework", "@zeta-agent/framework/types", "@zeta-agent/cordis", "@zeta-agent/events",
+  ], {
+    "@zeta-agent/agent-framework": ["createAgent", "AgentPlugin", "AgentPluginManager", "HookChain"],
+  }],
   ["tui", ["@zeta-agent/agent/facade", "@zeta-agent/agent", "@zeta-agent/tui/backend"], {
     "@zeta-agent/agent/facade": ["createAgent"],
   }],
