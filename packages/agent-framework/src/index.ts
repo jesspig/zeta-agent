@@ -3,6 +3,10 @@ export * from "./runtime/agent";
 export * from "./runtime/inbox";
 export * from "./runtime/loop";
 export * from "./runtime/decision";
+export * from "./runtime/core";
+export * from "./plugins/types";
+export * from "./plugins/hook-chain";
+export * from "./plugins/manager";
 export * from "./session/surface";
 export * from "./session/offload";
 export {
