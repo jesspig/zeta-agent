@@ -2,6 +2,15 @@ export interface FitnessEvaluator {
   evaluate(candidate: unknown): number;
 }
 
+// 真实 evaluator 由 fitness 子路径一并提供；默认装配仍只暴露 NOOP seam。
+export { attainmentAuc, createRewardEvaluator, evaluateFitness } from "./fitness.evaluator";
+export type {
+  FitnessEvaluation,
+  FitnessEvaluatorConfig,
+  FitnessPoint,
+  FitnessTrace,
+} from "./fitness.evaluator";
+
 export const NOOP_FITNESS: FitnessEvaluator = Object.freeze({
   evaluate: () => 0,
 });
