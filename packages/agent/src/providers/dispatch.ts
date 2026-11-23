@@ -1,4 +1,5 @@
 import type { AgentStreamChunk, AgentStreamFn, AgentStreamRequest } from "../facade";
+import { resolveAtBoundary, type CredentialVault, type Placeholder, type SecretBroker } from "@zeta-agent/security";
 import { MODELS, PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
 import { createOpenAiStreamFn } from "./openai";
@@ -13,6 +14,13 @@ export interface ProviderConfig {
   readonly apiKey?: string;
   /** 显式 baseUrl；缺省时用 catalog 的 defaultBaseUrl（可用 ZETA_BASE_URL 覆盖）。 */
   readonly baseUrl?: string;
+  /**
+   * 可选凭据注入：vault 与 broker 必须成对提供。
+   * 成对提供时改用 issue() 占位符，真实 key 仅在 fetch 边界由 resolveAtBoundary 注入；
+   * 不注入时保持原有从 env / 显式 apiKey 读取的行为不变。
+   */
+  readonly credentialVault?: CredentialVault;
+  readonly secretBroker?: SecretBroker;
 }
 
 interface ProviderInfo {
@@ -45,6 +53,41 @@ function resolveApiKey(provider: string, explicit?: string): string {
 function resolveBaseUrl(info: ProviderInfo, explicit?: string): string {
   const base = explicit ?? process.env.ZETA_BASE_URL ?? info.defaultBaseUrl;
   return base.replace(/\/+$/, "");
+}
+
+/**
+ * 请求边界包装：provider 构造请求时只接触占位符 token，真实凭据在 fetch 调用前一刻
+ * 由 resolveAtBoundary 校验绑定并注入。broker 返回的 `key` / `x-goog-api-key` 视为 URL
+ * 查询参数注入（Google 风格），其余键作为 header 注入。
+ */
+function withCredentialBoundary(
+  vault: CredentialVault,
+  placeholder: Placeholder,
+  broker: SecretBroker,
+  fetchImpl: typeof fetch
+): typeof fetch {
+  const boundary = ((input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const method = init?.method ?? "GET";
+    const secrets = resolveAtBoundary(vault, placeholder, { url, method }, broker);
+    const headers = new Headers(init?.headers);
+    let nextInput: typeof input = input;
+    for (const [name, value] of Object.entries(secrets)) {
+      const lower = name.toLowerCase();
+      if (lower === "key" || lower === "x-goog-api-key") {
+        const parsed = new URL(url);
+        parsed.searchParams.set("key", value);
+        nextInput = parsed.toString();
+      } else {
+        headers.set(name, value);
+      }
+    }
+    return fetchImpl(nextInput, { ...init, headers });
+  }) as typeof fetch;
+  // Bun 的 fetch 带 preconnect；原样转发，避免包装后类型/行为退化。
+  const preconnect = (fetchImpl as { preconnect?: unknown }).preconnect;
+  if (typeof preconnect === "function") (boundary as { preconnect?: unknown }).preconnect = preconnect;
+  return boundary;
 }
 
 function toAnthropicContent(message: AgentStreamRequest["messages"][number]): unknown {
@@ -236,17 +279,41 @@ export function createProviderStreamFn(
   const registry = createModelRegistry(MODELS.filter((entry) => entry.provider === config.provider));
   const model = registry.resolve(config.model);
   if (model === undefined) throw new Error(`UNKNOWN_MODEL: ${config.model}`);
-  const apiKey = resolveApiKey(config.provider, config.apiKey);
   const baseUrl = resolveBaseUrl(info, config.baseUrl);
   const modelName = model.name;
 
+  // 仅当 vault 与 broker 成对注入时启用占位符路径；否则完全保持原有 env / 显式 key 行为。
+  const vault = config.credentialVault;
+  const broker = config.secretBroker;
+  let apiKey: string;
+  let boundaryFetch: typeof fetch = fetchImpl;
+  if (vault !== undefined && broker !== undefined) {
+    const parsedBase = new URL(baseUrl);
+    const placeholder = vault.issue({
+      name: `provider:${config.provider}:${modelName}`,
+      binding: {
+        scheme: parsedBase.protocol.replace(/:$/, ""),
+        host: parsedBase.host,
+        ...(parsedBase.pathname.replace(/\/+$/, "") !== ""
+          ? { path: parsedBase.pathname.replace(/\/+$/, "") }
+          : {}),
+        methods: ["POST"],
+      },
+    });
+    // provider 拿到的只是占位符 token；明文 key 不进入 config、请求 URL/header 构造对象或日志。
+    apiKey = placeholder.token;
+    boundaryFetch = withCredentialBoundary(vault, placeholder, broker, fetchImpl);
+  } else {
+    apiKey = resolveApiKey(config.provider, config.apiKey);
+  }
+
   if (info.api === "openai-responses") {
     // OpenAI Responses API：/responses + instructions/input。
-    return createOpenAiResponsesStreamFn({ baseUrl, apiKey, model: modelName }, fetchImpl);
+    return createOpenAiResponsesStreamFn({ baseUrl, apiKey, model: modelName }, boundaryFetch);
   }
   if (info.api !== "anthropic-messages" && info.api !== "google-generate") {
     // openai-chat 与 bedrock-invoke 均通过 OpenAI 兼容 SSE 网关对接。
-    return createOpenAiStreamFn({ baseUrl, apiKey, model: modelName }, fetchImpl);
+    return createOpenAiStreamFn({ baseUrl, apiKey, model: modelName }, boundaryFetch);
   }
 
   return async function* (request: AgentStreamRequest) {
@@ -332,7 +399,7 @@ export function createProviderStreamFn(
       parse = parseGoogleSse;
     }
 
-    const response = await fetchImpl(url, {
+    const response = await boundaryFetch(url, {
       ...init,
       ...(request.signal !== undefined ? { signal: request.signal } : {}),
     });
