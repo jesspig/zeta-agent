@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   createEventStream,
   createInbox,
+  declareToolChanges,
   runLoop,
   AgentPluginManager,
   type AgentEvent,
@@ -324,6 +325,10 @@ export interface AgentOptions {
 export interface Agent extends PluginApiSurface {
   prompt(text: string): Promise<readonly AgentMessage[]>;
   continue(): Promise<readonly AgentMessage[]>;
+  /** 运行中注入 steer 消息：下一轮轮首进入 transcript，无需等待新 prompt。 */
+  steer(message: AgentMessage): void;
+  /** 运行中注入 followUp 消息：按队列语义留到下一次轮首消费。 */
+  followUp(message: AgentMessage): void;
   subscribe(listener: AgentListener): Disposer;
   abort(): void;
   /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
@@ -367,6 +372,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const withholdEnabled = emissionPolicy !== "direct" && emissionTools.size > 0;
   /** 默认发射工具的真实执行入口；每次 runTurn 重建工具表后立即刷新。 */
   let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>> = new Map();
+  // D6（延期）：框架 createToolPipeline 原语可用，facade 当前仅装配 declareToolChanges 声明 hook；
+  // 完整以 toolPipeline 替换 executeToolCalls 涉及权限/withhold/durable 逻辑耦合，按 O-03 裁决延期。
   /** 只有未注入 durableEffects 且启用 withhold 时，才为默认清单创建内置效果。 */
   const usesDefaultEffects = options.durableEffects === undefined && withholdEnabled;
   const durableEffects = options.durableEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
@@ -477,6 +484,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
   const pluginManager = new AgentPluginManager();
   const events = createEventBus();
+  /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
+  const inbox: Inbox = createInbox();
 
   function addDisposer(dispose: () => void): () => void {
     return pluginManager.addDisposer(dispose);
@@ -507,6 +516,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     for (const name of declaredLoadout.keys()) names.add(name);
     return [...names];
   }
+
+  /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
+  let declaredToolNames: readonly string[] = [...toolNamesSnapshot()];
 
   const api: PluginApiSurface = {
     registerTool(tool) {
@@ -606,7 +618,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" });
 
-    const inbox: Inbox = createInbox();
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
     for (const source of steeringSources) {
       inbox.steer(source.next() as AgentMessage);
@@ -639,6 +650,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
       getState: () => stream.getState(),
       prepareNextTurn: () => {
         for (const fn of prepareNextTurnFns) fn(stream.getState());
+      },
+      declareToolChanges: () => {
+        const next = toolNamesSnapshot();
+        const delta = declareToolChanges(declaredToolNames, next);
+        declaredToolNames = next;
+        // 权限策略热更新不改变工具集合时返回 undefined，避免无意义的 system 声明/reload。
+        return delta.messages.length > 0 ? delta : undefined;
       },
       prepareRequest: (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
@@ -924,6 +942,14 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return runTurn(text);
     },
     continue: () => runTurn(),
+    steer: (message) => {
+      inbox.steer(message);
+    },
+    followUp: (message) => {
+      inbox.followUp(message);
+    },
+    // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
+    // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
     abort() {
       aborted = true;
@@ -933,6 +959,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       aborted = false;
       abortController = undefined;
       lastTurnHadNativeTools = false;
+      inbox.clear("nextTurn");
+      inbox.clear("nextStep");
       stream.reset();
     },
     waitForIdle: () => stream.waitForIdle(),
