@@ -37,7 +37,12 @@ import {
 } from "@zeta-agent/agent-framework";
 import type { Disposer } from "@zeta-agent/framework";
 import type { PermissionGate } from "./plugins/permissions/guard";
-import type { DurableEffects, Receipt } from "./plugins/effects/durable";
+import {
+  createDurableEffects,
+  type DurableEffects,
+  type DurableIntent,
+  type Receipt,
+} from "./plugins/effects/durable";
 import { builtinToolDefinitions, type ToolDefinition } from "./tools/builtins";
 import {
   createEffectBridge,
@@ -97,6 +102,17 @@ export const DEFAULT_ASSEMBLY: readonly string[] = Object.freeze([
 export function listAssembly(): readonly string[] {
   return [...DEFAULT_ASSEMBLY];
 }
+
+/**
+ * 默认 withhold 的发射工具清单：这些工具会改变外部世界，批次内先 enqueue，commit 才派发。
+ * 只读工具（read/ls/grep/find 等）不在清单内，保持即时执行。
+ */
+const DEFAULT_EMISSION_TOOLS: readonly string[] = Object.freeze([
+  "write",
+  "edit",
+  "bash",
+  "powershell",
+]);
 
 function builtinTools(options: {
   readonly securityBackend: ExecutionBackend;
@@ -276,19 +292,24 @@ export interface AgentOptions {
   readonly allowTextToolMarkers?: boolean;
   /**
    * 可选权限门禁。仅显式注入时，工具执行前才调用 authorize 做按次判定；
-   * 不注入时整条路径完全保持基线行为（O-9 发射默认策略尚未裁决，不改默认）。
+   * 不注入时整条路径保持基线行为，与发射策略相互独立。
    */
   readonly permissionGate?: PermissionGate;
   /** 门禁 authorize 使用的阶段名；缺省 "plan"。 */
   readonly permissionStage?: string;
   /**
-   * 可选持久副作用：仅当注入且工具名命中 emissionTools 时，工具执行改为 enqueue，
-   * 批次结束后 commit 统一派发；不注入时工具路径与基线一致（O-9 默认行为未裁决，不改默认）。
+   * 发射策略：默认 "withhold"（发射类工具批次内 enqueue、commit 统一派发）；
+   * "direct" 是兼容开关，完全绕过 withhold，保持 T-06 之前的直接执行行为。
+   */
+  readonly emissionPolicy?: "withhold" | "direct";
+  /**
+   * 可选持久副作用：命中发射工具时改为 enqueue，批次结束后 commit 统一派发。
+   * 缺省且策略为 withhold 时，facade 自动创建默认 DurableEffects（dispatcher 调用原始工具执行）。
    */
   readonly durableEffects?: DurableEffects;
   /** 可选 egress 门禁：仅对发射目标生效；不注入时不新增任何拒绝。 */
   readonly egressPolicy?: EgressPolicy;
-  /** 视作发射工具的工具名集合；缺省为空，即没有任何工具被 withhold。 */
+  /** 视作发射工具的工具名集合；缺省时由 emissionPolicy 决定（withhold 用默认清单，direct 为空）。 */
   readonly emissionTools?: readonly string[];
   /** 可选凭据保管库，需与 secretBroker 成对注入才启用占位符路径。 */
   readonly credentialVault?: CredentialVault;
@@ -339,15 +360,41 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
   const allowedDirectories = options.allowedDirectories ?? [];
-  const durableEffects = options.durableEffects;
+  const emissionPolicy = options.emissionPolicy ?? "withhold";
+  const emissionTools = new Set(
+    options.emissionTools ?? (emissionPolicy === "direct" ? [] : DEFAULT_EMISSION_TOOLS)
+  );
+  const withholdEnabled = emissionPolicy !== "direct" && emissionTools.size > 0;
+  /** 默认发射工具的真实执行入口；每次 runTurn 重建工具表后立即刷新。 */
+  let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>> = new Map();
+  /** 只有未注入 durableEffects 且启用 withhold 时，才为默认清单创建内置效果。 */
+  const usesDefaultEffects = options.durableEffects === undefined && withholdEnabled;
+  const durableEffects = options.durableEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
   const egressPolicy = options.egressPolicy;
-  const emissionTools = new Set(options.emissionTools ?? []);
   const credentialVault = options.credentialVault;
   const secretBroker = options.secretBroker;
   const auditSink = options.auditSink;
   const auditDir = options.auditDir;
   /** egress 拒绝等未进入 durableEffects 的失败回执，供调用方观测。 */
   const failedEmissionReceipts: Receipt[] = [];
+
+  /** 默认发射效果的 dispatcher：派发时才调用当前回合的原始工具执行。 */
+  function createDefaultEmissionEffects(): DurableEffects {
+    return createDurableEffects(async (intent: DurableIntent) => {
+      const payload = intent.payload as {
+        readonly tool: string;
+        readonly args: Readonly<Record<string, unknown>>;
+      };
+      const execute = activeToolRegistry.get(payload.tool);
+      if (execute === undefined) return { ok: false, error: `EMISSION_TOOL_NOT_FOUND: ${payload.tool}` };
+      try {
+        return await execute(payload.args);
+      } catch (error) {
+        // 与基线 executeToolCalls 的 catch 一致：异常转成结构化失败结果，保持工具对外契约零回归。
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+  }
 
   function recordAudit(toolName: string, argsDigest: string, decision: string, resultDigest: string, causalId: string): void {
     if (auditSink === undefined) return;
@@ -576,6 +623,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     }
     for (const [name, entry] of pluginTools) toolRegistry.set(name, (args) => (entry.tool.execute as (input: never) => unknown)(args as never));
     for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args) => (tool.execute as (input: never) => unknown)(args as never));
+    activeToolRegistry = toolRegistry;
 
     const effectiveStreamFn = activeStreamFn();
     const emitConverted = (input: unknown): void => {
@@ -718,6 +766,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
       async executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]> {
         const results: ToolResult[] = [];
+        /** 已 enqueue 的工具调用位次 → 幂等键，commit 后据此回填真实执行结果。 */
+        const emissionSlots = new Map<number, string>();
         let enqueuedEmission = false;
         for (const [index, call] of calls.entries()) {
           const updates = [{ partialResult: `executing ${call.name}` }];
@@ -737,7 +787,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
                 ? (call.args as Readonly<Record<string, unknown>>)
                 : {};
               const argsDigest = stableHash(JSON.stringify(args));
-              const isEmission = durableEffects !== undefined && emissionTools.has(call.name);
+              const isEmission = withholdEnabled && durableEffects !== undefined && emissionTools.has(call.name);
               let denied = false;
               if (permissionGate !== undefined) {
                 // 每次执行都读取 gate 当前状态：增删 hook / declareTools 后立即生效，无需 reload。
@@ -779,12 +829,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
                       args,
                       ...(target !== undefined ? { target } : {}),
                     });
+                    emissionSlots.set(index, key);
                     enqueuedEmission = true;
                     recordAudit(call.name, argsDigest, "EMISSION_WITHHELD", key, call.id ?? "");
                     output = { ok: true, withheld: true, tool: call.name, key };
                   }
                 } else {
-                  // 非发射工具（或未注入 durableEffects）走原路径，行为与基线完全一致。
+                  // 非发射工具（或 direct 策略）走原路径，行为与基线完全一致。
                   for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
                   const value = await execute(args);
                   // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
@@ -822,8 +873,30 @@ export function createAgent(options: AgentOptions = {}): Agent {
         // 工具批次结束：统一 commit，副作用只在此刻发生；重复 (kind,key) 由 durableEffects 去重。
         if (enqueuedEmission && durableEffects !== undefined) {
           const receipts = await durableEffects.commit();
+          const byKey = new Map(receipts.map((receipt) => [receipt.key, receipt]));
           for (const receipt of receipts) {
             recordAudit(receipt.kind, receipt.key, receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED", receipt.ok ? "OK" : "FAILED", receipt.key);
+          }
+          if (usesDefaultEffects) {
+            // 默认发射工具对外仍呈现真实执行结果，避免改变既有工具的返回契约。
+            return results.map((result, index) => {
+              const key = emissionSlots.get(index);
+              const receipt = key === undefined ? undefined : byKey.get(key);
+              const message = result.message;
+              if (receipt === undefined || message === undefined) return result;
+              const value = receipt.value;
+              const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+              return {
+                ...result,
+                isError: !receipt.ok || failed,
+                message: {
+                  ...message,
+                  content: receipt.ok
+                    ? (value === undefined ? NO_TOOL_RESULT : value)
+                    : { ok: false, error: "EMISSION_DISPATCH_FAILED", key },
+                },
+              };
+            });
           }
         }
         return results;
