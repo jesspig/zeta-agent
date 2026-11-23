@@ -8,8 +8,10 @@ export {
   defineKey,
   defineRegistry,
   notify,
+  on,
   resolveRegistry,
   use,
+  VERSION_MISMATCH,
 } from "./context";
 export type {
   ComponentSpec,

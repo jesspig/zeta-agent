@@ -77,6 +77,14 @@ export function defineKey<T = unknown>(
   };
 }
 
+/** accepts 版本不匹配：fiber 进入 FAILED，不把错版本数据喂给消费者。 */
+export const VERSION_MISMATCH = "VERSION_MISMATCH";
+
+/** accepts 的键支持完整键描述（@scope:name）与短键名两种写法。 */
+function acceptedVersion(accepts: Record<string, string>, key: CoeffectKey<any>): string | undefined {
+  return accepts[key.symbol.description ?? key.name] ?? accepts[key.name];
+}
+
 export interface ComponentSpec<
   P,
   D extends CoeffectKey<any>[] = CoeffectKey<any>[],
@@ -86,6 +94,7 @@ export interface ComponentSpec<
   readonly version?: string;
   readonly inject?: D;
   readonly provide?: R;
+  readonly accepts?: Record<string, string>;
   readonly apply: (ctx: FiberContext, config: P) => Effect | Promise<Effect>;
 }
 
@@ -100,6 +109,7 @@ export function defineComponent<
     version: spec.version,
     inject: (spec.inject ?? []) as D,
     provide: (spec.provide ?? []) as R,
+    ...(spec.accepts === undefined ? {} : { accepts: spec.accepts }),
     apply: (ctx, config) => spec.apply(ctx, config),
   };
 }
@@ -175,6 +185,8 @@ interface Internals {
   readonly providers: Map<symbol, Fiber>;
   readonly listeners: Map<string, Set<(payload: unknown) => void>>;
   readonly intercepted: Map<symbol, unknown>;
+  /** accepts 校验用的版本注册表：provider fiber 在 use 装配时登记其声明版本。 */
+  readonly providerVersions: Map<symbol, { uid: string; version?: string }>;
   readonly uidSeed: { value: number };
   /** 派生 context（isolate/intercept/组件 fiber）不自动注册 provider fiber。 */
   readonly registerProvider: boolean;
@@ -254,13 +266,32 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
     const uid = `fiber:${++internals.uidSeed.value}`;
     const fiberNode = createNode(uid, internals.node, [...component.inject, ...component.provide]);
     const fiberCtx = makeContext(internals, fiberNode, false);
+    // 版本注册表在装配期登记；accepts 在 apply 时校验（此时 provider 已进入 ACTIVE）。
+    for (const key of component.provide) {
+      internals.providerVersions.set(key.symbol, { uid, version: component.version });
+    }
     const spec: FiberSpec = {
       uid,
       inject: component.inject,
       provide: component.provide,
       config,
       // config 通过 FiberSpec 下发，Component.apply 收到的是调用方传入的配置。
-      apply: (_host, appliedConfig) => component.apply(fiberCtx, appliedConfig as P),
+      apply: (_host, appliedConfig) => {
+        if (component.accepts !== undefined) {
+          for (const key of component.inject) {
+            const expected = acceptedVersion(component.accepts, key);
+            if (expected === undefined) continue;
+            const provider = internals.providerVersions.get(key.symbol);
+            if (provider?.version !== expected) {
+              const id = key.symbol.description ?? key.name;
+              throw new Error(
+                `${VERSION_MISMATCH}: ${component.name} accepts ${id}@${expected}, provider=${provider?.version ?? "<unversioned>"}`
+              );
+            }
+          }
+        }
+        return component.apply(fiberCtx, appliedConfig as P);
+      },
     };
     const fiber = internals.system.create(spec);
     const ready = fiber.refresh();
@@ -272,7 +303,14 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
       },
       ready,
       update: () => fiber.update(),
-      remove: () => fiber.remove(),
+      remove: () => {
+        for (const key of component.provide) {
+          if (internals.providerVersions.get(key.symbol)?.uid === uid) {
+            internals.providerVersions.delete(key.symbol);
+          }
+        }
+        fiber.remove();
+      },
     };
   };
 
@@ -343,6 +381,7 @@ export function createContext(options: { uid?: string } = {}): Context {
     providers: new Map(),
     listeners: new Map(),
     intercepted: new Map(),
+    providerVersions: new Map(),
     uidSeed: { value: 0 },
     registerProvider: true,
   });
@@ -361,5 +400,10 @@ export function createView<T extends object>(ctx: Context): T {
 /** 可导入的函数式入口：use(ctx, component, config) 等价于 ctx.use(component, config)。 */
 export function use<P>(ctx: Context, component: Component<P>, config?: P): ContextFiber {
   return ctx.use(component, config);
+}
+
+/** 可导入的函数式入口：on(ctx, name, listener) 等价于 ctx.on(name, listener)。 */
+export function on(ctx: Context, name: string, listener: (payload: unknown) => void): Disposer {
+  return ctx.on(name, listener);
 }
 
