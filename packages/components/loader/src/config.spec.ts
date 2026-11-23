@@ -102,3 +102,35 @@ describe("Entry 模型与 patch overlay", () => {
     expect(dumped.entries[0]?.__owner.source).toBe("base");
   });
 });
+
+describe("A14 dumpConfig 顺序等价与 patch 整块替换可复现", () => {
+  function build(order: readonly ConfigLayer["kind"][]): ReturnType<typeof deriveConfig> {
+    const byKind: Record<ConfigLayer["kind"], ConfigLayer> = {
+      bundle: layer("bundle", "base", [set(entry("a", "./a.ts", { host: "local", port: 1 })), set(entry("b", "./b.ts"))]),
+      profile: layer("profile", "pr", [set(entry("c", "./c.ts"))]),
+      patch: layer("patch", "p1", [set(entry("a", "./a.ts", { port: 2 }))]),
+      overlay: layer("overlay", "ov", [set(entry("d", "./d.ts"))]),
+    };
+    return deriveConfig(order.map((kind) => byKind[kind]));
+  }
+
+  test("加载顺序不同但层级相同：dumpConfig 输出观察等价", () => {
+    const forward = build(["bundle", "profile", "patch", "overlay"]);
+    const shuffled = build(["overlay", "patch", "bundle", "profile"]);
+    expect(dumpConfig(shuffled)).toEqual(dumpConfig(forward));
+    expect(JSON.stringify(dumpConfig(shuffled))).toBe(JSON.stringify(dumpConfig(forward)));
+    expect(dumpConfig(forward).entries.map((item) => item.id)).toEqual(["a", "b", "c", "d"]);
+  });
+
+  test("patch 按 id 整块替换 config：结果可重复，无旧字段残留", () => {
+    const first = dumpConfig(build(["bundle", "patch"]));
+    const second = dumpConfig(build(["patch", "bundle"]));
+    expect(second).toEqual(first);
+
+    const patched = first.entries.find((item) => item.id === "a");
+    expect(patched?.config).toEqual({ port: 2 });
+    expect(patched?.config).not.toHaveProperty("host");
+    expect(patched?.__owner.source).toBe("p1");
+    expect(patched?.__owner.layer).toBe("patch");
+  });
+});

@@ -142,9 +142,9 @@ flowchart TB
 ## 交付状态
 
 - ✅ 文档集已按 6 目录重构；每目录带 README 索引；文档无数字前缀。
-- ✅ 434+ 条交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。
+- ✅ 交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。链接守护脚本实跑统计：34 文件 / 727 链接 / 486 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）。
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ✅ 阶段 0-4 已有实现并通过全量测试（679 pass / 0 fail）；阶段 5（HMR / 对象运行时 / 自演化护栏）与阶段 6（递归自演化研究轨）为后续可选项，**尚未完成**，仍按阶段边界推进，不作已完成声明。
+- ✅ 阶段 0-4 已有实现并通过全量测试（792 pass / 0 fail）；HMR 核心（版本戳新鲜求值、按 unit 事务、故障注入、自动 watcher、扩展 reload e2e）已实现并测试（证据：`packages/components/loader/src/hmr.spec.ts`、`hmr.auto.spec.ts`、`packages/agent/src/extensions/hot-reload.e2e.spec.ts`）；阶段 5 其余（对象运行时 / unit 快照恢复）仍延后，阶段 6（递归自演化研究轨）仍为后续可选项，按阶段边界推进，不作已完成声明。
 - ⏳ 当前差距与下一批处置见执行文档（不在版本库内）；交付节奏与验收判据以 [delivery/roadmap.md](./delivery/roadmap.md) 为准。

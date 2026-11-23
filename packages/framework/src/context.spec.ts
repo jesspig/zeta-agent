@@ -294,3 +294,88 @@ describe("framework facade 运行时", () => {
     expect(seen).toEqual([1]);
   });
 });
+
+describe("A28 多租户 realm 隔离", () => {
+  test("per-tenant 资源经 realm 解析：同键不同 realm 互不覆盖", async () => {
+    const resource = defineKey<string>("@zeta-agent/context-test", "tenant-resource");
+    const ctx = createContext();
+    const tenantA = ctx.isolate(resource, Symbol("tenant-a"));
+    const tenantB = ctx.isolate(resource, Symbol("tenant-b"));
+
+    const releaseA = tenantA.set(resource, "db://tenant-a");
+    const releaseB = tenantB.set(resource, "db://tenant-b");
+
+    expect(tenantA.get(resource)).toBe("db://tenant-a");
+    expect(tenantB.get(resource)).toBe("db://tenant-b");
+    // 根 context 未声明该租户键：连读取入口都不存在，不会串到其他租户。
+    expect(() => ctx.get(resource)).toThrow("UNDECLARED_ACCESS");
+
+    releaseA();
+    expect(() => tenantA.get(resource)).toThrow("INACTIVE_ACCESS");
+    expect(tenantB.get(resource)).toBe("db://tenant-b");
+    releaseB();
+    await ctx.dispose();
+  });
+
+  test("跨租户事件不串：一个租户的 emit 不触达另一个租户的 listener", async () => {
+    const tenantA = createContext({ uid: "tenant-a" });
+    const tenantB = createContext({ uid: "tenant-b" });
+    const seenA: unknown[] = [];
+    const seenB: unknown[] = [];
+
+    tenantA.on("tenant-event", (payload) => seenA.push(payload));
+    tenantB.on("tenant-event", (payload) => seenB.push(payload));
+    tenantA.emit("tenant-event", { from: "a" });
+
+    expect(seenA).toEqual([{ from: "a" }]);
+    expect(seenB).toEqual([]);
+
+    tenantB.emit("tenant-event", { from: "b" });
+    expect(seenA).toEqual([{ from: "a" }]);
+    expect(seenB).toEqual([{ from: "b" }]);
+    await tenantA.dispose();
+    await tenantB.dispose();
+  });
+
+  test("配额作为 coeffect 可 reserve：各 realm 独立扣减且超额失败", async () => {
+    interface QuotaService {
+      check(tool: string): boolean;
+      reserve(tokens: number): boolean;
+      remaining(): number;
+    }
+    const quotaKey = defineKey<QuotaService>("@zeta-agent/context-test", "tenant-quota");
+    const ctx = createContext();
+
+    function tenantQuota(realm: symbol, capacity: number) {
+      const scope = ctx.isolate(quotaKey, realm);
+      let used = 0;
+      const service: QuotaService = {
+        check: (tool) => tool.length > 0 && used < capacity,
+        reserve: (tokens) => {
+          if (!Number.isInteger(tokens) || tokens <= 0 || used + tokens > capacity) return false;
+          used += tokens;
+          return true;
+        },
+        remaining: () => capacity - used,
+      };
+      const release = scope.set(quotaKey, service);
+      return { scope, service, release };
+    }
+
+    const a = tenantQuota(Symbol("quota-a"), 3);
+    const b = tenantQuota(Symbol("quota-b"), 1);
+
+    expect(a.scope.get(quotaKey).check("shell")).toBe(true);
+    expect(a.scope.get(quotaKey).reserve(2)).toBe(true);
+    expect(a.scope.get(quotaKey).remaining()).toBe(1);
+    expect(a.scope.get(quotaKey).reserve(2)).toBe(false);
+    // 另一租户的配额不受影响。
+    expect(b.scope.get(quotaKey).remaining()).toBe(1);
+    expect(b.scope.get(quotaKey).reserve(1)).toBe(true);
+    expect(b.scope.get(quotaKey).reserve(1)).toBe(false);
+
+    a.release();
+    b.release();
+    await ctx.dispose();
+  });
+});
