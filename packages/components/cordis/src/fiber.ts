@@ -9,7 +9,10 @@ export interface FiberSpec {
   readonly uid: string;
   readonly inject: readonly CoeffectKey<any>[];
   readonly provide: readonly CoeffectKey<any>[];
-  readonly apply?: (ctx: EffectHost) => Effect;
+  /** 组件配置；经 apply 的第二参数下发给 Component.apply(ctx, config)。 */
+  readonly config?: unknown;
+  /** 兼容旧调用方 apply(ctx)；新调用方可声明 apply(ctx, config)。 */
+  readonly apply?: (ctx: EffectHost, config?: unknown) => Effect | Promise<Effect>;
 }
 
 function sameView(left: View | null, right: View | null): boolean {
@@ -117,7 +120,10 @@ export class Fiber {
 
   private async reload(target: View): Promise<void> {
     try {
-      const source: Effect = this.spec.apply ? this.spec.apply(this.host) : NOOP;
+      // await 归一 apply 的 Promise<Effect> 形态；Disposer / Iterable / AsyncIterable 原样透传。
+      const source: Effect = await (this.spec.apply
+        ? this.spec.apply(this.host, this.spec.config)
+        : NOOP);
       const dispose: Disposer = await execute(source, () => this.target === target);
       for (const name of this.spec.inject) {
         this.system.providerOf(name, this.uid)?.dependents.add(this);
