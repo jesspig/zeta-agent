@@ -26,8 +26,46 @@ function harness() {
 }
 
 describe("T-14 runLoop 11 步流水线", () => {
-  test("流水线定义恰好 11 步", () => {
-    expect(RUN_LOOP_STEPS).toHaveLength(11);
+  test("流水线定义恰好 11 步且顺序固定", () => {
+    // 不靠长度凑数：逐项断言 11 步名称与顺序；真实进入顺序由下一条 onStep 探针校验。
+    expect(RUN_LOOP_STEPS).toEqual([
+      "prepareNextTurn",
+      "declareToolChanges",
+      "prepareRequest",
+      "streamAssistant",
+      "hardExitCheck",
+      "executeToolCalls",
+      "appendToolResultsAndFinishTurn",
+      "decisionEnd",
+      "decisionContinue",
+      "outerFollowUpOrBreak",
+      "emitAgentEnd",
+    ]);
+  });
+
+  test("11 步按设计顺序真实进入（onStep 探针）", async () => {
+    const stream = createEventStream();
+    const entered: string[] = [];
+    const inbox = createInbox();
+    let streamCount = 0;
+
+    await runLoop({
+      inbox,
+      emit: (event) => stream.emit(event),
+      getState: () => stream.getState(),
+      declareToolChanges: () => [{ role: "system", content: "tools: read" }],
+      prepareRequest: () => ({ prompt: "x" }),
+      onStep: (step) => entered.push(step),
+      streamAssistant: async () => {
+        streamCount += 1;
+        return { message: assistantMessage, toolCalls: [toolCall], stopReason: "stop" };
+      },
+      executeToolCalls: async () => [{ callId: toolCall.id, message: toolResultMessage }],
+      finishTurn: () => ({ action: "end" }),
+    });
+
+    expect(streamCount).toBe(1);
+    expect(entered).toEqual([...RUN_LOOP_STEPS]);
   });
 
   test("单轮含一次工具调用按序 emit AgentEvent 并在 agent_end 结束", async () => {

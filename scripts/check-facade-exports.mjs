@@ -9,7 +9,10 @@ const bun = "bun";
 
 const facades = {
   framework: ["./types", "./package.json"],
-  "agent-framework": ["./types", "./runtime/agent", "./session/surface", "./tools/pipeline"],
+  "agent-framework": [
+    "./types", "./runtime/agent", "./runtime/loop", "./session/surface",
+    "./tools/pipeline", "./plugins/manager", "./plugins/hook-chain",
+  ],
   agent: ["./facade", "./cli/modes", "./providers/openai", "./providers/openai-responses", "./providers/model-discovery", "./providers/models-dev", "./providers/model-catalog"],
   tui: ["./slots", "./signal", "./virtual", "./hud", "./frame-state", "./backend", "./runtime"],
   components: [],
@@ -81,9 +84,18 @@ const importChecks = [
     "@zeta-agent/agent/providers/model-catalog": ["decorateModels"],
   }],
   ["agent-framework", [
-    "@zeta-agent/agent-framework", "@zeta-agent/framework/types", "@zeta-agent/cordis", "@zeta-agent/events",
+    "@zeta-agent/agent-framework", "@zeta-agent/agent-framework/tools/pipeline",
+    "@zeta-agent/agent-framework/runtime/loop", "@zeta-agent/agent-framework/plugins/manager",
+    "@zeta-agent/framework/types", "@zeta-agent/cordis", "@zeta-agent/events",
   ], {
-    "@zeta-agent/agent-framework": ["createAgent", "AgentPlugin", "AgentPluginManager", "HookChain"],
+    // 真插件管线边界：根导出 + 工具子路径 + 插件管理器子路径都必须暴露可用实现。
+    "@zeta-agent/agent-framework": [
+      "createAgent", "AgentPlugin", "AgentPluginManager", "createAgentPluginManager", "HookChain",
+      "runLoop", "RUN_LOOP_STEPS", "runToolCall", "declareToolChanges", "createToolPipeline",
+    ],
+    "@zeta-agent/agent-framework/tools/pipeline": ["runToolCall", "declareToolChanges", "createToolPipeline"],
+    "@zeta-agent/agent-framework/runtime/loop": ["runLoop", "RUN_LOOP_STEPS"],
+    "@zeta-agent/agent-framework/plugins/manager": ["AgentPluginManager", "createAgentPluginManager"],
   }],
   ["tui", ["@zeta-agent/agent/facade", "@zeta-agent/agent", "@zeta-agent/tui/backend"], {
     "@zeta-agent/agent/facade": ["createAgent"],

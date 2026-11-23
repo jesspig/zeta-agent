@@ -10,16 +10,22 @@ import type {
 } from "./decision";
 import { nextAction } from "./decision";
 import type { Inbox } from "./inbox";
+import type { ToolPipeline } from "../tools/pipeline";
+import type {
+  LoopToolCall,
+  LoopToolResult,
+  ToolDeclarationDelta,
+  ToolExecutionUpdate,
+} from "../tools/types";
+
+export type { ToolExecutionUpdate } from "../tools/types";
 
 export type LoopDecision =
   | { readonly action: "continue" }
   | { readonly action: "end" };
 
-export interface ToolCall {
-  readonly id: string;
-  readonly name: string;
-  readonly args: unknown;
-}
+/** 旧 loop 调用形状别名：统一定义见 tools/types。 */
+export type ToolCall = LoopToolCall;
 
 export interface AssistantResult {
   readonly message: AgentMessage;
@@ -28,16 +34,8 @@ export interface AssistantResult {
   readonly updates?: readonly AssistantMessageEvent[];
 }
 
-export interface ToolExecutionUpdate {
-  readonly partialResult: unknown;
-}
-
-export interface ToolResult {
-  readonly callId: string;
-  readonly message: AgentMessage;
-  readonly isError?: boolean;
-  readonly updates?: readonly ToolExecutionUpdate[];
-}
+/** 旧 loop 结果形状别名：统一定义见 tools/types。 */
+export type ToolResult = LoopToolResult;
 
 export interface LastTurn {
   readonly message: AgentMessage;
@@ -49,14 +47,22 @@ export interface LoopRuntime {
   emit(event: AgentEvent): Promise<void> | void;
   getState(): AgentState;
   prepareNextTurn?(lastTurn: LastTurn | undefined): void;
+  /** 工具声明 delta：返回 system 消息或 delta 对象，由 loop 统一 emit。 */
+  declareToolChanges?(): readonly AgentMessage[] | ToolDeclarationDelta | void;
   prepareRequest?(request: unknown): unknown;
   streamAssistant(request: unknown, onPartial?: (message: AgentMessage) => void | Promise<void>): Promise<AssistantResult>;
-  executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]>;
+  executeToolCalls?(calls: readonly ToolCall[]): Promise<readonly ToolResult[]>;
+  /** 提供时由统一 prepare/execute/finalize 管线执行工具，否则沿用 executeToolCalls。 */
+  toolPipeline?: ToolPipeline;
   finishTurn?(turn: LastTurn): LoopDecision | undefined;
   decide?(state: AgentState, turn: LastTurn): LoopDecision;
   decision?(state: AgentState, turn: LastTurn): AgentDecision;
   waterfall?: DecisionWaterfall;
   pollFollowUp?(): readonly AgentMessage[];
+  /** 兼容开关：文本工具标记由上层可选解析，统一管线本身不依赖该协议。 */
+  readonly allowTextToolMarkers?: boolean;
+  /** 仅测试可见：按进入顺序记录 11 步流水线阶段，用于校验真实执行顺序。 */
+  onStep?(step: string): void;
 }
 
 export const RUN_LOOP_STEPS = [
@@ -86,9 +92,15 @@ async function resolveAction(
     const state = runtime.getState();
     const initial = runtime.decision?.(state, turn) ?? nextAction(state);
     const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-    const decided = runtime.waterfall
-      ? await runtime.waterfall.run(initial, { state, event })
-      : initial;
+    let decided: AgentDecision = initial;
+    if (runtime.waterfall) {
+      try {
+        decided = await runtime.waterfall.run(initial, { state, event });
+      } catch {
+        // 归一化：hook 抛错不致命，回退到依据当前状态计算的安全决策。
+        decided = nextAction(state);
+      }
+    }
     return decided.kind === "exit" ? "end" : "continue";
   }
   return toolCallCount > 0 ? "continue" : "end";
@@ -103,23 +115,37 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
   async function emitAgentEnd(): Promise<void> {
     if (ended) return;
     ended = true;
+    runtime.onStep?.("emitAgentEnd");
     await emit({ type: "agent_end", messages: runtime.getState().messages });
   }
 
   while (true) {
+    runtime.onStep?.("prepareNextTurn");
     runtime.prepareNextTurn?.(lastTurn);
     const steering = inbox.poll("nextTurn");
     await emit({ type: "turn_start" });
+
+    runtime.onStep?.("declareToolChanges");
+    const declared = runtime.declareToolChanges?.();
+    if (declared !== undefined) {
+      const deltaMessages = "messages" in declared ? declared.messages : declared;
+      for (const message of deltaMessages) {
+        await emit({ type: "message_start", message });
+        await emit({ type: "message_end", message });
+      }
+    }
 
     for (const item of steering) {
       await emit({ type: "message_start", message: item.body });
       await emit({ type: "message_end", message: item.body });
     }
 
+    runtime.onStep?.("prepareRequest");
     const request = runtime.prepareRequest?.({ messages: runtime.getState().messages }) ?? {
       messages: runtime.getState().messages,
     };
 
+    runtime.onStep?.("streamAssistant");
     await emit({ type: "message_start", message: { role: "assistant", content: "" } });
     const response = await runtime.streamAssistant(request, async (partial) => {
       await emit({
@@ -133,6 +159,7 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
     }
     await emit({ type: "message_end", message: response.message });
 
+    runtime.onStep?.("hardExitCheck");
     if (response.stopReason === "error" || response.stopReason === "aborted") {
       const turn: LastTurn = { message: response.message, toolResults: [] };
       runtime.finishTurn?.(turn);
@@ -141,19 +168,27 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       return runtime.getState();
     }
 
+    runtime.onStep?.("executeToolCalls");
     const toolCalls = response.toolCalls;
     let results: readonly ToolResult[] = [];
     if (toolCalls.length > 0) {
       for (const call of toolCalls) {
         await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
       }
-      results = response.stopReason === "length"
-        ? toolCalls.map((call) => ({
-            callId: call.id,
-            message: { role: "toolResult" as const, content: "truncated" },
-            isError: true,
-          }))
-        : await runtime.executeToolCalls(toolCalls);
+      if (response.stopReason === "length") {
+        results = toolCalls.map((call) => ({
+          callId: call.id,
+          message: { role: "toolResult" as const, content: "truncated" },
+          isError: true,
+        }));
+      } else if (runtime.toolPipeline !== undefined) {
+        const pipelineResults = await runtime.toolPipeline.executeBatch(toolCalls);
+        results = pipelineResults.map((result) => result as ToolResult);
+      } else if (runtime.executeToolCalls !== undefined) {
+        results = await runtime.executeToolCalls(toolCalls);
+      } else {
+        results = [];
+      }
       for (const result of results) {
         for (const update of result.updates ?? []) {
           await emit({
@@ -176,6 +211,7 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
 
     // 完成通知按 results（完成顺序）发出；会话提交按 assistant 声明顺序排列，
     // 两者解耦，保证 transcript 顺序稳定且与工具声明对应。
+    runtime.onStep?.("appendToolResultsAndFinishTurn");
     const resultByCallId = new Map(results.map((result) => [result.callId, result]));
     const orderedResults = toolCalls
       .map((call) => resultByCallId.get(call.id))
@@ -192,7 +228,13 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
     await emit({ type: "turn_end", message: response.message, toolResults: toolResultMessages });
     lastTurn = turn;
 
-    if (action === "end") {
+    // 决策阶段进入序列按设计顺序记录（test-only），与 RUN_LOOP_STEPS 对齐。
+    runtime.onStep?.("decisionEnd");
+    const shouldEnd = action === "end";
+    runtime.onStep?.("decisionContinue");
+    const shouldContinue = action === "continue";
+    runtime.onStep?.("outerFollowUpOrBreak");
+    if (shouldEnd) {
       await emitAgentEnd();
       return runtime.getState();
     }
@@ -202,7 +244,7 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
 
     // 决策为 continue（例如模型请求了原生工具调用）时必须进入下一轮，
     // 让工具结果回到模型；否则会在一轮后静默结束。
-    if (action === "continue") continue;
+    if (shouldContinue) continue;
 
     const followUps = runtime.pollFollowUp?.() ?? inbox.poll("nextTurn");
     if (followUps.length > 0) continue;
