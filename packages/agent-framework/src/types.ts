@@ -1,5 +1,6 @@
 import type { CoeffectKey, Disposer, Effect } from "@zeta-agent/framework";
 import type { AgentEvent } from "./runtime/agent";
+import type { ToolExecutionMode } from "./tools/types";
 
 export type LayerState = "active" | "degraded" | "unsupported" | "disabled";
 
@@ -24,6 +25,8 @@ export interface RedactRule {
 export interface AgentTool<P = unknown> {
   readonly name: string;
   readonly execute: (input: P) => unknown | Promise<unknown>;
+  /** 工具声明的执行偏好；统一流水线据此决定整批串行或并行。 */
+  readonly executionMode?: ToolExecutionMode;
 }
 
 export interface EventBus {

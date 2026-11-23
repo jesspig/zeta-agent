@@ -10,16 +10,22 @@ import type {
 } from "./decision";
 import { nextAction } from "./decision";
 import type { Inbox } from "./inbox";
+import type { ToolPipeline } from "../tools/pipeline";
+import type {
+  LoopToolCall,
+  LoopToolResult,
+  ToolDeclarationDelta,
+  ToolExecutionUpdate,
+} from "../tools/types";
+
+export type { ToolExecutionUpdate } from "../tools/types";
 
 export type LoopDecision =
   | { readonly action: "continue" }
   | { readonly action: "end" };
 
-export interface ToolCall {
-  readonly id: string;
-  readonly name: string;
-  readonly args: unknown;
-}
+/** 旧 loop 调用形状别名：统一定义见 tools/types。 */
+export type ToolCall = LoopToolCall;
 
 export interface AssistantResult {
   readonly message: AgentMessage;
@@ -28,16 +34,8 @@ export interface AssistantResult {
   readonly updates?: readonly AssistantMessageEvent[];
 }
 
-export interface ToolExecutionUpdate {
-  readonly partialResult: unknown;
-}
-
-export interface ToolResult {
-  readonly callId: string;
-  readonly message: AgentMessage;
-  readonly isError?: boolean;
-  readonly updates?: readonly ToolExecutionUpdate[];
-}
+/** 旧 loop 结果形状别名：统一定义见 tools/types。 */
+export type ToolResult = LoopToolResult;
 
 export interface LastTurn {
   readonly message: AgentMessage;
@@ -49,14 +47,20 @@ export interface LoopRuntime {
   emit(event: AgentEvent): Promise<void> | void;
   getState(): AgentState;
   prepareNextTurn?(lastTurn: LastTurn | undefined): void;
+  /** 工具声明 delta：返回 system 消息或 delta 对象，由 loop 统一 emit。 */
+  declareToolChanges?(): readonly AgentMessage[] | ToolDeclarationDelta | void;
   prepareRequest?(request: unknown): unknown;
   streamAssistant(request: unknown, onPartial?: (message: AgentMessage) => void | Promise<void>): Promise<AssistantResult>;
-  executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]>;
+  executeToolCalls?(calls: readonly ToolCall[]): Promise<readonly ToolResult[]>;
+  /** 提供时由统一 prepare/execute/finalize 管线执行工具，否则沿用 executeToolCalls。 */
+  toolPipeline?: ToolPipeline;
   finishTurn?(turn: LastTurn): LoopDecision | undefined;
   decide?(state: AgentState, turn: LastTurn): LoopDecision;
   decision?(state: AgentState, turn: LastTurn): AgentDecision;
   waterfall?: DecisionWaterfall;
   pollFollowUp?(): readonly AgentMessage[];
+  /** 兼容开关：文本工具标记由上层可选解析，统一管线本身不依赖该协议。 */
+  readonly allowTextToolMarkers?: boolean;
 }
 
 export const RUN_LOOP_STEPS = [
@@ -111,6 +115,15 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
     const steering = inbox.poll("nextTurn");
     await emit({ type: "turn_start" });
 
+    const declared = runtime.declareToolChanges?.();
+    if (declared !== undefined) {
+      const deltaMessages = "messages" in declared ? declared.messages : declared;
+      for (const message of deltaMessages) {
+        await emit({ type: "message_start", message });
+        await emit({ type: "message_end", message });
+      }
+    }
+
     for (const item of steering) {
       await emit({ type: "message_start", message: item.body });
       await emit({ type: "message_end", message: item.body });
@@ -147,13 +160,20 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       for (const call of toolCalls) {
         await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
       }
-      results = response.stopReason === "length"
-        ? toolCalls.map((call) => ({
-            callId: call.id,
-            message: { role: "toolResult" as const, content: "truncated" },
-            isError: true,
-          }))
-        : await runtime.executeToolCalls(toolCalls);
+      if (response.stopReason === "length") {
+        results = toolCalls.map((call) => ({
+          callId: call.id,
+          message: { role: "toolResult" as const, content: "truncated" },
+          isError: true,
+        }));
+      } else if (runtime.toolPipeline !== undefined) {
+        const pipelineResults = await runtime.toolPipeline.executeBatch(toolCalls);
+        results = pipelineResults.map((result) => result as ToolResult);
+      } else if (runtime.executeToolCalls !== undefined) {
+        results = await runtime.executeToolCalls(toolCalls);
+      } else {
+        results = [];
+      }
       for (const result of results) {
         for (const update of result.updates ?? []) {
           await emit({

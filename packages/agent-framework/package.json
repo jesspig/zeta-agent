@@ -19,6 +19,7 @@
     "./session/offload": "./src/session/offload.ts",
     "./tools/pipeline": "./src/tools/pipeline.ts",
     "./tools/parallel": "./src/tools/parallel.ts",
+    "./tools/types": "./src/tools/types.ts",
     "./package.json": "./package.json"
   },
   "dependencies": {

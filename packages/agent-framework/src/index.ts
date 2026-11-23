@@ -17,6 +17,15 @@ export {
   executeCall,
   executeBatch,
   createTerminationController,
+  prepareToolCall,
+  executePreparedToolCall,
+  finalizeExecutedToolCall,
+  runToolCall,
+  declareToolChanges,
+  createToolPipeline,
+  shouldTerminateToolBatch,
+  isPreparedToolCall,
+  resolveToolExecutionMode,
 } from "./tools/pipeline";
 export type {
   PermissionBehavior,
@@ -28,6 +37,28 @@ export type {
   ToolRegistry,
   TerminationController,
   BatchContext,
+  PreparedToolCall,
+  ExecutedToolCall,
+  BeforeToolCallInput,
+  BeforeToolCallResult,
+  BeforeToolCallHook,
+  AfterToolCallInput,
+  AfterToolCallResult,
+  AfterToolCallHook,
+  ToolHookRunner,
+  ToolPipeline,
 } from "./tools/pipeline";
+export { normalizeToolArgs, createToolResultMessage, toolName, toolInput } from "./tools/types";
+export type {
+  ToolExecutionMode,
+  ToolExecutionConfig,
+  ToolDeclarationDelta,
+  PipelineToolCall,
+  PipelineToolResult,
+  LoopToolCall,
+  LoopToolResult,
+  LegacyToolCall,
+  LegacyToolResult,
+} from "./tools/types";
 export { executeConditionalBatch } from "./tools/parallel";
 export type { ConditionalCall, ParallelContext } from "./tools/parallel";
