@@ -16,7 +16,25 @@ const facadePackages = new Set([
   "@zeta-agent/cli",
 ]);
 
+// facade/聚合包在装配时可合法依赖的组件子包；apps/tui/deploy 仍只放行 facadePackages。
+const componentPackages = new Set([
+  "@zeta-agent/cordis",
+  "@zeta-agent/events",
+  "@zeta-agent/capabilities",
+  "@zeta-agent/loader",
+  "@zeta-agent/observability",
+  "@zeta-agent/security",
+]);
+
 const moduleSpecifierPattern = /["']([^"']+)["']/g;
+
+// 只有模块语句行才可能包含真实的模块说明符。普通代码字符串、JSDoc 注释、
+// 测试夹具字符串中的说明符-shaped 字面量一律跳过，避免误报。
+const staticImportExportLine = /^\s*(?:import|export)\b/;
+const multilineFromLine = /^\s*\}\s*from\b/;
+const dynamicImportLine = /\bimport\s*\(/;
+const isModuleStatementLine = (line) =>
+  staticImportExportLine.test(line) || multilineFromLine.test(line) || dynamicImportLine.test(line);
 
 const opentuiBusinessModules = new Set(["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame-state.ts", "backend.ts"]);
 
@@ -44,21 +62,44 @@ function appSrcDirs() {
     .filter((d) => existsSync(d));
 }
 
+// packages/*/src 中的 facade/聚合层（不含 tui 与 deploy）。
+const facadeAggregationPackages = [
+  "framework",
+  "agent-framework",
+  "agent",
+  "components",
+  "agent-components",
+  "testing",
+];
+
+function facadeAggregationSrcDirs() {
+  return facadeAggregationPackages
+    .map((name) => join(root, "packages", name, "src"))
+    .filter((d) => existsSync(d));
+}
+
+// facade/聚合层允许 facadePackages ∪ componentPackages；apps/tui/deploy 仍只允许 facadePackages。
+const facadeAllowedPackages = facadePackages;
+const aggregationAllowedPackages = new Set([...facadePackages, ...componentPackages]);
+
 const scanTargets = [
-  ...appSrcDirs().map((dir) => ({ dir, opentuiBusinessCheck: false })),
-  { dir: join(root, "packages/tui/src"), opentuiBusinessCheck: true },
-  { dir: join(root, "packages/deploy/src"), opentuiBusinessCheck: false },
+  ...appSrcDirs().map((dir) => ({ dir, opentuiBusinessCheck: false, allowComponentPackages: false })),
+  { dir: join(root, "packages/tui/src"), opentuiBusinessCheck: true, allowComponentPackages: false },
+  { dir: join(root, "packages/deploy/src"), opentuiBusinessCheck: false, allowComponentPackages: false },
+  ...facadeAggregationSrcDirs().map((dir) => ({ dir, opentuiBusinessCheck: false, allowComponentPackages: true })),
 ];
 
 const violations = [];
 
-for (const { dir, opentuiBusinessCheck } of scanTargets) {
+for (const { dir, opentuiBusinessCheck, allowComponentPackages } of scanTargets) {
+  const allowedPackages = allowComponentPackages ? aggregationAllowedPackages : facadeAllowedPackages;
   for (const file of walk(dir)) {
     const rel = relative(root, file).split(sep).join("/");
     const isBusinessModule = opentuiBusinessCheck && opentuiBusinessModules.has(file.split(sep).pop());
     const lines = readFileSync(file, "utf8").split(/\r?\n/);
 
     lines.forEach((line, index) => {
+      if (!isModuleStatementLine(line)) return;
       for (const match of line.matchAll(moduleSpecifierPattern)) {
         const spec = match[1];
         if (!spec.startsWith("@zeta-agent/") && !spec.startsWith("@opentui/")) continue;
@@ -66,7 +107,7 @@ for (const { dir, opentuiBusinessCheck } of scanTargets) {
         const scopeMatch = /^(@[^/]+\/[^/]+)/.exec(spec);
         const pkg = scopeMatch ? scopeMatch[1] : spec;
 
-        if (pkg.startsWith("@zeta-agent/") && !facadePackages.has(pkg)) {
+        if (pkg.startsWith("@zeta-agent/") && !allowedPackages.has(pkg)) {
           violations.push(`${rel}:${index + 1}: 禁止 import 组件内部实现 "${spec}"（只允许 facade 稳定入口）`);
         }
         if (isBusinessModule && (spec === "@opentui/solid" || spec.startsWith("@opentui/solid/"))) {
