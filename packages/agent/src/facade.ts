@@ -2,23 +2,29 @@ import {
   createEventStream,
   createInbox,
   runLoop,
+  AgentPluginManager,
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
+  type AgentPlugin,
   type AgentPluginApi,
   type AgentState,
   type AgentToolCallRecord,
   type AssistantMessageEvent,
   type AssistantResult,
   type Capabilities,
+  type CompatExtensionApi,
   type ContextTransform,
   type Converter,
   type CoreContextLike,
+  type DurableExtensionSpec,
   type EffectMeta,
   type EventBus,
   type FinishTurn,
   type Inbox,
   type LoopRuntime,
+  type PluginContribution,
+  type PluginTool,
   type PrepareNextTurn,
   type PrepareRequest,
   type QueueSource,
@@ -53,39 +59,17 @@ export type {
   AgentToolCallRecord,
 } from "@zeta-agent/agent-framework";
 
-export interface PluginTool<P = never> {
-  readonly name: string;
-  readonly execute: (input: P) => unknown;
-}
-
-export type PluginContribution =
-  | { readonly kind: "tool"; readonly tool: PluginTool }
-  | { readonly kind: "hook"; readonly event: string; readonly handler: (event: AgentEvent) => void }
-  | { readonly kind: "section"; readonly text: string }
-  | { readonly kind: "wrap"; readonly name: string }
-  | { readonly kind: "task"; readonly name: string }
-  | { readonly kind: "service"; readonly name: string };
-
-export interface AgentPlugin {
-  readonly kind: "AgentPlugin";
-  readonly name: string;
-  readonly contributions: readonly PluginContribution[];
-  install(): Disposer;
-}
-
-export interface CompatExtensionApi {
-  registerTool<P>(tool: PluginTool<P>): void;
-  on(event: string, handler: (event: AgentEvent) => void): void;
-  addSection(text: string): void;
-}
-
-export interface DurableExtensionSpec {
-  readonly tools?: readonly PluginTool[];
-  readonly hooks?: readonly { readonly event: string; readonly handler: (event: AgentEvent) => void }[];
-  readonly sections?: readonly string[];
-  readonly wraps?: readonly string[];
-  readonly tasks?: readonly string[];
-}
+// 插件管线归位到 agent-framework；类型重导出不进入运行时导出面，保持旧路径零回归。
+export type {
+  AgentPlugin,
+  AgentPluginManager,
+  HookChain,
+  CompatExtensionApi,
+  DurableExtensionSpec,
+  PluginContribution,
+  PluginTool,
+} from "@zeta-agent/agent-framework";
+export { defineCompatExtension, defineDurableExtension } from "@zeta-agent/agent-framework";
 
 export const DEFAULT_ASSEMBLY: readonly string[] = Object.freeze([
   "builtin:read",
@@ -98,60 +82,6 @@ export const DEFAULT_ASSEMBLY: readonly string[] = Object.freeze([
 
 export function listAssembly(): readonly string[] {
   return [...DEFAULT_ASSEMBLY];
-}
-
-function defineAgentPlugin(name: string, contributions: readonly PluginContribution[]): AgentPlugin {
-  if (typeof name !== "string" || name.length === 0) throw new Error("plugin: name required");
-  const normalized = Object.freeze([...contributions]);
-  let installed = false;
-  return {
-    kind: "AgentPlugin",
-    name,
-    contributions: normalized,
-    install() {
-      if (installed) throw new Error("PLUGIN_ALREADY_INSTALLED");
-      installed = true;
-      return () => {
-        installed = false;
-      };
-    },
-  };
-}
-
-export function defineCompatExtension(
-  name: string,
-  define: (api: CompatExtensionApi) => void
-): AgentPlugin {
-  if (typeof define !== "function") throw new Error("compat extension: expected a builder");
-  const contributions: PluginContribution[] = [];
-  const api: CompatExtensionApi = {
-    registerTool(tool) {
-      contributions.push({ kind: "tool", tool });
-    },
-    on(event, handler) {
-      contributions.push({ kind: "hook", event, handler });
-    },
-    addSection(text) {
-      contributions.push({ kind: "section", text });
-    },
-  };
-  define(api);
-  return defineAgentPlugin(name, contributions);
-}
-
-export function defineDurableExtension(name: string, spec: DurableExtensionSpec): AgentPlugin {
-  if (spec === null || typeof spec !== "object") {
-    throw new Error("durable extension: expected a spec");
-  }
-  const contributions: PluginContribution[] = [];
-  for (const tool of spec.tools ?? []) contributions.push({ kind: "tool", tool });
-  for (const hook of spec.hooks ?? []) {
-    contributions.push({ kind: "hook", event: hook.event, handler: hook.handler });
-  }
-  for (const text of spec.sections ?? []) contributions.push({ kind: "section", text });
-  for (const entry of spec.wraps ?? []) contributions.push({ kind: "wrap", name: entry });
-  for (const entry of spec.tasks ?? []) contributions.push({ kind: "task", name: entry });
-  return defineAgentPlugin(name, contributions);
 }
 
 function builtinTools(options: {
@@ -372,20 +302,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const steeringSources: QueueSource[] = [];
   const followUpSources: QueueSource[] = [];
   const streamFnProviders: StreamFn[] = [];
-  const disposers: Array<() => void> = [];
+  // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
+  const pluginManager = new AgentPluginManager();
   const events = createEventBus();
 
   function addDisposer(dispose: () => void): () => void {
-    let active = true;
-    const wrapped = (): void => {
-      if (!active) return;
-      active = false;
-      dispose();
-      const index = disposers.indexOf(wrapped);
-      if (index >= 0) disposers.splice(index, 1);
-    };
-    disposers.push(wrapped);
-    return wrapped;
+    return pluginManager.addDisposer(dispose);
   }
 
   function addToList<T>(list: T[], fn: T): () => void {
@@ -469,7 +391,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     onEffect: (handler) => effectBridge.onEffect(handler),
     addRedactor: (rule) => logger.addRedactor(rule),
     disposeAll() {
-      for (const dispose of [...disposers].reverse()) dispose();
+      pluginManager.disposeAll();
     },
   };
 
