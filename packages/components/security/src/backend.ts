@@ -67,3 +67,33 @@ export function createExecutionBackend(config: BackendConfig): ExecutionBackend 
     dispose: () => {},
   };
 }
+
+/**
+ * 未接入真实执行器时的占位能力：所有层都声明 unsupported。
+ * 关键层只有 active 才算强制生效，因此能力探测会立刻判定为降级并失败关闭。
+ */
+export const UNCONNECTED_CAPABILITIES: Capabilities = Object.freeze({
+  isolation: "unsupported",
+  seccomp: "unsupported",
+  fsConfinement: "unsupported",
+  auditSink: "unsupported",
+  egressDefaultDeny: "unsupported",
+});
+
+export interface UnconnectedBackendOptions {
+  readonly name?: string;
+  readonly reason?: string;
+}
+
+/**
+ * 占位后端：没有真实隔离执行器时，能力声明必须与实际一致（unsupported），
+ * 不能假装 active 再把命令报告为成功。run 在能力探测阶段即失败关闭。
+ */
+export function createUnconnectedBackend(options: UnconnectedBackendOptions = {}): ExecutionBackend {
+  const reason = options.reason ?? "NO_REAL_EXECUTION_BACKEND: 未配置真实隔离执行后端";
+  return createExecutionBackend({
+    name: options.name ?? "unconnected-placeholder",
+    capabilities: UNCONNECTED_CAPABILITIES,
+    executor: () => ({ exitCode: 1, stdout: "", stderr: reason, isolated: null }),
+  });
+}
