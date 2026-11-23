@@ -1,4 +1,4 @@
-import type { RuntimeResources, RuntimeTuiOptions } from "@zeta-agent/tui";
+import type { AgentUsageTelemetry, RuntimeResources, RuntimeTuiOptions, SubmitMode } from "@zeta-agent/tui";
 import type { Agent } from "@zeta-agent/agent";
 
 export interface TuiHostOptions {
@@ -16,13 +16,14 @@ export interface TuiHostOptions {
   readonly commandCatalog?: RuntimeTuiOptions["commandCatalog"];
   readonly onCommand?: (text: string) => void | Promise<void>;
   readonly onAbort?: () => void;
+  readonly telemetry?: AgentUsageTelemetry;
 }
 
 /** 把 agent 事件源与命令处理器封装为 CLI→TUI 共用的 options 契约（FR-12）。 */
 export function buildTuiOptions(
   agent: Agent,
   version: string,
-  handleCommand: (text: string) => void | Promise<void>,
+  handleCommand: (text: string, mode?: SubmitMode) => void | Promise<void>,
   host: TuiHostOptions = {},
 ): RuntimeTuiOptions {
   return {
@@ -37,7 +38,7 @@ export function buildTuiOptions(
       { id: "clear", title: "清空当前会话" },
     ],
     mode: "fullscreen",
-    onSubmit: (text) => handleCommand(text),
+    onSubmit: (text, mode) => handleCommand(text, mode),
     cwd: host.cwd,
     model: host.model,
     models: host.models,
@@ -49,5 +50,6 @@ export function buildTuiOptions(
     onNewSession: host.onNewSession,
     provider: host.provider,
     resources: host.resources,
+    telemetry: host.telemetry,
   };
 }

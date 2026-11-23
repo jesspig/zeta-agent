@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent } from "@zeta-agent/agent";
 import { createAgentSignals } from "./signal";
-import { createOscBridge, oscSequence } from "./osc";
+import { createOscBridge, extractMarkdownLinks, oscSequence } from "./osc";
 
 function bus() {
   const listeners = new Set<(event: AgentEvent) => void>();
@@ -40,5 +40,13 @@ describe("U-05 OSC 状态上报接线", () => {
 
     release();
     expect(written.at(-1)).toBe("\x1b]9;4;0\x1b\\");
+  });
+
+  test("extractMarkdownLinks 提取内联链接 URL 供 OSC 8 上报", () => {
+    expect(extractMarkdownLinks("见 [文档](https://example.com) 与 [API](https://api.dev/v1)")).toEqual([
+      "https://example.com",
+      "https://api.dev/v1",
+    ]);
+    expect(extractMarkdownLinks("没有链接")).toEqual([]);
   });
 });

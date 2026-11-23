@@ -8,7 +8,10 @@ import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
 import { ThemeProvider, useTheme } from "./theme-context";
-import { createOscBridge } from "./osc";
+import { createOscBridge, createOscReporter } from "./osc";
+import { OscProvider } from "./osc-context";
+import { createUsageTracker, initialTelemetry } from "./usage";
+import type { AgentUsageTelemetry } from "./telemetry-types";
 import { CommandPaletteView, type Command } from "./command-palette";
 import {
   SelectDialog,
@@ -21,7 +24,7 @@ import type { SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { Transcript, type TranscriptResources } from "./components/transcript";
-import { ZetaEditor } from "./components/editor";
+import { ZetaEditor, type SubmitMode } from "./components/editor";
 import { ViewportLayout } from "./components/layout-view";
 import type { RuntimeMessage, RuntimeModelOption, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 import type { SlashCommand } from "./slash";
@@ -54,6 +57,9 @@ export function ZetaFrame(props: ZetaFrameProps) {
 const HELP_TEXT: readonly string[] = [
   "快捷键",
   "  Enter        提交（Shift+Enter 换行）",
+  "  Alt+Enter    排队 follow-up（下一轮消费）",
+  "  Ctrl+Shift+C 复制输入到系统剪贴板",
+  "  Alt+Up       取回最早一条 follow-up",
   "  Esc          中止当前运行",
   "  Ctrl+C       清空输入",
   "  Ctrl+D       退出（输入为空时）",
@@ -96,7 +102,7 @@ export interface ZetaAppProps {
   readonly messages: readonly RuntimeMessage[];
   readonly source?: EventSource;
   readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
-  readonly onSubmit?: (text: string) => void | Promise<void>;
+  readonly onSubmit?: (text: string, mode?: SubmitMode) => void | Promise<void>;
   readonly onExit: () => void;
   readonly onAbort?: () => void;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
@@ -124,6 +130,8 @@ export interface ZetaAppProps {
   readonly onEffortChange?: (effort: string) => void;
   /** /new：宿主执行真实会话替换（清空历史并隔离在途事件）。 */
   readonly onNewSession?: () => void | Promise<void>;
+  /** 真实遥测：token/成本来自 usage 事件，分支/会话由宿主提供。 */
+  readonly telemetry?: AgentUsageTelemetry;
 }
 
 /** 根界面：视口（对话）+ 停靠区（编辑器/footer）+ 覆盖层。 */
@@ -278,7 +286,7 @@ export function ZetaApp(props: ZetaAppProps) {
     }
   };
 
-  const submit = (text: string): void => {
+  const submit = (text: string, mode?: SubmitMode): void => {
     const value = text.trim();
     if (value.length === 0) return;
     if (value.startsWith("/")) {
@@ -290,7 +298,7 @@ export function ZetaApp(props: ZetaAppProps) {
       notify(`未知命令：${value}（/help 查看可用命令）`);
       return;
     }
-    void props.onSubmit?.(value);
+    void props.onSubmit?.(value, mode);
   };
 
   const keymap = createKeymap();
@@ -302,6 +310,9 @@ export function ZetaApp(props: ZetaAppProps) {
   keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
   keymap.register({ combo: "ctrl+o", action: "toggle-tools", layer: "tui" });
   keymap.register({ combo: "ctrl+t", action: "toggle-thinking", layer: "tui" });
+  keymap.register({ combo: "meta+return", action: "follow-up", layer: "tui" });
+  keymap.register({ combo: "option+return", action: "follow-up", layer: "tui" });
+  keymap.register({ combo: "ctrl+shift+c", action: "copy-selection", layer: "tui" });
 
   useKeyboard((key) => {
     if (key.eventType === "release") return;
@@ -413,7 +424,7 @@ export function ZetaApp(props: ZetaAppProps) {
                     placeholder="输入消息，/ 查看命令"
                     onChange={setEditorText}
                     onEscape={() => props.onAbort?.()}
-                    onSubmit={(text) => submit(text)}
+                    onSubmit={(text, mode) => submit(text, mode)}
                   />
                 </Show>
               }
@@ -499,6 +510,7 @@ export function ZetaApp(props: ZetaAppProps) {
                 pwd={props.cwd}
                 provider={props.provider}
                 modelId={props.currentModel ?? activeModel() ?? props.model}
+                telemetry={props.telemetry}
               />
             </BoundSlot>
           </>
@@ -565,23 +577,51 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
 
+  // 真实遥测：分支/会话/定价来自宿主，token/成本由 agent 的 message_end usage 事件累计。
+  const [telemetry, setTelemetry] = createSignal<AgentUsageTelemetry | undefined>(undefined);
+  const baseTelemetry = initialTelemetry({
+    ...options.telemetry,
+    cwd: options.telemetry?.cwd ?? options.cwd,
+  });
+  const tracker = createUsageTracker({
+    pricing: baseTelemetry.pricing,
+    initialUsage: baseTelemetry.initialUsage,
+  });
+  const publishUsage = (): void => {
+    const snapshot = tracker.snapshot();
+    setTelemetry({
+      ...baseTelemetry,
+      metrics: snapshot.metrics,
+      usedTokens: snapshot.usedTokens,
+    });
+  };
+  publishUsage();
+  const releaseUsage = options.source?.subscribe((event) => {
+    // tracker 只在 message_end 记账；其他事件不触发无谓的 footer 重绘。
+    if (event.type !== "message_end") return;
+    tracker.consume(event);
+    publishUsage();
+  });
+
   const signals: AgentSignals | undefined = options.source
     ? createAgentSignals(options.source)
     : undefined;
+  const osc = createOscReporter((sequence) => process.stdout.write(sequence));
   const releaseOsc = signals
     ? createOscBridge(signals, (sequence) => process.stdout.write(sequence))
     : undefined;
 
-  const onSubmit = (text: string): void | Promise<void> => {
+  const onSubmit = (text: string, mode?: SubmitMode): void | Promise<void> => {
     if (options.commands && text.startsWith("/")) {
       return options.commands(text);
     }
-    return options.onSubmit?.(text);
+    return options.onSubmit?.(text, mode);
   };
 
   const cleanup = (): void => {
     if (destroyed) return;
     destroyed = true;
+    releaseUsage?.();
     releaseOsc?.();
     signals?.dispose();
     resolveClosed();
@@ -601,7 +641,8 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     await openTuiRender(
       () => (
         <ThemeProvider initial={options.theme ?? "dark"}>
-          <ZetaApp
+          <OscProvider reporter={osc}>
+            <ZetaApp
             title={options.title ?? "zeta"}
             messages={options.messages ?? []}
             source={options.source}
@@ -628,11 +669,13 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
             provider={options.provider}
             resources={options.resources}
             theme={options.theme}
+            telemetry={telemetry()}
             onExit={() => {
               options.onExit?.();
               exit();
             }}
           />
+          </OscProvider>
         </ThemeProvider>
       ),
       renderer,

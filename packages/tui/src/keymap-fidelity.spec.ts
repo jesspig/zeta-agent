@@ -19,4 +19,18 @@ describe("T-07 Kitty 修饰键解析与组合键", () => {
     keymap.register({ combo: "ctrl+shift+o", action: "expand", layer: "app" });
     expect(keymap.resolve(resolveKittyCombo({ name: "o", ctrl: true, shift: true }))?.action).toBe("expand");
   });
+
+  test("Alt+Enter / Ctrl+Shift+C 的 combo 可解析并注册为 follow-up / copy-selection", () => {
+    const keymap = createKeymap();
+    keymap.register({ combo: "meta+return", action: "follow-up", layer: "tui" });
+    keymap.register({ combo: "option+return", action: "follow-up", layer: "tui" });
+    keymap.register({ combo: "ctrl+shift+c", action: "copy-selection", layer: "tui" });
+
+    expect(resolveKittyCombo({ name: "return", meta: true })).toBe("meta+return");
+    expect(resolveKittyCombo({ name: "return", option: true })).toBe("option+return");
+    expect(resolveKittyCombo({ name: "c", ctrl: true, shift: true })).toBe("ctrl+shift+c");
+    expect(keymap.resolve("meta+return")?.action).toBe("follow-up");
+    expect(keymap.resolve("option+return")?.action).toBe("follow-up");
+    expect(keymap.resolve("ctrl+shift+c")?.action).toBe("copy-selection");
+  });
 });

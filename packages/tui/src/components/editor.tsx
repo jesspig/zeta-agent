@@ -1,8 +1,9 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { KeyEvent } from "@opentui/core";
 import { useKeyboard, usePaste, useTerminalDimensions, useTimeline } from "@opentui/solid";
-import { createHistory, type History } from "../editor-history";
+import { createHistory } from "../editor-history";
 import { foldBracketedPaste, graphemeSafeTruncate, killRing, undoStack } from "../paste";
+import { useOsc } from "../osc-context";
 import { useTheme } from "../theme-context";
 import { SPINNER_FRAME_MS, SPINNER_FRAMES } from "./loader";
 
@@ -161,7 +162,9 @@ export function createEditorState() {
 }
 
 export interface ZetaEditorProps {
-  readonly onSubmit: (text: string) => void | Promise<void>;
+  readonly onSubmit: (text: string, mode?: SubmitMode) => void | Promise<void>;
+  /** 区分 steer / follow-up 的提交入口；缺省时两种模式都回落到 onSubmit。 */
+  readonly onSubmitWithMode?: (text: string, mode: SubmitMode) => void | Promise<void>;
   readonly placeholder?: string;
   /** 斜杠命令候选来源；缺省时不显示候选列表。 */
   readonly commands?: readonly SlashCommand[];
@@ -228,9 +231,12 @@ function EditorBorder(props: { readonly status: "idle" | "streaming" | "tool"; r
  */
 export function ZetaEditor(props: ZetaEditorProps) {
   const theme = useTheme();
+  const osc = useOsc();
   const dimensions = useTerminalDimensions();
   const width = createMemo(() => Math.max(20, dimensions().width));
-  const history: History = createHistory(100);
+  // 生产编辑器复用已实现的状态机：历史、follow-up 队列、abort 退回均由同一实例持有。
+  const editorState = createEditorState();
+  const history = editorState.history;
   const ring = killRing();
   const undo = undoStack();
   let area: TextAreaLike | null = null;
@@ -280,23 +286,25 @@ export function ZetaEditor(props: ZetaEditorProps) {
     }
   };
 
-  const submit = (): void => {
-    const value = (area?.plainText ?? text()).trim();
+  const submitWithMode = (mode: SubmitMode, overrideText?: string): void => {
+    const value = (overrideText ?? area?.plainText ?? text()).trim();
     if (value.length === 0) return;
-    history.push(value);
-    void props.onSubmit(value);
+    // 让状态机持有当前文本，submitWithMode 据此入队（follow-up）或记账（steer）。
+    editorState.setValue(value);
+    editorState.submitWithMode(mode);
+    if (props.onSubmitWithMode !== undefined) void props.onSubmitWithMode(value, mode);
+    else void props.onSubmit?.(value);
     setAreaText("");
   };
+
+  const submit = (): void => submitWithMode("steer");
 
   const applySelected = (submitAfter: boolean): boolean => {
     const items = filtered();
     const item = items[selected()];
     if (item === undefined) return false;
     if (submitAfter) {
-      const value = `/${item.name}`;
-      history.push(value);
-      void props.onSubmit(value);
-      setAreaText("");
+      submitWithMode("steer", `/${item.name}`);
     } else {
       setAreaText(applySlashCommand(item));
     }
@@ -360,23 +368,29 @@ export function ZetaEditor(props: ZetaEditorProps) {
     if (key.name === "escape") {
       key.preventDefault();
       key.stopPropagation();
+      // abort 时 follow-up 队列整队退回编辑器，不丢失排队输入。
+      editorState.setValue(area?.plainText ?? text());
+      const restored = editorState.abort();
+      if (restored !== (area?.plainText ?? text())) setAreaText(restored);
       props.onEscape?.();
       return;
     }
 
     if (key.name === "return" || key.name === "enter") {
-      if (key.shift || key.meta || key.option) return;
+      const mode = resolveSubmitMode(key);
+      // Shift+Enter 保留为换行；Alt/Option+Enter 走 follow-up 队列。
+      if (mode === null) return;
       key.preventDefault();
       key.stopPropagation();
-      submit();
+      submitWithMode(mode);
       return;
     }
 
     if (key.name === "up" && (key.meta || key.option)) {
       key.preventDefault();
       key.stopPropagation();
-      const previous = history.previous(area?.plainText ?? "");
-      if (previous !== null) setAreaText(previous);
+      editorState.setValue(area?.plainText ?? "");
+      if (editorState.handleKey(key)) setAreaText(editorState.value());
       return;
     }
 
@@ -404,6 +418,15 @@ export function ZetaEditor(props: ZetaEditorProps) {
           setAreaText(next);
         }
       }
+      return;
+    }
+
+    if (key.ctrl && key.shift && key.name.toLowerCase() === "c") {
+      // 选择即复制：把当前输入/选区写入系统剪贴板（OSC 52）。
+      key.preventDefault();
+      key.stopPropagation();
+      const selected = area?.plainText ?? text();
+      if (selected.length > 0) osc.copySelection(selected);
       return;
     }
 
