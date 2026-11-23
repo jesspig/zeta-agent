@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   createEffectBridge,
   createLogger,
+  getActiveEffectBridge,
   redact,
+  setActiveEffectBridge,
   resolveLogSink,
   spansFromEffectMeta,
   type EffectMeta,
@@ -82,6 +84,28 @@ describe("T-19 observability", () => {
     stop();
     bridge.emit({ label: "again", children: [] });
     expect(seen).toEqual(["root"]);
+  });
+
+  test("active effect bridge 安装/读取/恢复，runId 随 bridge 透传", () => {
+    expect(getActiveEffectBridge()).toBeUndefined();
+    const bridge = createEffectBridge("run-9");
+    const restore = setActiveEffectBridge(bridge);
+    expect(getActiveEffectBridge()).toBe(bridge);
+
+    const seen: EffectMeta[] = [];
+    const stop = bridge.onEffect((meta) => seen.push(meta));
+    getActiveEffectBridge()!.emit({
+      label: "root",
+      runId: bridge.runId,
+      fiberUid: "fiber-9",
+      children: [],
+    });
+    expect(seen[0]!.runId).toBe("run-9");
+    expect(seen[0]!.fiberUid).toBe("fiber-9");
+    stop();
+
+    restore();
+    expect(getActiveEffectBridge()).toBeUndefined();
   });
 
   test("OTLP 配置失败降级本地 file sink，发送抛错也降级", () => {

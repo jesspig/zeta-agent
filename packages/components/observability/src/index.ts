@@ -11,6 +11,8 @@ export interface LogMessage {
 
 export interface EffectMeta {
   readonly label: string;
+  readonly runId?: string;
+  readonly fiberUid?: string;
   children: EffectMeta[];
 }
 
@@ -111,13 +113,15 @@ export function createLogger(options: LoggerOptions): Logger {
 }
 
 export interface EffectBridge {
+  readonly runId?: string;
   onEffect(handler: (meta: EffectMeta) => void): Disposer;
   emit(meta: EffectMeta): void;
 }
 
-export function createEffectBridge(): EffectBridge {
+export function createEffectBridge(runId?: string): EffectBridge {
   const handlers = new Set<(meta: EffectMeta) => void>();
   return {
+    runId,
     onEffect(handler) {
       handlers.add(handler);
       return () => {
@@ -128,6 +132,22 @@ export function createEffectBridge(): EffectBridge {
       for (const handler of [...handlers]) handler(meta);
     },
   };
+}
+
+let activeEffectBridge: EffectBridge | undefined;
+
+/** 安装全局 effect 观测桥，返回恢复上一次安装的逆；传 null 关闭观测。 */
+export function setActiveEffectBridge(bridge: EffectBridge | null): Disposer {
+  const previous = activeEffectBridge;
+  activeEffectBridge = bridge ?? undefined;
+  return () => {
+    activeEffectBridge = previous;
+  };
+}
+
+/** effect 执行路径读取当前观测桥；未安装时返回 undefined，执行路径直接走无观测分支。 */
+export function getActiveEffectBridge(): EffectBridge | undefined {
+  return activeEffectBridge;
 }
 
 export function spansFromEffectMeta(meta: EffectMeta): Span[] {

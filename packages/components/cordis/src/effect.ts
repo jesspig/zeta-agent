@@ -1,4 +1,6 @@
 import type { Disposer, Effect } from "@zeta-agent/framework";
+// 观测桥按需读取：未安装时只多一次取值与判空，不产生 meta 对象、不改 effect 内核语义。
+import { getActiveEffectBridge } from "../../observability/src/index";
 
 export interface EffectHost {
   readonly uid: string;
@@ -81,6 +83,15 @@ export function effect(
   callback: (ctx: EffectHost) => Effect,
   label?: string
 ): Disposer {
+  const observer = getActiveEffectBridge();
+  if (observer) {
+    observer.emit({
+      label: label ?? ctx.uid,
+      runId: observer.runId,
+      fiberUid: ctx.uid,
+      children: [],
+    });
+  }
   let armed = true;
   const task = execute(callback(ctx), () => armed);
   const dispose: Disposer = async () => {
