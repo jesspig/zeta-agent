@@ -39,3 +39,30 @@ flowchart TD
 
 - 上游：[architecture/engineering.md](../architecture/engineering.md) 的验收标准；[research](../research/README.md) 的元理论判据。
 - 验收对象：[framework](../framework/README.md)、[agent-framework](../agent-framework/README.md)、[agent](../agent/README.md)。
+
+## 深度差距分析与本批处置（2026-11-23）
+
+> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-4 已有实现并通过全量测试（679 pass / 0 fail）。
+
+### 六类差距结论
+
+| 类别 | 差距结论 | 本批对应动作 |
+| --- | --- | --- |
+| 架构边界 | facade 依赖方向与 `exports` 子路径声明不完整，应用对组件包的直接依赖缺少守护 | **facade 归位**：补齐 facade 出口与子路径声明，架构守护脚本纳入 `bun run check` |
+| 内核接口 | effect / coefficient / fiber 内核接口与 facade 表面未完全对齐，组件可替换性缺少验证 | 对齐内核接口与 facade 出口，保持组件包独立可测、可替换 |
+| 工具流水线 | pi 基线中的 hook 字段赋值尚未升级为插件管线，monkey-patch 链仍是重构首要目标（见 [pi-baseline.md](../research/pi-baseline.md)） | **插件管线**：以插件管线替代字段赋值，保留 legacy 兼容层 |
+| 安全接线 | 权限门禁、发射策略（withhold / enqueue）、egress 默认拒绝、凭证不持明文、进程外审计尚未端到端接线（见 [security.md](../agent/security.md)） | **权限 / 发射 / egress / 凭证 / 审计接线**：按契约逐项落地门禁与审计完整性 |
+| TUI seam | 唯一发布实现与可替换后端 seam 的边界须在文档与实现两侧同时成立（见 [tui.md](../agent/tui.md)） | 保持 `RendererBackend` seam 与 `createTui({ backend })`，OpenTUI 仍为默认且唯一发布实现 |
+| 阶段 5/6 | HMR、对象运行时、递归自演化研究轨尚未实现，交付文档此前存在失实表述 | **文档纠偏**：状态描述与代码现实对齐，阶段 5/6 明确标为后续可选项 |
+
+### 本批处置范围（固本与门禁）
+
+- **固本**：facade 归位、插件管线、内核接口对齐、安全接线（权限 / 发射 / egress / 凭证 / 审计）。
+- **门禁**：测试去伪（消除循环论证，确保不变量 legacy/plugin 双版行为独立性）、架构守护脚本、链接守护脚本 `scripts/check_docs_links.mjs`（0 断链 / 0 断锚）。
+- **文档纠偏**：交付状态、索引与差距记录同步；不改动 [roadmap.md](./roadmap.md) 的阶段编号与验收语义。
+
+### 明确延后（不在本批范围）
+
+- **HMR**：阶段 5 可选项，当前不实现。
+- **对象运行时**：阶段 5 可选子路径（contract / document / store / link），当前不实现。
+- **研究轨**：阶段 6 递归自演化，仅在具备可重放任务与评估器时启用，当前只预留 seam，不落地实现。
