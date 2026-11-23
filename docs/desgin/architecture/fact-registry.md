@@ -147,19 +147,19 @@
 
 | 设计决策（文档） | 论文来源 | pi 来源 | 验证方式 | 状态 |
 | --- | --- | --- | --- | --- |
-| P1 唯一变更入口 ctx.effect | [cordis-paper §10.1](../research/cordis-paper-system.md) | S2 facet 声明与注册表可映射 | [04] 测试 + A4 | 待实现 |
-| P2 逆在施加点返回 / LIFO | [cordis-paper §4.2](../research/cordis-paper-theory.md) | — | `observeDispose` | 待实现 |
-| P3 声明依赖 + 键命名空间 | [cordis-paper §8.1/§12.6](../research/cordis-paper-system.md) | S2 契约+注册表 | 同名键冲突测试 | 待实现 |
-| P4 target/committed 用 uid | [cordis-paper §10.3](../research/cordis-paper-system.md) | — | 同值替换触发 reload | 待实现 |
-| P5 guard 延迟撤回 | [cordis-paper §9/§10.3](../research/cordis-paper-system.md#9-元理论五条承重保证) | — | teardown 读依赖测试 | 待实现 |
-| P6 惯性状态机 | [core-semantics §7 生命周期](../framework/core-semantics.md#7-生命周期状态机) | — | 转换中 target 变化测试 | 待实现 |
-| P7 同键交换 / 顺序显式 | [cordis-paper §7.2](../research/cordis-paper-theory.md) | S3 事件完成顺序 vs 源码顺序 | 环检测 + 顺序测试 | 待实现 |
-| P8 获取 vs 发射 | [cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | S4 工具无权限（S1 README） | 工具分类审查 | 待实现 |
-| P9 core 无 provider/持久化 | — | S3 依赖仅 pi-ai+pi-schema；S3 CHANGELOG 1.0.0 | 依赖图检查 | 待实现 |
-| P10 UI 插件槽位 | [cordis-paper-system §13](../research/cordis-paper-system.md#13-相关工作定位)（FRP 对比） | S5 ExtensionUIContext | [07] 槽位热替换测试 | 待实现 |
-| Agent 12 不变量 | [cordis-paper §7](../research/cordis-paper-theory.md#7-独立性从局部到全局) | S3 测试 | 24 个等价测试 | 待实现 |
-| HMR 三阶段 | [cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法) | S2 插件机械 | 故障注入 | 待实现，策略待 G3 |
-| 汇合性验收 | [cordis-paper §9 Thm 80](../research/cordis-paper-system.md#9-元理论五条承重保证) | S2 reload 提交语义 | `replayConfig` | 待实现，口径待 G8 |
+| P1 唯一变更入口 ctx.effect | [cordis-paper §10.1](../research/cordis-paper-system.md) | S2 facet 声明与注册表可映射 | [04] 测试 + A4 | 已实现（测试证据）：`packages/framework/src/context.ts`、`packages/framework/src/context.spec.ts` |
+| P2 逆在施加点返回 / LIFO | [cordis-paper §4.2](../research/cordis-paper-theory.md) | — | `observeDispose` | 已实现（测试证据）：`packages/components/cordis/src/effect.ts`、`effect.spec.ts` |
+| P3 声明依赖 + 键命名空间 | [cordis-paper §8.1/§12.6](../research/cordis-paper-system.md) | S2 契约+注册表 | 同名键冲突测试 | 已实现（测试证据）：`packages/framework/src/context.ts`（defineKey）、`context.spec.ts` |
+| P4 target/committed 用 uid | [cordis-paper §10.3](../research/cordis-paper-system.md) | — | 同值替换触发 reload | 已实现（测试证据）：`packages/components/cordis/src/reflect.ts`、`packages/components/loader/src/reconcile.ts`、`reconcile.spec.ts` |
+| P5 guard 延迟撤回 | [cordis-paper §9/§10.3](../research/cordis-paper-system.md#9-元理论五条承重保证) | — | teardown 读依赖测试 | 已实现（测试证据）：`packages/framework/src/context.ts`（provide/guard）、`context.spec.ts`（G02/G04） |
+| P6 惯性状态机 | [core-semantics §7 生命周期](../framework/core-semantics.md#7-生命周期状态机) | — | 转换中 target 变化测试 | 已实现（测试证据）：`packages/components/cordis/src/fiber.ts`、`fiber.spec.ts` |
+| P7 同键交换 / 顺序显式 | [cordis-paper §7.2](../research/cordis-paper-theory.md) | S3 事件完成顺序 vs 源码顺序 | 环检测 + 顺序测试 | 已实现（测试证据）：`packages/agent-framework/src/runtime/loop.order.spec.ts`、`loop.steering.spec.ts` |
+| P8 获取 vs 发射 | [cordis-paper-system §12.1](../research/cordis-paper-system.md#12-讨论边界复用权限语言与循环依赖) | S4 工具无权限（S1 README） | 工具分类审查 | 已实现（测试证据）：`packages/components/security/src/egress.ts`、`emission.ts`、`egress.spec.ts`、`emission.spec.ts` |
+| P9 core 无 provider/持久化 | — | S3 依赖仅 pi-ai+pi-schema；S3 CHANGELOG 1.0.0 | 依赖图检查 | 已实现（测试证据）：`scripts/check-core-dependencies.mjs`、`scripts/guard-architecture.mjs` |
+| P10 UI 插件槽位 | [cordis-paper-system §13](../research/cordis-paper-system.md#13-相关工作定位)（FRP 对比） | S5 ExtensionUIContext | [07] 槽位热替换测试 | 已实现（测试证据）：`packages/tui/src/slots.ts`、`slots.spec.ts` |
+| Agent 12 不变量 | [cordis-paper §7](../research/cordis-paper-theory.md#7-独立性从局部到全局) | S3 测试 | 24 个等价测试 | 已实现（测试证据）：`packages/agent-framework/src/runtime/invariants.spec.ts`、`tools/invariants.spec.ts` |
+| HMR 三阶段 | [cordis-paper-system §10.6](../research/cordis-paper-system.md#10-实现cordis-三层架构与十一个算法) | S2 插件机械 | 故障注入 | 已实现（测试证据）：`packages/components/loader/src/hmr.ts`、`hmr.spec.ts`、`hmr.auto.spec.ts`；策略待 G3 实测 |
+| 汇合性验收 | [cordis-paper §9 Thm 80](../research/cordis-paper-system.md#9-元理论五条承重保证) | S2 reload 提交语义 | `replayConfig` | 已实现（测试证据）：`packages/components/loader/src/config.ts`、`config.spec.ts`、`reconcile.spec.ts`；口径待 G8 |
 
 
 ## 7 自检门结果
