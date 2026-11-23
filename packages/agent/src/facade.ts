@@ -34,6 +34,7 @@ import {
   type ToolResult,
 } from "@zeta-agent/agent-framework";
 import type { Disposer } from "@zeta-agent/framework";
+import type { PermissionGate } from "./plugins/permissions/guard";
 import { builtinToolDefinitions, type ToolDefinition } from "./tools/builtins";
 import {
   createEffectBridge,
@@ -94,6 +95,11 @@ function builtinTools(options: {
 export interface PluginApiSurface extends AgentPluginApi {
   /** 按 LIFO 撤销所有经 api 注册的贡献（含兼容门面贡献的 hook）。 */
   disposeAll(): void;
+  /**
+   * 把外部 disposer（例如 permission gate 的 declareTools / addBeforeToolCall
+   * 返回值）纳入 facade 的生命周期撤销栈；返回幂等 disposer，按 LIFO 撤销。
+   */
+  trackDisposer(dispose: () => void): Disposer;
 }
 
 /** 插件间共享的轻量事件总线；按注册顺序同步派发。 */
@@ -206,6 +212,13 @@ export interface AgentOptions {
    * 仅测试夹具或显式隔离的兼容宿主才应开启。
    */
   readonly allowTextToolMarkers?: boolean;
+  /**
+   * 可选权限门禁。仅显式注入时，工具执行前才调用 authorize 做按次判定；
+   * 不注入时整条路径完全保持基线行为（O-9 发射默认策略尚未裁决，不改默认）。
+   */
+  readonly permissionGate?: PermissionGate;
+  /** 门禁 authorize 使用的阶段名；缺省 "plan"。 */
+  readonly permissionStage?: string;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -238,6 +251,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const includeBuiltins = options.includeBuiltins !== false;
   const plugins = options.plugins ?? [];
   const securityBackend = options.securityBackend ?? defaultSecurityBackend();
+  const permissionGate = options.permissionGate;
+  const permissionStage = options.permissionStage ?? "plan";
   const allowedDirectories = options.allowedDirectories ?? [];
   const toolDefinitions = includeBuiltins
     ? builtinTools({ securityBackend, allowedDirectories })
@@ -390,6 +405,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     capabilities: () => securityBackend.capabilities(),
     onEffect: (handler) => effectBridge.onEffect(handler),
     addRedactor: (rule) => logger.addRedactor(rule),
+    trackDisposer(dispose) {
+      return addDisposer(dispose);
+    },
     disposeAll() {
       pluginManager.disposeAll();
     },
@@ -595,6 +613,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
           const execute = toolRegistry.get(call.name);
           let isError = false;
           let output: unknown = NO_TOOL_RESULT;
+          let denialReason: string | undefined;
           if (execute === undefined) {
             isError = true;
             output = "TOOL_NOT_FOUND";
@@ -606,13 +625,36 @@ export function createAgent(options: AgentOptions = {}): Agent {
               const args = typeof call.args === "object" && call.args !== null
                 ? (call.args as Readonly<Record<string, unknown>>)
                 : {};
-              for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
-              const value = await execute(args);
-              // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
-              const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
-              if (failed) isError = true;
-              for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed });
-              output = value === undefined ? NO_TOOL_RESULT : value;
+              let denied = false;
+              if (permissionGate !== undefined) {
+                // 每次执行都读取 gate 当前状态：增删 hook / declareTools 后立即生效，无需 reload。
+                const decision = await permissionGate.authorize(permissionStage, call.name, args);
+                if (decision.behavior !== "ALLOW") {
+                  denied = true;
+                  isError = true;
+                  const reason = decision.reason ?? "PERMISSION_DENIED";
+                  // DENY 与 ASK 一律 fail-closed（ASK 的确认渠道属 T-06，尚未接线）。
+                  output = {
+                    ok: false,
+                    error: "PERMISSION_DENIED",
+                    reason,
+                    stage: permissionStage,
+                    tool: call.name,
+                  };
+                  denialReason = `PERMISSION_DENIED: ${reason}`;
+                  // 审计走既有机制：logger 写 sink，loop 随后发带 isError 的 tool_execution_end。
+                  fiberLogger.warn(`PERMISSION_DENIED stage=${permissionStage} tool=${call.name} reason=${reason}`);
+                }
+              }
+              if (!denied) {
+                for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
+                const value = await execute(args);
+                // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
+                const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+                if (failed) isError = true;
+                for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed });
+                output = value === undefined ? NO_TOOL_RESULT : value;
+              }
             } catch (error) {
               isError = true;
               output = { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -627,6 +669,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
               toolName: call.name,
             },
             isError,
+            ...(denialReason !== undefined ? { reason: denialReason } : {}),
             updates,
           });
         }
