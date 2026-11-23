@@ -17,7 +17,9 @@ import {
   type EffectHost,
 } from "../../components/cordis/src/effect";
 import {
+  commit as reflectCommit,
   createNode,
+  createProxy,
   get as reflectGet,
   intercept as reflectIntercept,
   isolate as reflectIsolate,
@@ -161,6 +163,8 @@ export interface Context extends FiberContext {
   emit(name: string, payload?: unknown): void;
   notify(keys?: readonly CoeffectKey<any>[]): Promise<void>;
   readonly dispose: Disposer;
+  /** Proxy 门禁：symbol 属性按 committed view 解析，未声明访问抛 UNDECLARED_ACCESS。 */
+  readonly proxy: <T extends object>() => T;
 }
 
 interface Internals {
@@ -192,30 +196,44 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
 
   const get = <T>(key: CoeffectKey<T>): T => reflectGet(internals.node, key) as T;
 
+  /** Proxy 门禁入口：symbol 属性访问走 committed view 解析并强制声明检查。 */
+  const proxy = <T extends object>(): T => createProxy<T>(internals.node);
+
   const set = <T>(key: CoeffectKey<T>, value: T): Disposer => reflectSet(internals.node, key, value);
 
   const provide = <T>(key: CoeffectKey<T>, value: T): Disposer => {
     const restore = reflectSet(internals.node, key, value);
-    if (!internals.registerProvider) return restore;
+    // G04：production 也写入 node.committed，使 ctx.get 的 committed 分支真正可达；
+    // G02：check 由 provider 撤销态注入，撤销后读取抛 CAPABILITY_EXPIRED。
+    let revoked = false;
+    let dependents = new Set<string>();
+    let fiber: Fiber | undefined;
 
-    const previous = internals.providers.get(key.symbol);
-    if (previous) previous.remove();
-    const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
-    const fiber = internals.system.create({
-      uid,
-      inject: [],
-      provide: [key],
-      apply: () => NOOP,
-    });
-    internals.providers.set(key.symbol, fiber);
-    track(internals, fiber.refresh());
+    if (internals.registerProvider) {
+      const previous = internals.providers.get(key.symbol);
+      if (previous) previous.remove();
+      const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
+      fiber = internals.system.create({
+        uid,
+        inject: [],
+        provide: [key],
+        apply: () => NOOP,
+      });
+      internals.providers.set(key.symbol, fiber);
+      // G03：committed Impl.dependents 与 provider fiber 的 dependents 共享载体。
+      dependents = fiber.committedDependents;
+      track(internals, fiber.refresh());
+    }
+
+    reflectCommit(internals.node, key, value, key.symbol, () => !revoked, dependents);
 
     let armed = true;
     return () => {
       if (!armed) return;
       armed = false;
+      revoked = true;
       restore();
-      if (internals.providers.get(key.symbol) === fiber) {
+      if (fiber && internals.providers.get(key.symbol) === fiber) {
         fiber.remove();
         internals.providers.delete(key.symbol);
       }
@@ -307,6 +325,7 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
     emit,
     notify,
     dispose,
+    proxy,
   };
   return context;
 }
@@ -332,6 +351,11 @@ export function createContext(options: { uid?: string } = {}): Context {
 /** 可导入的函数式入口：notify(ctx, keys) 等价于 ctx.notify(keys)。 */
 export function notify(ctx: Context, keys?: readonly CoeffectKey<any>[]): Promise<void> {
   return ctx.notify(keys);
+}
+
+/** 可导入的 Proxy 门禁入口：createView(ctx) 等价于 ctx.proxy()。 */
+export function createView<T extends object>(ctx: Context): T {
+  return ctx.proxy<T>();
 }
 
 /** 可导入的函数式入口：use(ctx, component, config) 等价于 ctx.use(component, config)。 */

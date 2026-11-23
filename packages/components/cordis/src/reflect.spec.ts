@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { CoeffectKey } from "@zeta-agent/framework";
 import {
+  CAPABILITY_EXPIRED,
+  UNDECLARED_ACCESS,
   commit,
   createNode,
   createProxy,
@@ -58,5 +60,30 @@ describe("coeffect 反射", () => {
     expect(get(parent, svc)).toBe("base");
     dispose();
     expect(get(child, svc)).toBe("base");
+  });
+
+  test("G02 commit 注入 check 后 get 抛 CAPABILITY_EXPIRED", () => {
+    const node = createNode("root", null, [svc]);
+    let valid = true;
+    commit(node, svc, "secret", Symbol("default"), () => valid);
+    expect(get(node, svc)).toBe("secret");
+    valid = false;
+    expect(() => get(node, svc)).toThrow(CAPABILITY_EXPIRED);
+  });
+
+  test("G03 commit 的 Impl.dependents 可由调用方共享登记", () => {
+    const node = createNode("root", null, [svc]);
+    const dependents = new Set<string>();
+    commit(node, svc, "v", Symbol("default"), undefined, dependents);
+    dependents.add("consumer-1");
+    expect(node.committed.get(svc)?.dependents.has("consumer-1")).toBe(true);
+  });
+
+  test("G04 Proxy 对未声明 symbol 访问抛 UNDECLARED_ACCESS", () => {
+    const node = createNode("root", null, [svc]);
+    commit(node, svc, "v");
+    const proxy = createProxy<{ [k: symbol]: unknown }>(node);
+    expect(proxy[svc.symbol]).toBe("v");
+    expect(() => proxy[Symbol("undeclared")]).toThrow(UNDECLARED_ACCESS);
   });
 });

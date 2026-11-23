@@ -3,6 +3,7 @@ import type { CoeffectKey } from "./types";
 import {
   contribute,
   createContext,
+  createView,
   defineComponent,
   defineKey,
   defineRegistry,
@@ -155,5 +156,33 @@ describe("framework facade 运行时", () => {
     expect(forward).toEqual(reversed);
     expect(forward.values).toEqual(["L", "R"]);
     expect(forward.states).toEqual(["ACTIVE", "ACTIVE"]);
+  });
+
+  test("G02/G04 provider 撤销后经 production committed view 抛 CAPABILITY_EXPIRED", async () => {
+    const cap = defineKey<string>("@zeta-agent/context-test", "revocable-cap");
+    const ctx = createContext();
+    const revoke = ctx.provide(cap, "secret");
+    expect(ctx.get(cap)).toBe("secret");
+
+    revoke();
+    // STORE 已恢复为空；只能由 production 写入的 node.committed 提供 Impl，
+    // 其 check 因 provider 撤销返回 false → CAPABILITY_EXPIRED（而非 INACTIVE_ACCESS）。
+    expect(() => ctx.get(cap)).toThrow("CAPABILITY_EXPIRED");
+    await ctx.dispose();
+  });
+
+  test("G04 facade Proxy 门禁：已声明键按 committed view 解析，未声明键被拒", async () => {
+    const declared = defineKey<string>("@zeta-agent/context-test", "proxy-declared");
+    const undeclared = defineKey<string>("@zeta-agent/context-test", "proxy-undeclared");
+    const ctx = createContext();
+    ctx.provide(declared, "visible");
+
+    const view = createView<{ [k: symbol]: unknown }>(ctx);
+    expect(view[declared.symbol]).toBe("visible");
+    expect(() => view[undeclared.symbol]).toThrow("UNDECLARED_ACCESS");
+
+    const viaCtx = ctx.proxy<{ [k: symbol]: unknown }>();
+    expect(viaCtx[declared.symbol]).toBe("visible");
+    await ctx.dispose();
   });
 });

@@ -42,9 +42,17 @@ export function commit(
   node: ReflectNode,
   key: CoeffectKey<any>,
   value: unknown,
-  realm: symbol = Symbol("default")
+  realm: symbol = Symbol("default"),
+  check?: () => boolean,
+  dependents?: Set<string>
 ): void {
-  const impl: Impl = { uid: node.uid, value, dependents: new Set<string>(), isolate: realm };
+  const impl: Impl = {
+    uid: node.uid,
+    value,
+    dependents: dependents ?? new Set<string>(),
+    isolate: realm,
+    ...(check ? { check } : {}),
+  };
   node.committed.set(key, impl);
   node.keys.set(key.symbol, key);
 }
@@ -135,12 +143,14 @@ export function createProxy<T extends object>(node: ReflectNode): T {
     get: (target, property) => {
       if (typeof property !== "symbol") return Reflect.get(target, property);
       const found = findKey(node, property);
-      return found ? get(node, found) : Reflect.get(target, property);
+      // Proxy 是 capability 门禁：未声明（未提交/未 set）的 symbol 访问一律拒绝。
+      if (!found) throw new Error(UNDECLARED_ACCESS);
+      return get(node, found);
     },
     set: (target, property, value) => {
       if (typeof property !== "symbol") return false;
       const found = findKey(node, property);
-      if (!found) return false;
+      if (!found) throw new Error(UNDECLARED_ACCESS);
       set(node, found, value);
       return true;
     },
