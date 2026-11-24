@@ -40,10 +40,12 @@ async function startDaemon(): Promise<DaemonHarness> {
   const dir = mkdtempSync(join(tmpdir(), "zeta-audit-daemon-"));
   // 运行时生成测试专用值，只注入 daemon 子进程；仓库中不出现任何密钥字面量。
   const secret = randomBytes(24).toString("hex");
+  const token = randomBytes(16).toString("hex");
   const proc = Bun.spawn(["bun", DAEMON_PATH], {
     env: {
       ...process.env,
       [AUDIT_SIGNING_SECRET_ENV]: secret,
+      ZETA_AUDIT_CLIENT_TOKEN: token,
       ZETA_AUDIT_ENDPOINT: "tcp:127.0.0.1:0",
       ZETA_AUDIT_DIR: dir,
     },
@@ -63,7 +65,7 @@ async function startDaemon(): Promise<DaemonHarness> {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`审计 daemon 未就绪: ${stderr}`);
   }
-  const sink = createSocketAuditSink({ endpoint });
+  const sink = createSocketAuditSink({ endpoint, token });
   await sink.ready();
   let stopped = false;
   const stop = async (): Promise<void> => {
@@ -166,7 +168,7 @@ describe("T-02 A23 进程外审计 daemon", () => {
   });
 
   test("append 入有界队列不阻塞工具路径；满队列计 drop", () => {
-    const sink = createSocketAuditSink({ endpoint: "tcp:127.0.0.1:1", queueLimit: 2 });
+    const sink = createSocketAuditSink({ endpoint: "tcp:127.0.0.1:1", queueLimit: 2, token: "test-only-client-token" });
     void sink.ready().catch(() => {});
     const start = Date.now();
     for (let index = 0; index < 5; index += 1) sink.append(record({ toolName: `t${index}` }));

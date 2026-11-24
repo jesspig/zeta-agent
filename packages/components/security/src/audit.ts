@@ -30,6 +30,9 @@ export type AuditSigner = (payload: string) => string;
 /** 签名密钥只由 daemon 进程从该环境变量注入；不进入 facade options、日志与产物。 */
 export const AUDIT_SIGNING_SECRET_ENV = "ZETA_AUDIT_SIGNING_SECRET";
 
+/** 客户端认证令牌环境变量；daemon 与 socket 客户端各自从环境读取，不进产物。 */
+export const AUDIT_CLIENT_TOKEN_ENV = "ZETA_AUDIT_CLIENT_TOKEN";
+
 /** 进程外 append-only 存储：只有追加与读取，签名和封存标记由 sink 注入。 */
 export interface AuditStorage {
   append(line: string): void;
@@ -57,6 +60,12 @@ export interface AuditIntegrityResult {
   readonly reason?: string;
   readonly entries: number;
   readonly finalized?: FinalizedState;
+}
+
+export interface RecoveredAuditChain {
+  readonly seq: number;
+  readonly head: string;
+  readonly hashes: readonly string[];
 }
 
 interface StoredAuditLine {
@@ -139,6 +148,41 @@ export function createFileAuditStorage(dir: string): AuditStorage {
   };
 }
 
+/**
+ * daemon 重启时的链恢复：逐条验证 seq / prevHash / hash / 签名后重建 seq 与 head。
+ * 任一条不一致即失败关闭，绝不从损坏的链尾部继续追加。
+ */
+export function recoverAuditChain(options: {
+  readonly lines: readonly string[];
+  readonly hash: HashFn;
+  readonly sign: AuditSigner;
+}): RecoveredAuditChain {
+  const { lines, hash, sign } = options;
+  const hashes: string[] = [];
+  let previous = "0";
+  for (let index = 0; index < lines.length; index += 1) {
+    let stored: StoredAuditLine;
+    try {
+      stored = JSON.parse(lines[index]!) as StoredAuditLine;
+    } catch {
+      throw new Error(`AUDIT_CHAIN_RECOVERY_FAILED: INVALID_LINE:${index}`);
+    }
+    const entry = stored.entry;
+    if (!isAuditEntry(entry) || entry.seq !== index || entry.prevHash !== previous) {
+      throw new Error(`AUDIT_CHAIN_RECOVERY_FAILED: CHAIN_BREAK:${index}`);
+    }
+    if (entry.hash !== hash(fingerprint(entry.seq, entry.prevHash, entry.record))) {
+      throw new Error(`AUDIT_CHAIN_RECOVERY_FAILED: HASH_MISMATCH:${index}`);
+    }
+    if (stored.signature !== sign(entrySignaturePayload(entry))) {
+      throw new Error(`AUDIT_CHAIN_RECOVERY_FAILED: SIGNATURE_MISMATCH:${index}`);
+    }
+    hashes.push(entry.hash);
+    previous = entry.hash;
+  }
+  return { seq: hashes.length, head: previous, hashes };
+}
+
 export function verifyAuditChain(entries: readonly AuditEntry[], hash: HashFn): boolean {
   let previous = "0";
   let expectedSeq = 0;
@@ -210,9 +254,12 @@ export function verifyAuditLines(options: {
     return { ok: false, reason: "INVALID_FINALIZED_MARKER", entries: entries.length };
   }
   const digest = chainDigest(hash, entries);
+  const head = entries.length > 0 ? entries[entries.length - 1]!.hash : "0";
   if (
-    marker.digest !== digest ||
+    marker.revision !== revision ||
     marker.seq !== entries.length ||
+    marker.head !== head ||
+    marker.digest !== digest ||
     marker.signature !== sign(finalSignaturePayload(revision, digest, marker.finalized, entries.length))
   ) {
     return { ok: false, reason: "FINALIZED_MISMATCH", entries: entries.length };

@@ -1,6 +1,13 @@
 import type { AgentTool as FrameworkAgentTool } from "@zeta-agent/agent-framework";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import {
+  createPersistentOutbox,
+  type OutboxEntry,
+  type OutboxJournal,
+  type OutboxReceipt,
+  type OutboxSnapshot,
+} from "@zeta-agent/security";
 
 export type ReplayPolicy = "never" | "safe";
 
@@ -8,38 +15,42 @@ export interface AgentTool<P = unknown> extends FrameworkAgentTool<P> {
   readonly replay: ReplayPolicy;
 }
 
-export interface DurableIntent {
-  readonly kind: string;
-  readonly key: string;
+export type DurableIntent = OutboxEntry;
+export type Receipt = OutboxReceipt;
+export type DurableSnapshot = OutboxSnapshot;
+export type DurableJournal = OutboxJournal;
+
+export interface DispatchContext {
+  /** 稳定幂等键：同一 (kind,key) 的所有 generation / retry 共用。 */
+  readonly idempotencyKey: string;
+  readonly generation: number;
+  readonly attempt: number;
   readonly seq: number;
-  readonly payload: unknown;
 }
 
-export interface Receipt {
-  readonly kind: string;
-  readonly key: string;
-  readonly ok: boolean;
-  readonly value?: unknown;
+export type Dispatch = (intent: DurableIntent, context: DispatchContext) => unknown | Promise<unknown>;
+
+/** 正常等待信号：不记失败、不进 health，稍后由 retryDeferred 重新可派发。 */
+export class Later extends Error {
+  readonly delayMs: number;
+  constructor(delayMs = 0) {
+    super(`LATER:${delayMs}`);
+    this.name = "Later";
+    this.delayMs = delayMs;
+  }
 }
 
-export type Dispatch = (intent: DurableIntent) => unknown | Promise<unknown>;
-
-/** 可注入的持久化快照：seq / pending / receipts / seen 五要素的完整载体。 */
-export interface DurableSnapshot {
-  readonly seq: number;
-  readonly pending: readonly DurableIntent[];
-  readonly receipts: readonly Receipt[];
-  readonly seen: readonly string[];
-}
-
-/** 显式注入才落盘；默认使用内存实现以保证测试隔离。 */
-export interface DurableJournal {
-  load(): DurableSnapshot | undefined;
-  save(snapshot: DurableSnapshot): void;
+export function later(delayMs = 0): never {
+  throw new Later(delayMs);
 }
 
 export interface DurableEffectsOptions {
   readonly journal?: DurableJournal;
+  readonly maxAttempts?: number;
+  readonly healthThreshold?: number;
+  readonly backoffMs?: number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
 }
 
 export interface RecoverResult {
@@ -48,12 +59,26 @@ export interface RecoverResult {
   readonly receipts: number;
 }
 
+export interface OutboxHealth {
+  readonly ok: boolean;
+  readonly consecutiveFailures: number;
+  readonly reason?: string;
+}
+
 export interface DurableEffects {
-  enqueue(kind: string, key: string, payload: unknown): void;
+  enqueue(kind: string, key: string, payload: unknown): DurableIntent;
   commit(): Promise<readonly Receipt[]>;
   pending(): readonly DurableIntent[];
   receipts(): readonly Receipt[];
-  /** 重启恢复入口：从注入的 journal 重新载入 outbox / 回执 / 幂等键。 */
+  /** 当前可派发意图；unknown / 未来 deferred 都不在其中。 */
+  dispatchable(): readonly DurableIntent[];
+  unknownIntents(): readonly DurableIntent[];
+  /** 未知结果人工对账后落回执，不重新派发。 */
+  reconcile(key: string, ok: boolean, value?: unknown): Receipt;
+  retryDeferred(): void;
+  health(): OutboxHealth;
+  resetHealth(): void;
+  /** 重启恢复入口：outbox 构造时已自动恢复，这里返回对账所需快照。 */
   recover(): RecoverResult;
 }
 
@@ -137,7 +162,7 @@ export function createInMemoryDurableJournal(): DurableJournal {
   };
 }
 
-/** 文件 journal：append-only 语义由「先落回执再从 pending 移除」保证。 */
+/** 文件 journal：状态转换逐次落盘，回执先于出队写入。 */
 export function createFileDurableJournal(filePath: string): DurableJournal {
   assertKey(filePath, "durable journal path");
   return {
@@ -159,57 +184,77 @@ export function createFileDurableJournal(filePath: string): DurableJournal {
 export function createDurableEffects(dispatch: Dispatch, options: DurableEffectsOptions = {}): DurableEffects {
   if (typeof dispatch !== "function") throw new Error("effects: expected a dispatch function");
   const journal = options.journal ?? createInMemoryDurableJournal();
-  const restored = journal.load();
-  let seq = restored?.seq ?? 0;
-  let pending: DurableIntent[] = restored ? [...restored.pending] : [];
-  const receipts: Receipt[] = restored ? [...restored.receipts] : [];
-  const seen = new Set<string>(restored?.seen ?? []);
-
-  const persist = (): void => {
-    journal.save({ seq, pending: [...pending], receipts: [...receipts], seen: [...seen] });
-  };
+  const outbox = createPersistentOutbox({
+    journal,
+    ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+    ...(options.healthThreshold === undefined ? {} : { healthThreshold: options.healthThreshold }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  const backoffMs = options.backoffMs ?? 0;
+  const sleep = options.sleep ?? (async (ms: number) => {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  });
+  let committing: Promise<readonly Receipt[]> | undefined;
 
   return {
     enqueue(kind, key, payload) {
-      assertKey(kind, "effects.enqueue kind");
-      assertKey(key, "effects.enqueue key");
-      const identity = `${kind}\u0000${key}`;
-      if (seen.has(identity)) return;
-      seen.add(identity);
-      seq += 1;
-      pending = [...pending, { kind, key, seq, payload }];
-      persist();
+      return outbox.enqueue(kind, key, payload);
     },
-    async commit() {
-      const results: Receipt[] = [];
-      while (pending.length > 0) {
-        const intent = pending[0]!;
-        let receipt: Receipt;
-        try {
-          const value = await dispatch(intent);
-          receipt = { kind: intent.kind, key: intent.key, ok: true, value };
-        } catch {
-          receipt = { kind: intent.kind, key: intent.key, ok: false };
+    commit() {
+      if (committing !== undefined) return committing;
+      committing = (async () => {
+        const results: Receipt[] = [];
+        while (outbox.health().ok) {
+          const next = outbox.dispatchable()[0];
+          if (next === undefined) break;
+          const started = outbox.beginDispatch(next);
+          const context: DispatchContext = {
+            idempotencyKey: started.idempotencyKey,
+            generation: started.generation,
+            attempt: started.attempts,
+            seq: started.seq,
+          };
+          try {
+            const value = await dispatch(started, context);
+            results.push(outbox.settle(started, true, value));
+          } catch (error) {
+            if (error instanceof Later) {
+              outbox.later(started, error.delayMs);
+              continue;
+            }
+            const outcome = outbox.fail(started);
+            if (outcome.retry) {
+              if (backoffMs > 0) await sleep(backoffMs);
+              continue;
+            }
+            results.push(outcome.receipt);
+          }
         }
-        pending = pending.slice(1);
-        receipts.push(receipt);
-        results.push(receipt);
-        // 每条 intent 必须先有回执再离开 outbox，崩溃重启后不会重复派发。
-        persist();
-      }
-      return results;
+        return results;
+      })();
+      const active = committing;
+      void active.finally(() => {
+        if (committing === active) committing = undefined;
+      });
+      return active;
     },
-    pending: () => [...pending],
-    receipts: () => [...receipts],
+    pending: () => outbox.entries(),
+    receipts: () => outbox.receipts(),
+    dispatchable: () => outbox.dispatchable(),
+    unknownIntents: () => outbox.unknown(),
+    reconcile(key, ok, value) {
+      return outbox.reconcile(key, ok, value);
+    },
+    retryDeferred() {
+      outbox.retryDeferred();
+    },
+    health: () => outbox.health(),
+    resetHealth() {
+      outbox.resetHealth();
+    },
     recover() {
-      const snapshot = journal.load();
-      if (snapshot === undefined) return { restored: false, pending: pending.length, receipts: receipts.length };
-      seq = snapshot.seq;
-      pending = [...snapshot.pending];
-      receipts.splice(0, receipts.length, ...snapshot.receipts);
-      seen.clear();
-      for (const identity of snapshot.seen) seen.add(identity);
-      return { restored: true, pending: pending.length, receipts: receipts.length };
+      const result = outbox.recover();
+      return { restored: result.restored, pending: result.pending, receipts: result.receipts };
     },
   };
 }

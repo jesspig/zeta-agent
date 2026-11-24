@@ -1,4 +1,5 @@
 import {
+  AUDIT_CLIENT_TOKEN_ENV,
   defaultHash,
   fingerprint,
   type AuditEntry,
@@ -14,6 +15,9 @@ export type AuditEndpoint = string;
 
 export interface SocketAuditSinkOptions {
   readonly endpoint: AuditEndpoint;
+  /** 客户端认证令牌；只随请求发送，永不进入 endpoint 或产物。 */
+  /** 显式传入或由 AUDIT_CLIENT_TOKEN_ENV 提供；两者都无则拒绝构造。 */
+  readonly token?: string;
   /** 未确认请求的有界上限；超出即计为 drop，不阻塞工具路径。 */
   readonly queueLimit?: number;
   readonly hash?: HashFn;
@@ -30,6 +34,10 @@ export interface SocketAuditSink extends AuditSink {
   readonly endpoint: AuditEndpoint;
   /** 连接建立后 resolve；连接失败则 reject。 */
   ready(): Promise<void>;
+  /** daemon 已确认的最后一条 append 序号；未确认时为 -1。 */
+  ackedSeq(): number;
+  /** 追加并等待 daemon 的权威 ack（含 seq / hash）；认证或队列满时 reject。 */
+  appendAck(record: AuditRecord): Promise<AuditEntry>;
   /** 等待此前排队的 append 已被 daemon 处理（barrier）。 */
   flush(): Promise<void>;
   /** 请求 daemon 封存 finalized 标记，密钥不离开 daemon。 */
@@ -75,12 +83,15 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
   if (!Number.isInteger(queueLimit) || queueLimit < 1) throw new Error("INVALID_AUDIT_QUEUE_LIMIT");
   const endpoint = options.endpoint;
   const target = parseAuditEndpoint(endpoint);
+  const token = options.token ?? process.env[AUDIT_CLIENT_TOKEN_ENV];
+  if (typeof token !== "string" || token.length === 0) throw new Error("INVALID_AUDIT_CLIENT_TOKEN");
 
   const queue: WireRequest[] = [];
   const pending = new Map<string, Pending>();
   const entries: AuditEntry[] = [];
   let writer: Writer | undefined;
   let nextId = 0;
+  let lastAckedSeq = -1;
   let drops = 0;
   let closed = false;
   let decoderBuffer = "";
@@ -177,7 +188,7 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
         pending.set(id!, { resolve, reject });
       });
     }
-    const wire: WireRequest = { ...request, ...(id === undefined ? {} : { id }) };
+    const wire: WireRequest = { ...request, token, ...(id === undefined ? {} : { id }) };
     queue.push(wire);
     drain();
     return reply;
@@ -211,6 +222,23 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
     transport: "socket",
     endpoint,
     ready: () => readyPromise,
+    ackedSeq: () => lastAckedSeq,
+    appendAck: async (record: AuditRecord): Promise<AuditEntry> => {
+      await readyPromise;
+      const snapshot: AuditRecord = { ...record };
+      const response = await request({ kind: "append", record: snapshot });
+      const seq = Number(response.seq);
+      if (response.ok !== true || !Number.isInteger(seq) || seq < 0) throw new Error("AUDIT_INVALID_ACK");
+      lastAckedSeq = seq;
+      const entry: AuditEntry = {
+        seq,
+        record: snapshot,
+        prevHash: typeof response.prevHash === "string" ? response.prevHash : "0",
+        hash: typeof response.hash === "string" ? response.hash : hash(fingerprint(seq, "0", snapshot)),
+      };
+      entries.push(entry);
+      return { ...entry, record: { ...snapshot } };
+    },
     flush: async () => {
       await readyPromise;
       await request({ kind: "ping" });

@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AUDIT_CLIENT_TOKEN_ENV,
   AUDIT_SIGNING_SECRET_ENV,
   createFileAuditStorage,
 } from "@zeta-agent/security";
@@ -15,16 +16,19 @@ interface Harness {
   readonly dir: string;
   readonly endpoint: string;
   readonly secret: string;
+  readonly token: string;
   readonly stop: () => Promise<void>;
 }
 
 async function startDaemon(): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "zeta-facade-audit-"));
   const secret = randomBytes(24).toString("hex");
+  const token = randomBytes(16).toString("hex");
   const proc = Bun.spawn(["bun", DAEMON_PATH], {
     env: {
       ...process.env,
       [AUDIT_SIGNING_SECRET_ENV]: secret,
+      [AUDIT_CLIENT_TOKEN_ENV]: token,
       ZETA_AUDIT_ENDPOINT: "tcp:127.0.0.1:0",
       ZETA_AUDIT_DIR: dir,
     },
@@ -51,16 +55,17 @@ async function startDaemon(): Promise<Harness> {
     await proc.exited;
     rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, endpoint, secret, stop };
+  return { dir, endpoint, secret, token, stop };
 }
 
-function tracedAgent(endpoint: string): ReturnType<typeof createAgent> {
+function tracedAgent(endpoint: string, token: string): ReturnType<typeof createAgent> {
   let turn = 0;
   const agent = createAgent({
     includeBuiltins: false,
     emissionTools: [],
     auditTransport: "socket",
     auditEndpoint: endpoint,
+    auditToken: token,
     streamFn: async function* () {
       turn += 1;
       if (turn === 1) {
@@ -109,7 +114,7 @@ describe("T-02 facade 审计传输接线", () => {
 
   test("socket 模式：审计记录跨进程落盘，daemon finalize + verify，无旁路文件且密钥不外泄", async () => {
     const harness = await startDaemon();
-    const agent = tracedAgent(harness.endpoint);
+    const agent = tracedAgent(harness.endpoint, harness.token);
     try {
       const messages = await agent.prompt("go");
       expect(messages.length).toBeGreaterThan(0);

@@ -1,5 +1,8 @@
 import type { Disposer } from "@zeta-agent/cordis/types";
 
+export * from "./principal";
+export * from "./quota";
+
 export interface Seam<T> {
   readonly ns: string;
   readonly name: string;

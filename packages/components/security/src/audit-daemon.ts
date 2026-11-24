@@ -1,18 +1,20 @@
 /**
  * 独立审计 daemon：独占 append-only 日志与 HMAC secret，主进程只能通过本地 socket 追加/封存/校验。
- * 运行方式：ZETA_AUDIT_SIGNING_SECRET=... ZETA_AUDIT_ENDPOINT=tcp:127.0.0.1:0 ZETA_AUDIT_DIR=<dir> bun audit-daemon.ts
+ * 运行方式：ZETA_AUDIT_SIGNING_SECRET=... ZETA_AUDIT_CLIENT_TOKEN=... ZETA_AUDIT_ENDPOINT=tcp:127.0.0.1:0 ZETA_AUDIT_DIR=<dir> bun audit-daemon.ts
  * 端口为 0 时把实际端点写入 <dir>/endpoint，供调用方发现；该值只是地址，不含密钥。
  */
 import { createHmac } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AUDIT_CLIENT_TOKEN_ENV,
   AUDIT_SIGNING_SECRET_ENV,
   createFileAuditStorage,
   defaultHash,
   entrySignaturePayload,
   finalSignaturePayload,
   fingerprint,
+  recoverAuditChain,
   verifyAuditIntegrity,
   type AuditEntry,
   type AuditRecord,
@@ -26,18 +28,21 @@ interface StoredAuditLine {
 
 interface DaemonConfig {
   readonly secret: string;
+  readonly token: string;
   readonly endpoint: string;
   readonly dir: string;
 }
 
 function readConfig(): DaemonConfig {
   const secret = process.env[AUDIT_SIGNING_SECRET_ENV];
+  const token = process.env[AUDIT_CLIENT_TOKEN_ENV];
   const endpoint = process.env.ZETA_AUDIT_ENDPOINT;
   const dir = process.env.ZETA_AUDIT_DIR;
   if (typeof secret !== "string" || secret.length === 0) throw new Error("MISSING_AUDIT_SIGNING_SECRET");
+  if (typeof token !== "string" || token.length === 0) throw new Error("MISSING_AUDIT_CLIENT_TOKEN");
   if (typeof endpoint !== "string" || endpoint.length === 0) throw new Error("MISSING_AUDIT_ENDPOINT");
   if (typeof dir !== "string" || dir.length === 0) throw new Error("MISSING_AUDIT_DIR");
-  return { secret, endpoint, dir };
+  return { secret, token, endpoint, dir };
 }
 
 function main(): void {
@@ -46,15 +51,18 @@ function main(): void {
   const storage = createFileAuditStorage(config.dir);
   const sign = (payload: string): string => createHmac("sha256", config.secret).update(payload).digest("hex");
 
-  let seq = 0;
-  let previous = "0";
-  const hashes: string[] = [];
+  // 重启时先恢复并校验已有链，损坏则拒绝启动，绝不从断点继续追加。
+  const restored = recoverAuditChain({ lines: storage.readLines(), hash: defaultHash, sign });
+  let seq = restored.seq;
+  let previous = restored.head;
+  const hashes: string[] = [...restored.hashes];
 
   function hashOf(entrySeq: number, prevHash: string, record: AuditRecord): string {
     return defaultHash(fingerprint(entrySeq, prevHash, record));
   }
 
   function handle(request: Record<string, unknown>): Record<string, unknown> {
+    if (request.token !== config.token) return { ok: false, error: "UNAUTHORIZED" };
     switch (request.kind) {
       case "ping":
         return { ok: true };
@@ -74,7 +82,7 @@ function main(): void {
         seq += 1;
         previous = entry.hash;
         hashes.push(entry.hash);
-        return { ok: true, seq: entry.seq };
+        return { ok: true, acknowledged: true, seq: entry.seq, prevHash: entry.prevHash, hash: entry.hash, head: entry.hash };
       }
       case "finalize": {
         const revision = Number(request.revision);

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { createContext, defineComponent, type ContextFiber } from "@zeta-agent/framework";
+import type { PrincipalInput } from "@zeta-agent/capabilities";
 import {
   createLocalSafeBackend,
   createProfileBackend,
@@ -11,6 +12,11 @@ import { createResourceRegistry, type ResourceRegistry } from "../resources/regi
 import { createJsonlSessionStore } from "../session/jsonl-store";
 import { createSqliteSessionStore } from "../session/sqlite-store";
 import type { SessionStore } from "../session/store";
+import {
+  createTenantGovernance,
+  type TenantGovernance,
+  type TenantScope,
+} from "../tenant/governance";
 import { resolveAssemblyProfile, type AssemblyProfile } from "./builtins";
 import {
   createAssemblyManifest,
@@ -38,6 +44,11 @@ export interface DefaultRuntimeOptions {
   readonly permissionGate?: AgentOptions["permissionGate"];
   readonly approvalChannel?: AgentOptions["approvalChannel"];
   readonly egressPolicy?: AgentOptions["egressPolicy"];
+  /** principal resolver 的输入；提供后按 spaceId 解析独立 realm 作用域。 */
+  readonly principalInput?: PrincipalInput;
+  /** 外部持有的治理器；不传但提供 principalInput 时按 tokensPerTenant 内部创建。 */
+  readonly tenantGovernance?: TenantGovernance;
+  readonly tokensPerTenant?: number;
 }
 
 export interface DefaultRuntime {
@@ -49,6 +60,8 @@ export interface DefaultRuntime {
   readonly sessionStore: SessionStore | undefined;
   readonly services: Readonly<Record<string, unknown>>;
   readonly rootFiber: ContextFiber;
+  readonly tenantScope: TenantScope | undefined;
+  readonly governance: TenantGovernance | undefined;
   dispose(): Promise<void>;
 }
 
@@ -89,10 +102,19 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     diagnostics,
   });
 
+  const ownsGovernance = options.tenantGovernance === undefined && options.principalInput !== undefined;
+  const governance = options.tenantGovernance ?? (ownsGovernance
+    ? createTenantGovernance(
+        options.tokensPerTenant === undefined ? {} : { tokensPerTenant: options.tokensPerTenant }
+      )
+    : undefined);
+  const tenantScope = governance?.resolve(options.principalInput ?? {});
+
   const sessionId = options.sessionId ?? `zeta-${process.pid}`;
-  const ownsSessionStore = options.sessionStore === undefined && options.sessionStorePath !== undefined;
+  const explicitSessionStore = options.sessionStore ?? tenantScope?.sessionStore;
+  const ownsSessionStore = explicitSessionStore === undefined && options.sessionStorePath !== undefined;
   const sessionStore =
-    options.sessionStore ??
+    explicitSessionStore ??
     (options.sessionStorePath === undefined
       ? undefined
       : options.sessionStoreBackend === "sqlite"
@@ -100,6 +122,7 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
         : createJsonlSessionStore({ path: options.sessionStorePath, sessionId }));
 
   const agent = createAgent({
+    tenantScope,
     streamFn: options.streamFn,
     allowedDirectories,
     includeBuiltins: options.includeBuiltins,
@@ -149,9 +172,13 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     sessionStore,
     services,
     rootFiber,
+    tenantScope,
+    governance,
     async dispose() {
       await ctx.dispose();
       if (ownsSessionStore) sessionStore?.close();
+      // 外部注入的 governance 由调用方持有；只回收本 runtime 创建的治理器。
+      if (ownsGovernance) await governance?.dispose();
       securityBackend.dispose();
     },
   };

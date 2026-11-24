@@ -1,5 +1,12 @@
 import type { AgentStreamChunk, AgentStreamFn, AgentStreamRequest } from "../facade";
-import { resolveAtBoundary, type CredentialVault, type Placeholder, type SecretBroker } from "@zeta-agent/security";
+import {
+  resolveAtBoundary,
+  withCredentialFetch,
+  type CredentialBoundaryRef,
+  type CredentialVault,
+  type Placeholder,
+  type SecretBroker,
+} from "@zeta-agent/security";
 import { MODELS, PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
 import { createOpenAiStreamFn } from "./openai";
@@ -23,6 +30,8 @@ export interface ProviderConfig {
    */
   readonly credentialVault?: CredentialVault;
   readonly secretBroker?: SecretBroker;
+  /** 统一 credential boundary：优先级高于 vault 对，明文不进入 config。 */
+  readonly credentialBoundary?: CredentialBoundaryRef;
   /** 显式启用时在输出前按中央策略重试；缺省保持既有单次请求行为。 */
   readonly retry?: ProviderRetryOptions | false;
 }
@@ -312,12 +321,16 @@ export function createProviderStreamFn(
   const baseUrl = resolveBaseUrl(info, config.baseUrl);
   const modelName = model.name;
 
-  // 仅当 vault 与 broker 成对注入时启用占位符路径；否则完全保持原有 env / 显式 key 行为。
+  // 边界优先级：credentialBroker > vault 对 > env / 显式 key。provider 侧永远只看到占位符 token。
   const vault = config.credentialVault;
   const broker = config.secretBroker;
+  const unified = config.credentialBoundary;
   let apiKey: string;
   let boundaryFetch: typeof fetch = fetchImpl;
-  if (vault !== undefined && broker !== undefined) {
+  if (unified !== undefined) {
+    apiKey = unified.handle.token;
+    boundaryFetch = withCredentialFetch(unified.broker, unified.handle, fetchImpl);
+  } else if (vault !== undefined && broker !== undefined) {
     const parsedBase = new URL(baseUrl);
     const placeholder = vault.issue({
       name: `provider:${config.provider}:${modelName}`,

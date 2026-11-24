@@ -1,3 +1,10 @@
+import {
+  createEgressGateway,
+  withCredentialFetch,
+  type CredentialBoundaryRef,
+  type EgressPolicy,
+} from "@zeta-agent/security";
+
 export interface ImageSource {
   readonly data?: string;
   readonly url?: string;
@@ -21,6 +28,35 @@ export function encodeImage(source: ImageSource): EncodedImage {
     return { dataUrl: source.url, mimeType: source.mimeType };
   }
   throw new Error("IMAGE_SOURCE_REQUIRED: 图片须提供 data(base64) 或 url");
+}
+
+export interface FetchImageOptions {
+  /** 远程图片抓取同样走统一凭证边界，明文不进入调用方配置。 */
+  readonly credentialBoundary?: CredentialBoundaryRef;
+  /** 数据面 egress 策略：缺省不额外约束（沿用注入 fetch 的治理）。 */
+  readonly egress?: { readonly policy: EgressPolicy };
+}
+
+/** 远程图片字节抓取：凭据只在 fetch 边界注入，绑定/TTL/revision 失败在请求前抛错。 */
+export async function fetchImageBytes(
+  source: ImageSource,
+  options: FetchImageOptions = {},
+  fetchImpl: typeof fetch = fetch
+): Promise<Uint8Array> {
+  if (typeof source.url !== "string" || source.url.length === 0) {
+    throw new Error("IMAGE_SOURCE_REQUIRED: 远程抓取须提供 url");
+  }
+  const boundary = options.credentialBoundary;
+  let gated: typeof fetch = boundary === undefined
+    ? fetchImpl
+    : withCredentialFetch(boundary.broker, boundary.handle, fetchImpl);
+  if (options.egress !== undefined) {
+    const gateway = createEgressGateway({ policy: options.egress.policy, fetch: gated });
+    gated = gateway.fetch as typeof fetch;
+  }
+  const response = await gated(source.url, { method: "GET" });
+  if (!response.ok) throw new Error(`IMAGE_HTTP_${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 export interface ImageContentPart {
