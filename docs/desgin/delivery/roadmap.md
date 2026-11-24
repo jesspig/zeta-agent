@@ -102,7 +102,7 @@
 
 ### 阶段 5：HMR、对象运行时与自演化护栏（可选/后续，3-5 天）
 
-**目标**：开发期热重载、跨进程对象、受控自演化。
+**目标**：运行时热重载、跨进程对象、受控自演化。
 
 - [framework §8](../framework/components.md#8-组件加载器与-hmr)：三阶段 HMR（先做构建+digest+事务重载，跨 host rollout 后置）。
 - [framework §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径)：contract/document/store/link 最小实现（可选子路径）。
@@ -110,11 +110,11 @@
 - [plugin-system §12](../agent/plugin-system.md#12-两套扩展系统的统一)：pi 两套 Extension 兼容门面。
 - **护栏强化**（来自 [recursive-self-evolution.md §6](../research/recursive-self-evolution.md#6-落地批次)）：晋升 digest 校验、workspace 不覆盖 + RESUME、stage-scoped 权限、grader tripwire、预算恒等式——即便不做完整递归自演化，这些也强化受控热替换。
 
-**退出条件**：改一个插件文件 → 不重启进程即生效，且其他插件的会话/连接保留；故障注入（语法错误）能回滚；自修改试加载失败不影响宿主。
+**退出条件**：改一个插件文件 → 不重启进程即生效，且其他插件的会话/连接保留；build/evaluate/exports 校验失败保留旧 committed artifact；apply 失败仅目标 fiber 进入 FAILED，并在下次文件变更时重试；自修改候选在提交宿主前完成隔离构建、求值、exports、依赖环与 capability 审查。
 
 ### 阶段 6：递归自演化研究轨（可选/后续）
 
-**定位**：产品轨阶段 1-5 不实现自动代码生成与部署；但框架已在阶段 5 预留所需 seam。研究轨仅在有可重放任务+评估器时启用。
+**定位**：默认产品 profile 不启用自动代码生成与部署；完整建设路线包含研究轨实现，但研究轨保持默认禁用，仅在具备可重放任务与独立评估器时启用。
 
 - 实现 [recursive-self-evolution.md §6](../research/recursive-self-evolution.md#6-落地批次) 的研究轨项：策略白名单沙箱、DecisionSurface 对偶、冻结 trace、fitness seam、资格门禁 + incumbent 单调晋升、ExperienceLibrary。
 - 验证来自 DREAM-RSI 的 A16-A20（见 §4 验收标准）。
@@ -161,11 +161,11 @@ flowchart LR
 | A8 | 工具副作用分类审查通过；发射类默认策略符合配置 | 工具清单审查 | 3 |
 | A9 | `testRender` 帧快照覆盖消息/工具/状态/overlay/槽位热替换 | 帧快照测试 | 4 |
 | A10 | `--print/--json/--rpc` 在无 TTY 下完整可用 | CI 冒烟 | 4 |
-| A11 | 插件文件变更不重启生效；故障注入可回滚（阶段 5） | HMR 测试 | 5 |
-| A12 | 自修改试加载失败不影响宿主（阶段 5） | 故障注入 | 5 |
+| A11 | 插件文件变更不重启生效；build/evaluate 失败保留旧 artifact；apply 失败目标 fiber 留 FAILED 并于下次变更重试；critical root 另验补偿事务 | HMR 单元/E2E/故障注入 | 5 |
+| A12 | 自修改候选在提交宿主前完成隔离构建/求值、exports 校验、静态依赖环与 inject capability 审查；失败或越权不修改宿主 | 试加载隔离/越权拒绝测试 | 5 |
 | A13 | 五模式派发与 `interface Events` 声明一致；单调 guard 任意顺序下 deny 不翻回 allow | 声明合并类型测试（`@ts-expect-error`）+ 排列测试（[10 CORE-1/6](../research/dsh-optimizations.md#3-核心运行时优化core)） | 0-2 |
 | A14 | same config 不同顺序 → `--dump-config` 输出观察等价；patch 按 id 整块替换可复现 | 汇合测试 + patch 测试（[10 CORE-14/ENG-2](../research/dsh-optimizations.md#4-工程配置与-ui-优化eng)） | 0-1 |
-| A15 | effects 插件：进程崩溃重启后 durable intent 被重放且幂等键不产生重复 | 故障注入 + 重启测试（[10 SUP-1/2](../research/dsh-optimizations.md#5-域层与治理优化sup)） | 3 |
+| A15 | 显式 durable 模式使用持久 journal，提供 at-least-once 投递；commit 前崩溃与 dispatch 成功后 receipt 持久化前崩溃均可恢复；可观察副作用不重复依赖 adapter 的 `(kind,key)` 幂等协议；默认内存 journal 不得称为 crash-durable | 双崩溃窗口 + 并发 commit + 幂等 adapter 测试（[10 SUP-1/2](../research/dsh-optimizations.md#5-域层与治理优化sup)） | 3 |
 | A16 | 晋升单调性：incumbent 参赛，新策略仅严格更优且资格合格才替换 | 候选竞争测试（[SE-D6](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
 | A17 | 重放不变量：budget===order.length、无重复、每步 isLegal、best≤runBest | 框架级断言（[SE-D10](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 6 |
 | A18 | 观察等价晋升：晋升前后 ctx 在键上的公开操作测试一致 | 汇合性扩展测试（[SE-H3](../research/recursive-self-evolution.md#5-对现有设计的优化建议)） | 5-6 |
@@ -180,7 +180,7 @@ flowchart LR
 | A27 | 经验检索：evidence 完整落盘（code/scores/traces）；`experience.query` 支持任意历史候选的非马尔可夫检索；evidence store 无有损摘要 | [observability.md §3.1](../framework/observability.md)、SE-M3 | 5-6 |
 | A28 | 多租户 realm 隔离：per-tenant 资源经 realm 解析；跨租户事件不串；配额作为 coeffect 可 reserve | [security.md §7](../agent/security.md#7-多租户identity-与-realm) | 3-5 |
 | A29 | 评测体系：fitness seam 可插拔；A/B 与回归门禁可运行；实验隔离与 search/test 分离 | [engineering.md §9.3](../architecture/engineering.md#93-评测与基准体系缺口-5-补全)、SE-M11 | 5-6 |
-| A30 | 部署三态：local 单文件 / daemon / remote 可切换；readiness/liveness/configDigest 可查询；二进制架构校验 | [engineering.md §9.1](../architecture/engineering.md#91-部署拓扑与三态运行缺口-7-补全) | 5 |
+| A30 | 部署三态均为真实拓扑：local 单文件、daemon HTTP/token/heartbeat、remote SDK/gRPC + 远程 backend；readiness/liveness/configDigest 接入真实 runtime/RPC；configDigest 使用 canonical encoding + SHA-256；启动/发布校验主二进制与嵌入资源架构 | [engineering.md §9.1](../architecture/engineering.md#91-部署拓扑与三态运行缺口-7-补全) | 5 |
 
 
 ## 5 运行时 HMR 与测试

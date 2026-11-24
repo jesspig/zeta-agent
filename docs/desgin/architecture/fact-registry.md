@@ -27,7 +27,7 @@
 | S5 | [packages/tui](https://github.com/earendil-works/pi/packages/tui) 源码与 `README.md` | 源码 | 同上 | Component/TUI/差分渲染 |
 | S6 | [packages/{ai,durable,schema,mcp,env,codemode,telemetry,evals}](https://github.com/earendil-works/pi/packages/{ai,durable,schema,mcp,env,codemode,telemetry,evals}) | 源码 | 同上 | 生态包职责与依赖 |
 | S7 | [pi/README.md](https://github.com/earendil-works/pi/README.md)、`package.json`、`AGENTS.md` | 官方仓库文档 | 同上 | 包职责、供应链、构建顺序、打包约定 |
-| S8 | `zeta-agent` 工作区的 `package.json`、`bun.lock`、`index.ts`（本项目自身，无上游仓库） | 本地工作区事实 | 2026-11-19 | bun init 空项目（bun 1.4.2、TS ^7） |
+| S8 | `zeta-agent` 工作区的 `package.json`、`bun.lock`、`index.ts`（本项目自身，无上游仓库） | 本地工作区事实 | 2026-11-24 | Bun monorepo（bun 1.4.2、TypeScript ^5.9.2）；2026-11-19 时仍为 bun init 空项目 |
 | S12 | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（vendored Cordis + `docs/architecture.md` + `packages/*` + `vendor/cordis/src/*`） | 一手源码 / 官方文档 | 2026-11-19 | **Cordis 论文的生产级参考实现（只读复刻蓝本，非运行时依赖）**：`vendor/cordis/src/*` 对应我们通用框架的 `cordis` 组件；`packages/*` 对应其他组件/Agent 框架。**本项目不引入任何上游 Cordis 包**，`@zeta-agent/cordis` 为自研组件命名 |
 | S13 | [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)（`docs/000-008` + `src/core/*` + `src/app/{effects,outbox,store}.*` + `cordis.patch.yml`） | 一手源码 / 官方文档 | 2026-11-19 | 构建在 S12 之上的主动式 coding agent 研究原型，提供域模型、授权 Mandate、durable effects、preset patch 的组织级治理参考 |
 | S14 | [agentscope-ai/agentscope](https://github.com/agentscope-ai/agentscope)（`src/agentscope/` 2.0） | 一手源码 | 2026-11-19 | 统一 Agent + middleware + AgentState；决策三态纯函数、节点协议同构、HITL park/resume、Workspace/Backend 三原语 |
@@ -87,7 +87,7 @@
 | `@opentui/solid` 0.9.3；Solid peer ^1.9.12，建议 ≥1.9.16；需 bunfig preload | S9 + S10 | 官方在线文档/包元数据 | 2026-11-19 | 高 | 原文 | 支持（[framework-model/engineering §3.3](./framework-model.md)） |
 | OpenTUI 提供 Solid plugin slots（createSolidSlotRegistry/Slot/createSlot/SolidPlugin） | S9 `/docs/plugins/solid/`、`/docs/api/solid/` | 官方在线文档 | 2026-11-19 | 高 | 原文 | 支持（[doc §5](../agent/tui.md#5-插件-ui-槽位)） |
 | Turborepo 的 Bun workspace 写法与 `dependsOn:["^build"]`/`outputs`/`dev` 配置 | S11 | 官方在线文档 | 2026-11-19 | 高 | 原文 | 支持（[framework-model/engineering §3.2](./framework-model.md)） |
-| 工作区是 bun 1.4.2 的 bun init 空项目，TS ^7 | S8 | 本地事实 | 2026-11-19 | 高 | 原文 | 支持（[framework-model/engineering §3.1](./framework-model.md)） |
+| 工作区已从 bun init 空项目发展为 Bun monorepo，TypeScript ^5.9.2 | S8 | 本地事实 | 2026-11-24 | 高 | 原文 | 支持（[engineering §3.1](./engineering.md#31-bun--typescript)） |
 
 | dsh 中连 model adapter / tool registry / session log / agent loop 都是插件，没有可打补丁的特权核心 | S12 [docs/architecture.md:9-11](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md#L9-L11) | 一手源码文档 | 2026-11-19 | 原文 | 支持（[doc §1.1](../research/dsh-optimizations.md#1-结论速览与事实校正)） |
 | dsh 事件有 emit/parallel/serial/bail/waterfall 五种模式且用 `@mode` 静态校验 | S12 [docs/cordis-primer.md:15-35](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cordis-primer.md#L15-L35)、[vendor/cordis/src/events.ts:193-265](https://github.com/deepseek-ai/deepseek-harness/blob/master/vendor/cordis/src/events.ts#L193-L265) | 一手源码 | 2026-11-19 | 原文 | 支持（CORE-1） |
@@ -162,7 +162,7 @@
 | A23 进程外审计 | [security §6](../agent/security.md) | S20 OpenSandbox nodeagent sink | 跨进程落盘 + 篡改检测 | 已实现（测试证据）：`packages/components/security/src/audit-daemon.ts`、`audit.socket.spec.ts`、`packages/agent/src/facade.audit.socket.spec.ts` |
 | A28 realm 隔离 | [security §7](../agent/security.md#7-多租户identity-与-realm) | S20 realm 隔离 | realm 专测 | 已实现（测试证据）：`packages/framework/src/context.ts`（realm 分桶）、`context.spec.ts`（A28 严格 realm 事件隔离） |
 | MCP 插件 | [plugin-system §9](../agent/plugin-system.md#9-mcp-与-provider-插件) | S4 pi MCP 扩展 | 门禁协同测试 | 已实现（测试证据）：`packages/agent/src/plugins/mcp/`、`mcp.spec.ts`（权限/withhold/egress/backend） |
-| 对象运行时最小集 | [components §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径) | S2 pi/chord | 语义与类型测试 | 已实现（测试证据）：`packages/framework/src/objects/`、`objects.spec.ts`；IPC/WS/SQLite/rollout 按设计不实现 |
+| 对象运行时最小集 | [components §9](../framework/components.md#9-对象运行时与跨进程边界可选子路径) | S2 pi/chord | 语义与类型测试 | 进程内最小集已实现：`packages/framework/src/objects/`、`objects.spec.ts`；host/facet/Reference、IPC/WS/SQLite/group commit/outbox/jobs/derive/rollout 尚未实现 |
 | 研究轨护栏 | [recursive-self-evolution §6](../research/recursive-self-evolution.md#6-落地批次) | S16 dream-rsi / S17 harness2 | 可选 seam 专测 | 已实现（测试证据）：`packages/agent/src/research/guardrails.spec.ts`、`packages/deploy/src/fitness.budget-identity.spec.ts`；不进默认装配 |
 | 汇合性验收 | [cordis-paper §9 Thm 80](../research/cordis-paper-system.md#9-元理论五条承重保证) | S2 reload 提交语义 | `replayConfig` | 已实现（测试证据）：`packages/components/loader/src/config.ts`、`config.spec.ts`、`reconcile.spec.ts`；口径待 G8 |
 

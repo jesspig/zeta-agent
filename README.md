@@ -9,7 +9,7 @@ zeta-agent 是对 Cordis 论文与 pi（coding-agent）设计的一套自行实�
 - **不引入任何上游 Cordis 包**（`cordis`、`@cordisjs/*`、`@deepseek-ai/cordis` 均不进依赖树）；`packages/components/cordis/` 是对论文的自行实现命名。
 - **两个框架**：`@zeta-agent/framework`（通用框架，effect/fiber/loader/HMR）与 `@zeta-agent/agent-framework`（agent 运行时、事件协议、工具与会话）。
 - **facade 边界**：上层应用只通过 facade 包使用框架，不 import 组件内部；架构守护脚本（`scripts/guard-architecture.mjs`）静态强制。
-- **可插拔 TUI**：`@zeta-agent/tui` 以 OpenTUI + SolidJS 为默认且唯一发布实现，并公开 `RendererBackend` seam，用户可自带 Ink/TermUI/REPL 后端经 `createTui({ backend })` 注入。
+- **可插拔 TUI**：`@zeta-agent/tui` 以 OpenTUI + SolidJS 为默认且唯一发布实现；当前 `RendererBackend` 支持 `createTui({ backend })` 的快照注入，生产 `renderTui()` 的完整运行时 backend 契约纳入后续建设阶段。
 
 ## 架构
 

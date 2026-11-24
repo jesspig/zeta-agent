@@ -8,6 +8,7 @@
 | 文档 | 内容 | 粒度 |
 | --- | --- | --- |
 | [roadmap.md](./roadmap.md) | 迁移策略、阶段 0-6、关键路径、验收 A1-A30、HMR、风险与开放问题 | 实施路线 |
+| [capability-matrix.md](./capability-matrix.md) | 公开能力的组件/显式注入/默认启用/验收四态矩阵 | 现状基线 |
 | [review-record.md](./review-record.md) | 全面审查记录：P0/P1/P2 发现与修复状态、复核结果 | 质量记录 |
 
 ## 活动图（实施批次）
@@ -42,7 +43,7 @@ flowchart TD
 
 ## 深度差距分析与本批处置（2026-11-23）
 
-> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-6 主体能力已实现并通过全量测试（849 pass / 0 fail；此前规划基线 734，第二阶段补齐后实测 849，数字以实测为准）。
+> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-6 的组件级能力已存在并通过 849 个测试，但默认装配、公共 API、端到端验收与完整平台能力尚未闭环；当前基线以 [capability-matrix.md](./capability-matrix.md) 为准。
 
 ### 六类差距结论
 
@@ -61,8 +62,9 @@ flowchart TD
 - **门禁**：测试去伪（消除循环论证，确保不变量 legacy/plugin 双版行为独立性）、架构守护脚本、链接守护脚本 `scripts/check_docs_links.mjs`（0 断链 / 0 断锚）。
 - **文档纠偏**：交付状态、索引与差距记录同步；不改动 [roadmap.md](./roadmap.md) 的阶段编号与验收语义。
 
-### 明确延后（不在本批范围）
+### 完整路线后续阶段
 
-- **HMR / 对象运行时 / 研究轨护栏**：均已实现并测试；HMR unit 快照恢复见 `packages/components/loader/src/hmr.spec.ts`，对象运行时最小集见 `packages/framework/src/objects/`，研究护栏见 `packages/agent/src/research/guardrails.spec.ts`。
-- **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 按设计不实现。
-- **研究轨边界**：promotion / experience / fitness 与四道护栏均为可选 seam，不进入默认装配，默认仍为 no-op seam；仅在具备可重放任务与评估器时启用。
+- **HMR / 对象运行时 / 研究轨护栏**：组件级最小实现已存在；完整 HMR、跨进程对象和研究轨纳入完整系统执行计划，不再作为永久延后项。
+- **对象运行时后续项**：host / facet / Reference、IPC / WS、SQLite、group commit、outbox、jobs / derive / rollout 尚未实现。
+- **研究轨边界**：promotion / experience / fitness 与四道护栏当前为可选 seam，默认不装配；完整实现后仍保持默认禁用，但启用路径不可绕过护栏。
+- **部署平台**：local / daemon / remote 三态当前只有数据模型与 local 路径，真实 daemon/remote 纳入完整平台阶段。

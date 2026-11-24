@@ -126,7 +126,7 @@
 
 ## 8 深度差距分析与本批处置（2026-11-23）
 
-> 本节记录本轮深度差距分析的方法论结论与处置边界，供后续复审对照。具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-6 主体能力已实现并通过全量测试（849 pass / 0 fail；此前规划基线 734，第二阶段补齐后实测 849，数字以实测为准）；本节不改变 [roadmap.md](./roadmap.md) 的 A1-A30 编号与验收语义。
+> 本节保留 2026-11-23 深度差距分析的历史结论与处置边界。2026-11-24 起，完整系统执行计划不再以“阶段 0-6 主体完成”为终点；组件级测试结果保留，端到端验收以 [capability-matrix.md](./capability-matrix.md) 与完整执行文档为准。
 
 ### 8.1 六类结论
 
@@ -148,5 +148,5 @@
 ### 8.3 明确延后（不在本批范围）
 
 - **HMR / 对象运行时 / 研究轨护栏**：均已实现并测试；HMR unit 快照恢复见 `packages/components/loader/src/hmr.spec.ts`，对象运行时最小集见 `packages/framework/src/objects/`，研究护栏见 `packages/agent/src/research/guardrails.spec.ts`。
-- **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 按设计不实现。
+- **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 在 2026-11-23 批次中未实现；现已纳入完整系统后续阶段，不再作为永久不实现项。
 - **研究轨边界**：promotion / experience / fitness 与四道护栏均为可选 seam，不进入默认装配，默认仍为 no-op seam；仅在具备可重放任务与评估器时启用。

@@ -180,18 +180,18 @@ definePlugin({
 | 能力 | 状态 | 机制 |
 | --- | --- | --- |
 | 运行时加载新工具/技能插件 | ✅ 支持 | `ctx.use` + entry reconciliation |
-| 运行时卸载/替换插件并回滚 | ✅ 支持 | `ctx.effect` 逆 + LIFO + guard |
+| 运行时卸载/替换插件并显式回滚 | ⚠️ 受控 | `ctx.effect` 逆 + LIFO + guard；build/evaluate 失败保留旧 artifact，apply 失败目标 fiber 留 FAILED |
 | 依赖方自动重激活 | ✅ 支持 | target/committed view + notify |
 | agent 自己写插件代码并加载 | ⚠️ 受控 | 必须经过：沙箱构建 → 静态环检测 → 权限审查 → 试加载（可回滚）→ 人工/策略批准后才持久化 |
-| 失败自修改自动重试 | ❌ 不做 | FAILED 需手动 revision（[04 O-5](../framework/api-and-testing.md#13-风险与开放问题)） |
+| 失败自修改自动重试 | ✅ 下次变更重试 | apply 失败留 FAILED；下次文件变更触发重试，不自动回滚 |
 
 **安全护栏**：
 
 1. 生成的代码在沙箱中构建/求值（chord 的 `vm.Script` + 无 module cache 思路，[framework §8](../framework/components.md#8-组件加载器与-hmr)）；
 2. 依赖环静态检测（[framework-model/engineering §6.3](../architecture/framework-model.md)）；
 3. 新插件的 `inject` 声明即 capability 清单，编排器审查后才批准；
-4. 试加载失败 → fiber `FAILED`，旧插件按 closure rule 保留，不进入半替换状态；
-5. 所有变更可回滚：entry 记录变更前的 digest，回滚 = 重新加载旧 digest 的 fiber（Thm 80 保证最终状态只取决于配置）。
+4. build/evaluate/exports 失败 → 保留旧 committed artifact；apply 失败 → 仅目标 fiber `FAILED`，下次文件变更重试；
+5. 支持显式回滚：entry 记录变更前 digest，回滚 = 重新加载旧 digest 的 fiber；apply 失败不承诺自动回滚，critical root 可增加 shadow-apply/compensation。
 
 > 关键风险：论文自己承认"一个错误自修改可能禁用恢复所需的进程"（[cordis-paper §2.3](../research/cordis-paper-theory.md)）。因此**必须先保证 loader/HMR 本身是不可替换的核心插件**（required root，chord 的 app root 模式），agent 只能替换普通插件。
 
@@ -238,13 +238,13 @@ stateDiagram-v2
 - **防 ground truth 泄漏**：grader verdict / rubric / score 不得进入改进上下文，tripwire 命中即抛错（SE-H8）；
 - **经验库隔离**：per-domain 且 per-mode 各持一个 ExperienceLibrary，只读更早任务（SE-H10），避免跨租户/跨模式污染。
 
-> 完整 28 条建议（SE-D1..12、SE-H1..16）见 [recursive-self-evolution.md §5](../research/recursive-self-evolution.md#5-对现有设计的优化建议)。研究轨落地批次见该文 §6，产品轨暂不实现自动代码生成。
+> 完整 28 条建议（SE-D1..12、SE-H1..16）见 [recursive-self-evolution.md §5](../research/recursive-self-evolution.md#5-对现有设计的优化建议)。研究轨落地批次见该文 §6；默认产品 profile 不启用自动代码生成，完整路线实现研究轨但保持默认禁用。
 
 
 ## 9 MCP 与 provider 插件
 
 - MCP：pi 的 `createMcpExtension()` 把 MCP server 的工具注册为 `mcp__<server>__<tool>`，监听 `session_start/before_agent_start/tool_call/turn_start/mcp_servers_change/session_shutdown`（[pi-baseline §5.2](../research/pi-baseline.md)）。我们做成 `mcp` 插件：server 配置是一个 coeffect（`@zeta-agent/mcp:servers`），工具注册是逆可撤销的 effect，server 变化时工具自动重激活。
-  **实现状态（2026-11-24）**：最小插件已落地于 `packages/agent/src/plugins/mcp/`，自实现 JSON-RPC 客户端（无外部 SDK）；工具注册、tools_changed 重激活与卸载清理已实现，并复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定（证据：`packages/agent/src/plugins/mcp/mcp.spec.ts`）。真实 stdio/socket 字节传输由宿主注入 transport，MCP resources/prompts 未实现。
+  **实现状态（2026-11-24）**：最小插件已落地于 `packages/agent/src/plugins/mcp/`，自实现 JSON-RPC 客户端（无外部 SDK）；工具注册、tools_changed 重激活与卸载清理已实现，并复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定（证据：`packages/agent/src/plugins/mcp/mcp.spec.ts`）。当前尚未实现 initialize/initialized 握手、OAuth、分页、resources/prompts/roots、inputSchema/outputSchema 双结果投影；动态/MCP 工具也尚未进入原生 provider function-calling schema。真实 stdio/socket 字节传输由宿主注入 transport。
 - Provider：`registerProvider`/`registerNativeProvider`/`registerVirtualModel` 保留；底层走 `@zeta-agent/agent-framework` 的 `StreamFn` broker（[agent-framework §12](../agent-framework/state-and-events.md#12-模型服务作为-broker)）。模型目录由生成式 catalog + `accepts` 版本映射管理。
 
 
