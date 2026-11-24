@@ -10,7 +10,7 @@ export interface RuntimeMessage {
   readonly content: unknown;
 }
 
-export type CommandHandler = (command: string) => void | Promise<void>;
+export type CommandHandler = (command: string) => boolean | void | Promise<boolean | void>;
 export type TuiThemeName = "system" | "dark" | "light";
 
 /** 模型选项：分列元数据供多列对齐展示。 */
@@ -38,7 +38,8 @@ export interface RuntimeResources {
 export interface RuntimeTuiOptions {
   readonly title?: string;
   readonly messages?: readonly RuntimeMessage[];
-  readonly onSubmit?: (text: string, mode?: SubmitMode) => void | Promise<void>;
+  readonly onSubmit?: (text: string, mode?: SubmitMode) => boolean | void | Promise<boolean | void>;
+  readonly onSubmitError?: (error: unknown) => void;
   readonly onExit?: () => void;
   /** Esc：中止当前运行。 */
   readonly onAbort?: () => void;
@@ -46,7 +47,7 @@ export interface RuntimeTuiOptions {
   /** 非本地命令的兜底处理（以 "/" 开头）。 */
   readonly commands?: CommandHandler;
   /** 本地命令未命中时的处理器。 */
-  readonly onCommand?: (text: string) => void | Promise<void>;
+  readonly onCommand?: (text: string) => boolean | void | Promise<boolean | void>;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
   /** 斜杠命令候选来源。 */
   readonly commandCatalog?: readonly SlashCommand[];
@@ -82,6 +83,7 @@ export interface RuntimeTuiHandle {
   setModelOptions(options: readonly RuntimeModelOption[]): void;
   /** 异步更新当前模型显示。 */
   setModel(model: string): void;
+  readonly restoreDraft?: (text: string) => void;
   waitForExit(): Promise<void>;
   destroy(): Promise<void>;
   getSignals(): AgentSignals | undefined;

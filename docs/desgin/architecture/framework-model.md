@@ -26,7 +26,7 @@
 ### 1.2 明确不做
 
 - 不做 Web ORM、不做通用后端框架；开发框架只提供动态组合语义（与 Cordis "meta-framework" 定位一致，见 [cordis-paper §10.0](../research/cordis-paper-system.md)）。
-- **产品轨**：第一版不实现自演化 agent 的自动代码生成与部署；只保证**架构允许**运行时组件替换（见 [plugin-system §8](../agent/plugin-system.md#8-自演化与安全管理)）。
+- **产品轨**：默认产品 profile 不启用自演化 agent 的自动代码生成与部署；完整建设路线包含受控热替换与研究轨实现，研究轨保持默认禁用（见 [plugin-system §8](../agent/plugin-system.md#8-自演化与安全管理)）。
 - **研究轨（预留）**：框架预留递归自演化所需 seam（策略白名单、DecisionSurface、fitness/judge、资格门禁、ExperienceLibrary），未来可插拔装入，无需改框架。两个参考项目 DREAM-RSI 与 Harness² 的机制见 [recursive-self-evolution.md](../research/recursive-self-evolution.md)，研究轨批次见 [roadmap 阶段 6](../delivery/roadmap.md#阶段-6递归自演化研究轨可选后续)。
 - 不引入多余抽象层（KISS/DRY/YAGNI）：两个 facade 包 + 组件子包（C 方案，见 [§5.1](#51-组件子包清单与依赖图c-方案)），共享类型就地导出，不设 `@zeta-agent/types` 之类空壳包。
 
@@ -180,7 +180,7 @@ flowchart TB
 | `@zeta-agent/observability` | effect 元树→span、脱敏、HealthBoard | cordis、capabilities |
 | `@zeta-agent/security` | 能力探测、隔离/seccomp、egress 默认拒绝 | cordis、capabilities |
 
-> **包结构对齐说明**：原设计列出的 `@zeta-agent/scope`/`seam`/`registry`/`health`/`hmr`/`store`/`links`/`objects` 并未作为独立子包落地——其职责并入 `capabilities`/`loader`/`observability`，数据/跨进程组件（store/links/objects）暂未实现（YAGNI）。`@zeta-agent/testing` 是独立测试工具包（`packages/testing`，不属于组件子包）。聚合包 `@zeta-agent/components` 汇总上述组件。
+> **包结构对齐说明**：原设计列出的 `@zeta-agent/scope`/`seam`/`registry`/`health`/`hmr` 未作为独立子包落地——其职责并入 `capabilities`/`loader`/`observability`。`@zeta-agent/framework/objects` 已实现 contract/document/store/link/delta 的进程内最小集；host/facet/Reference、IPC/WS、SQLite、group commit、outbox、jobs/derive/rollout 尚未实现，纳入完整对象运行时阶段。`@zeta-agent/testing` 是独立测试工具包（`packages/testing`，不属于组件子包）。聚合包 `@zeta-agent/components` 汇总上述组件。
 
 **Agent 框架（聚合包 `@zeta-agent/agent-framework`）**：
 

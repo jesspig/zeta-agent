@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { OscProvider } from "../osc-context";
 import type { OscReporter } from "../osc";
-import { ZetaEditor, type SubmitMode } from "./editor";
+import { ZetaEditor, type EditorHandle, type SubmitMode } from "./editor";
 
 function oscSpy() {
   const copied: string[] = [];
@@ -112,6 +112,159 @@ describe("U-02 编辑器交互接线（真实键盘）", () => {
       expect(spy.copied).toContain("copy-me");
       // 复制不清空编辑器（与 Ctrl+C 的清空语义区分）。
       expect(setup.captureCharFrame()).toContain("copy-me");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("Shift+Enter 插入换行且不提交", async () => {
+    let submitted = 0;
+    let handle: EditorHandle | undefined;
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          onSubmit={() => { submitted += 1; }}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 6, kittyKeyboard: true },
+    );
+    try {
+      setup.mockInput.typeText("first-line");
+      await setup.waitForFrame((frame) => frame.includes("first-line"));
+      setup.mockInput.pressEnter({ shift: true });
+      await Bun.sleep(10);
+      expect(submitted).toBe(0);
+      expect(handle?.value()).toContain("\n");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("宿主拒绝或抛错时保留草稿", async () => {
+    let handle: EditorHandle | undefined;
+    const errors: unknown[] = [];
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          onSubmitWithMode={async () => false}
+          onSubmitError={(error) => errors.push(error)}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 6 },
+    );
+    try {
+      setup.mockInput.typeText("keep-draft");
+      await setup.waitForFrame((frame) => frame.includes("keep-draft"));
+      setup.mockInput.pressEnter();
+      await Bun.sleep(0);
+      expect(handle?.value()).toBe("keep-draft");
+      expect(errors).toEqual([]);
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("候选菜单打开时 Shift+Enter 只插入换行", async () => {
+    let submitted = 0;
+    let handle: EditorHandle | undefined;
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          commands={[{ name: "quit", description: "退出" }]}
+          onSubmitWithMode={() => { submitted += 1; }}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 8, kittyKeyboard: true },
+    );
+    try {
+      setup.mockInput.typeText("/q");
+      await setup.waitForFrame((frame) => frame.includes("/quit"));
+      setup.mockInput.pressEnter({ shift: true });
+      await Bun.sleep(10);
+      expect(submitted).toBe(0);
+      expect(handle?.value()).toContain("\n");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("异步提交期间的新输入不会在接受后被清空", async () => {
+    let release: (() => void) | undefined;
+    let handle: EditorHandle | undefined;
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          onSubmitWithMode={() => new Promise<boolean>((resolve) => { release = () => resolve(true); })}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 6 },
+    );
+    try {
+      setup.mockInput.typeText("first");
+      await setup.waitForFrame((frame) => frame.includes("first"));
+      setup.mockInput.pressEnter();
+      setup.mockInput.typeText(" second");
+      await setup.waitForFrame((frame) => frame.includes("second"));
+      release?.();
+      await Bun.sleep(10);
+      expect(handle?.value()).toBe("first second");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("异步提交期间重复 Enter 不会触发二次提交", async () => {
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          onSubmitWithMode={() => {
+            calls += 1;
+            return new Promise<boolean>((resolve) => { release = () => resolve(true); });
+          }}
+        />
+      ),
+      { width: 48, height: 6 },
+    );
+    try {
+      setup.mockInput.typeText("once-only");
+      await setup.waitForFrame((frame) => frame.includes("once-only"));
+      setup.mockInput.pressEnter();
+      setup.mockInput.pressEnter();
+      await Bun.sleep(0);
+      expect(calls).toBe(1);
+      release?.();
+      await setup.waitForFrame((frame) => !frame.includes("once-only"));
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("宿主异步拒绝时保留草稿并报告错误", async () => {
+    let handle: EditorHandle | undefined;
+    const errors: unknown[] = [];
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          onSubmitWithMode={async () => { throw new Error("busy"); }}
+          onSubmitError={(error) => errors.push(error)}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 6 },
+    );
+    try {
+      setup.mockInput.typeText("keep-on-error");
+      await setup.waitForFrame((frame) => frame.includes("keep-on-error"));
+      setup.mockInput.pressEnter();
+      await setup.waitForFrame(() => errors.length === 1);
+      expect(handle?.value()).toBe("keep-on-error");
+      expect((errors[0] as Error).message).toBe("busy");
     } finally {
       setup.renderer.destroy();
     }

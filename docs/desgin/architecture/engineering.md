@@ -21,7 +21,7 @@
 
 ### 3.1 Bun + TypeScript
 
-- 当前工作区 `zeta-agent` 由 `bun init`（bun v1.4.2）创建，`package.json` 为 ESM、`@types/bun: latest`、`typescript: ^7` peer、`bun.lock` 已生成（本地事实）。
+- 当前工作区 `zeta-agent` 已由 `bun init` 骨架发展为 Bun monorepo（bun v1.4.2），`package.json` 为 ESM、`@types/bun: latest`、`typescript: ^5.9.2`、`bun.lock` 已生成（本地事实，2026-11-24 核对）。
 - Bun 原生支持 TypeScript/TSX 执行与 workspaces，`bunfig.toml` 可配置 preload——OpenTUI Solid 绑定**要求** `preload = ["@opentui/solid/preload"]`（官方，见下）。
 - **工具链事实来源**：工作区 `package.json` / `bun.lock`；OpenTUI 官方文档 `https://opentui.com/docs/bindings/solid/`（访问 2026-11-19）。
 
@@ -58,7 +58,7 @@
 | 依赖 | 建议约束 | 理由 |
 | --- | --- | --- |
 | bun | `devEngines.packageManager` 固定 `bun@1.4.2`（或团队统一版本） | 复现性；OpenTUI preload 与 native 渲染器对运行时敏感 |
-| typescript | `^7`（沿用工作区） | 工作区现状 |
+| typescript | `^5.9.2` | 工作区现状 |
 | turbo | `latest` → 锁定到具体版本后写入 lockfile | 官方建议 |
 | solid-js | `^1.9.16`（官方安全建议 ≥1.9.16） | Seroval 安全公告 |
 | @opentui/solid + core | `^0.9.3`，同版本对齐 | 两者版本同步发布 |
@@ -114,7 +114,7 @@
     "test": "turbo run test",
     "dev": "turbo run dev"
   },
-  "devDependencies": { "turbo": "<pinned>", "typescript": "^7" }
+  "devDependencies": { "turbo": "<pinned>", "typescript": "^5.9.2" }
 }
 ```
 

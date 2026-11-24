@@ -12,13 +12,11 @@ import {
   type Agent,
   type AgentStreamFn,
 } from "@zeta-agent/agent";
-import {
-  detectGitBranch,
-  renderTui,
-  type RuntimeMessage,
-  type RuntimeTuiHandle,
-  type SubmitMode,
-  type UsagePricing,
+import type {
+  RuntimeMessage,
+  RuntimeTuiHandle,
+  SubmitMode,
+  UsagePricing,
 } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
@@ -107,6 +105,7 @@ interface AgentBundle {
   /** 已配置时才有模型；未配置 API/Key 时为空（不显示任何模型）。 */
   readonly models: readonly string[];
   readonly connection: Connection | undefined;
+  readonly missing: readonly string[];
   readonly initialModel: string | undefined;
   setModel(model: string): void;
   /** 设置内存连接配置（不落盘）。 */
@@ -140,6 +139,7 @@ function makeAgent(): AgentBundle {
     get connection() {
       return connection;
     },
+    missing: resolution.kind === "fallback" ? resolution.missing : [],
     initialModel: resolution.kind === "configured" ? modelName : undefined,
     setModel(next: string) {
       modelName = next;
@@ -155,7 +155,56 @@ function toRuntimeMessages(messages: readonly { role: string; content: unknown }
   return messages.map((message) => ({ role: message.role, content: message.content }));
 }
 
+export async function loadInteractiveTui() {
+  await import("@opentui/solid/preload");
+  return import("@zeta-agent/tui");
+}
+
+export function createSteerLock(): { tryAcquire(): boolean; release(): void } {
+  let active = false;
+  return {
+    tryAcquire() {
+      if (active) return false;
+      active = true;
+      return true;
+    },
+    release() {
+      active = false;
+    },
+  };
+}
+
+export function createSteerRunner(deps: {
+  isBusy(): boolean;
+  prompt(text: string): Promise<unknown>;
+  waitForIdle(): Promise<void>;
+  onBusy(): void;
+  onError(error: unknown): void;
+  restoreDraft?(text: string): void;
+}): { start(text: string): { accepted: boolean; done: Promise<void> } } {
+  const lock = createSteerLock();
+  return {
+    start(text) {
+      if (deps.isBusy() || !lock.tryAcquire()) {
+        deps.onBusy();
+        return { accepted: false, done: Promise.resolve() };
+      }
+      const done = deps.prompt(text)
+        .then(() => deps.waitForIdle())
+        .catch((error: unknown) => {
+          deps.restoreDraft?.(text);
+          deps.onError(error);
+        })
+        .finally(() => {
+          lock.release();
+        });
+      return { accepted: true, done };
+    },
+  };
+}
+
 async function runTui(args: CliArgs): Promise<number> {
+  const { detectGitBranch, renderTui } = await loadInteractiveTui();
   const bundle = makeAgent();
   const agent = bundle.agent;
 
@@ -241,31 +290,34 @@ async function runTui(args: CliArgs): Promise<number> {
     void applyConnection(bundle.connection.baseUrl, bundle.connection.apiKey);
   }
 
-  const handleCommand = async (text: string, mode: SubmitMode = "steer"): Promise<void> => {
+  const startSteer = createSteerRunner({
+    isBusy: () => agent.state.isStreaming || agent.state.pendingToolCalls.size > 0,
+    prompt: (text) => agent.prompt(text),
+    waitForIdle: () => agent.waitForIdle(),
+    onBusy: () => notice("正在运行中：请等待完成，或按 Esc 中止后再发送"),
+    onError: (error) => notice(`发送失败：${(error as Error).message}`),
+    restoreDraft: (text) => tui?.restoreDraft?.(text),
+  }).start;
+
+  const handleCommand = async (text: string, mode: SubmitMode = "steer"): Promise<boolean> => {
     if (!text.startsWith("/")) {
       if (mode === "follow-up") {
-        // follow-up 进 agent 的下一轮队列，不打断当前回合（与 steer 双队列语义对应）。
         agent.followUp({ role: "user", content: text });
         notice(`已排队 follow-up：${text}`);
-        return;
+        return true;
       }
-      if (agent.state.isStreaming || agent.state.pendingToolCalls.size > 0) {
-        notice("正在运行中：请等待完成，或按 Esc 中止后再发送");
-        return;
-      }
-      await agent.prompt(text);
-      await agent.waitForIdle();
-      return;
+      return startSteer(text).accepted;
     }
     const result = await registry.execute(text);
     if (!result.ok) {
       const parsed = parseCommand(text);
       notice(`未知命令：/${parsed?.name ?? text}（/help 查看可用命令）`);
-      return;
+      return false;
     }
     if (!hostCommands.has(result.name)) {
       notice(`/${result.name} 暂未接入（当前可用：/help /clear /new /model /theme /settings /session /compact /export /quit）`);
     }
+    return true;
   };
 
   tui = await renderTui({
@@ -291,6 +343,7 @@ async function runTui(args: CliArgs): Promise<number> {
         description: command.description,
       })),
       onCommand: handleCommand,
+      onSubmitError: (error) => notice(`发送失败：${(error as Error).message}`),
       onAbort: () => agent.abort(),
       // /new：清空真实会话上下文，使下一轮请求不再携带旧消息。
       onNewSession: () => agent.reset(),
@@ -305,10 +358,14 @@ async function runTui(args: CliArgs): Promise<number> {
     messages: toRuntimeMessages(agent.state.messages),
   });
 
+  if (bundle.missing.length > 0) {
+    notice(`模型配置缺失：${bundle.missing.join(", ")}；当前使用 echo`);
+  }
+
   try {
     if (args.prompt !== undefined) {
-      await agent.prompt(args.prompt);
-      await agent.waitForIdle();
+      const initial = startSteer(args.prompt);
+      if (initial.accepted) await initial.done;
     }
     await tui.waitForExit();
   } finally {
@@ -335,7 +392,10 @@ async function readStdinFrames(): Promise<string> {
 }
 
 async function runHeadless(args: CliArgs): Promise<number> {
-  const { agent } = makeAgent();
+  const { agent, missing } = makeAgent();
+  if (missing.length > 0) {
+    process.stderr.write(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo\n`);
+  }
   const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
   const stdinText = mode === "rpc" && !process.stdin.isTTY ? await readStdinFrames() : "";
   const opts = {

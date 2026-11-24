@@ -11,6 +11,7 @@ describe("T-08 编辑器语义", () => {
     expect(resolveSubmitMode({ name: "return" })).toBe("steer");
     expect(resolveSubmitMode({ name: "return", meta: true })).toBe("follow-up");
     expect(resolveSubmitMode({ name: "return", option: true })).toBe("follow-up");
+    expect(resolveSubmitMode({ name: "return", shift: true })).toBe(null);
     expect(resolveSubmitMode({ name: "a" })).toBe(null);
   });
 

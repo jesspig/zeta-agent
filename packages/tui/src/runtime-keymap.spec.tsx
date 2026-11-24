@@ -88,3 +88,29 @@ test("U-02 overlay 打开时 Esc 取消且不退出", async () => {
     setup.renderer.destroy();
   }
 });
+
+test("生产 ZetaApp 保留 Alt+Enter 的 follow-up 模式", async () => {
+  const submitted: Array<{ text: string; mode?: string }> = [];
+  const setup = await testRender(
+    () => (
+      <ZetaApp
+        title="zeta"
+        messages={[]}
+        onPush={() => {}}
+        onSubmit={(text, mode) => { submitted.push({ text, mode }); }}
+        onExit={() => {}}
+      />
+    ),
+    { width: 60, height: 12 },
+  );
+  try {
+    await setup.renderOnce();
+    setup.mockInput.typeText("queue-me");
+    await setup.waitForFrame((frame) => frame.includes("queue-me"));
+    setup.mockInput.pressEnter({ meta: true });
+    await setup.waitForFrame(() => submitted.length === 1);
+    expect(submitted).toEqual([{ text: "queue-me", mode: "follow-up" }]);
+  } finally {
+    setup.renderer.destroy();
+  }
+});

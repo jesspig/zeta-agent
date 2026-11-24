@@ -4,7 +4,7 @@
 > 一手来源：
 > - S17 [google-research/dream-rsi](https://github.com/google-research/dream-rsi)（DREAM-RSI: Recursive Self-Improvement Through Evolving Worlds，Apache-2.0）
 > - S18 [google-research/harness2](https://github.com/google-research/harness2)（Harness²: Recursive Agent Harnessing for an Open World，[arXiv:2610.14224](https://arxiv.org/abs/2610.14224)，Apache-2.0）
-> 检索截止：2026-11-19。**定位**：这是研究轨参考，第一版极简 harness 不实现递归自演化；但框架必须预留原语。
+> 检索截止：2026-11-19。**定位**：这是研究轨参考；默认产品 profile 不启用递归自演化，但完整建设路线将实现该研究轨并保持默认禁用。
 > 所属索引：[research/README.md](./README.md)　|　落地：[agent/plugin-system.md §8](../agent/plugin-system.md#8-自演化与安全管理)　|　事实登记：[architecture/fact-registry.md](../architecture/fact-registry.md)
 
 ## 目录
@@ -187,7 +187,7 @@
 | 研究轨（阶段 6，可选） | SE-D1/D4/D5/D6/D10、SE-H2/H4/H6/H9/H10 | 需要一个可重放的任务+评估器才能验证，不在第一版产品范围 |
 | 护栏强化（阶段 5） | SE-D7/D8/D11、SE-H3/H8/H11/H12、SE-H16 | 即便不做完整自演化，这些护栏也强化受控热替换的安全性 |
 
-**定位裁决点**：`framework-model §1.2` 写"第一版不实现自动代码生成与部署"。建议保持产品轨不变，但把本文作为**研究轨的预留契约清单**——框架预留 seam，未来可插拔地装入递归自演化实现，无需改框架。
+**定位裁决点**：默认产品 profile 不启用自动代码生成与部署；完整建设路线将本文作为研究轨契约清单，框架预留 seam，研究轨作为独立阶段实现且默认禁用。
 
 ## 7 交叉引用与验证
 

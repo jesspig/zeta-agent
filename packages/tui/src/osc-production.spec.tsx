@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MarkdownView } from "./components/transcript";
 import { OscProvider } from "./osc-context";
-import type { OscReporter } from "./osc";
+import { createOscReporter, type OscReporter } from "./osc";
 
 function spyReporter() {
   const copied: string[] = [];
@@ -32,6 +32,25 @@ describe("A10 OSC 52/8 产线触发", () => {
       await setup.waitForFrame((frame) => frame.includes("文档"));
       expect(spy.linked).toContain("https://example.com/docs");
       expect(setup.captureCharFrame()).toContain("https://example.com/docs");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("恶意 Markdown 链接不会向终端写入额外控制序列", async () => {
+    const written: string[] = [];
+    const reporter = createOscReporter((sequence) => written.push(sequence));
+    const setup = await testRender(
+      () => (
+        <OscProvider reporter={reporter}>
+          <MarkdownView text={'见 [文档](https://example.com/\x1b]0;title)'} />
+        </OscProvider>
+      ),
+      { width: 60, height: 3 },
+    );
+    try {
+      await setup.waitForFrame((frame) => frame.includes("文档"));
+      expect(written).toEqual([]);
     } finally {
       setup.renderer.destroy();
     }

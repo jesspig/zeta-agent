@@ -69,7 +69,7 @@ ctx.set(executionBackendKey, backend);     // coeffect 注入，应用只依赖 
 
 四实现：`inproc-vm`（QuickJS/WASM，保留现有 codemode）、`bwrap-session`（每工具调用一个 disposable session，`workspace.mode:'overlay'`、`env_passthrough.mode:'deny'`、`shareNet:false`）、`container`（Docker）、`microvm/remote`（gRPC）。session 句柄与 `ctx.effect` 绑定，工具卸载时逆撤销。
 
-**硬化底座**（来自 [hardening_linux.go](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/execd/pkg/runtime/hardening_linux.go)）：Landlock 路径白名单 + seccomp denylist + capability drop + 真实 setuid；策略经 `memfd_create` 传递不落盘；**任何前置条件缺失一律 degraded 而非静默跳过**。
+**硬化底座**（来自 [hardening_linux.go](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/execd/pkg/runtime/hardening_linux.go)）：Landlock 路径白名单 + seccomp denylist + capability drop + 真实 setuid；策略经 `memfd_create` 传递不落盘。OpenSandbox 对缺失前置条件采用 **fail-open + 能力报告**；zeta 选择更严格的 **fail-closed**：关键隔离层不可用时拒绝执行，不静默降级为宿主直执行。
 
 ## 4 egress：发射的门禁
 

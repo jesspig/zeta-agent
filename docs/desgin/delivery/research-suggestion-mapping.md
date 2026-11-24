@@ -2,7 +2,7 @@
 
 > 目的：关闭 `review-record.md` P1-13 与 NFR-09——每个研究建议批次都有承接阶段、任务与目标文档，未落地项显式标延期。
 > 范围：B0-B3（DSH）、C0-C3（能力预留）、SE（递归自演化）、CT（上下文压缩）、AS（AgentScope）、CR（CrewAI）、LG（LangGraph）。
-> 约定：本表只做映射，不修改 `SPEC/PLAN/GRAPH`；产品轨第一版不实现自动代码生成与部署，研究轨仅预留 seam。
+> 约定：本表只做映射，不修改 `SPEC/PLAN/GRAPH`；默认产品 profile 不启用自动代码生成与部署，完整建设路线包含研究轨实现，但研究轨保持默认禁用。
 
 ## 批次映射
 

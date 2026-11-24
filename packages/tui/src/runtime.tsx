@@ -24,7 +24,7 @@ import type { SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { Transcript, type TranscriptResources } from "./components/transcript";
-import { ZetaEditor, type SubmitMode } from "./components/editor";
+import { ZetaEditor, type EditorHandle, type SubmitMode } from "./components/editor";
 import { ViewportLayout } from "./components/layout-view";
 import type { RuntimeMessage, RuntimeModelOption, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 import type { SlashCommand } from "./slash";
@@ -102,12 +102,14 @@ export interface ZetaAppProps {
   readonly messages: readonly RuntimeMessage[];
   readonly source?: EventSource;
   readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
-  readonly onSubmit?: (text: string, mode?: SubmitMode) => void | Promise<void>;
+  readonly onSubmit?: (text: string, mode?: SubmitMode) => boolean | void | Promise<boolean | void>;
+  readonly onSubmitError?: (error: unknown) => void;
+  readonly onEditorHandle?: (handle: EditorHandle) => void;
   readonly onExit: () => void;
   readonly onAbort?: () => void;
   readonly commandList?: readonly { readonly id: string; readonly title: string }[];
   readonly commandCatalog?: readonly SlashCommand[];
-  readonly onCommand?: (text: string) => void | Promise<void>;
+  readonly onCommand?: (text: string) => boolean | void | Promise<boolean | void>;
   readonly plugins?: readonly SolidPlugin<ZetaNativeSlots>[];
   readonly cwd?: string;
   readonly model?: string;
@@ -286,19 +288,19 @@ export function ZetaApp(props: ZetaAppProps) {
     }
   };
 
-  const submit = (text: string, mode?: SubmitMode): void => {
+  const submit = async (text: string, mode?: SubmitMode): Promise<boolean> => {
     const value = text.trim();
-    if (value.length === 0) return;
+    if (value.length === 0) return false;
     if (value.startsWith("/")) {
-      if (runLocalCommand(value)) return;
+      if (runLocalCommand(value)) return true;
       if (props.onCommand !== undefined) {
-        void props.onCommand(value);
-        return;
+        return (await props.onCommand(value)) !== false;
       }
       notify(`未知命令：${value}（/help 查看可用命令）`);
-      return;
+      return false;
     }
-    void props.onSubmit?.(value, mode);
+    if (props.onSubmit === undefined) return false;
+    return (await props.onSubmit(value, mode)) !== false;
   };
 
   const keymap = createKeymap();
@@ -424,7 +426,9 @@ export function ZetaApp(props: ZetaAppProps) {
                     placeholder="输入消息，/ 查看命令"
                     onChange={setEditorText}
                     onEscape={() => props.onAbort?.()}
-                    onSubmit={(text, mode) => submit(text, mode)}
+                    onSubmitWithMode={(text, mode) => submit(text, mode)}
+                    onSubmitError={props.onSubmitError}
+                    onHandle={props.onEditorHandle}
                   />
                 </Show>
               }
@@ -543,6 +547,14 @@ export function ZetaApp(props: ZetaAppProps) {
   );
 }
 
+export function createTuiSubmitHandler(options: RuntimeTuiOptions) {
+  return (text: string, mode?: SubmitMode): boolean | void | Promise<boolean | void> => {
+    if (options.commands && text.startsWith("/")) return options.commands(text);
+    if (options.onSubmit === undefined) return false;
+    return options.onSubmit(text, mode) ?? true;
+  };
+}
+
 export async function renderTui(options: RuntimeTuiOptions = {}): Promise<RuntimeTuiHandle> {
   const screenMode = resolveDualMode(options.mode).screenMode;
   const renderer = new CliRenderer(
@@ -572,6 +584,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     resolveClosed = resolve;
   });
   let push: (message: RuntimeMessage) => void = () => {};
+  let editorHandle: EditorHandle | undefined;
   let destroyed = false;
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
@@ -611,12 +624,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     ? createOscBridge(signals, (sequence) => process.stdout.write(sequence))
     : undefined;
 
-  const onSubmit = (text: string, mode?: SubmitMode): void | Promise<void> => {
-    if (options.commands && text.startsWith("/")) {
-      return options.commands(text);
-    }
-    return options.onSubmit?.(text, mode);
-  };
+  const onSubmit = createTuiSubmitHandler(options);
 
   const cleanup = (): void => {
     if (destroyed) return;
@@ -650,6 +658,8 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
               push = sink;
             }}
             onSubmit={onSubmit}
+            onSubmitError={options.onSubmitError}
+            onEditorHandle={(handle) => { editorHandle = handle; }}
             onCommand={options.onCommand}
             onAbort={options.onAbort}
             commandList={options.commandList}
@@ -701,6 +711,9 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     },
     waitForExit() {
       return closed;
+    },
+    restoreDraft(text) {
+      if ((editorHandle?.value() ?? "").trim().length === 0) editorHandle?.setValue(text);
     },
     getSignals() {
       return signals;

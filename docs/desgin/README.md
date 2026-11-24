@@ -55,7 +55,8 @@ flowchart TB
     end
     subgraph D["delivery/"]
         D0["README.md"] --- D1["roadmap.md<br/>阶段计划与验收 A1-A30"]
-        D1 --- D2["review-record.md<br/>全面审查与修复记录"]
+        D1 --- D2["capability-matrix.md<br/>能力四态矩阵"]
+        D2 --- D3["review-record.md<br/>全面审查与修复记录"]
     end
     ROOT --> R0 & A0 & F0 & AF0 & AG0 & D0
 ```
@@ -142,9 +143,9 @@ flowchart TB
 ## 交付状态
 
 - ✅ 文档集已按 6 目录重构；每目录带 README 索引；文档无数字前缀。
-- ✅ 交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。链接守护脚本实跑统计：34 文件 / 727 链接 / 486 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）。
+- ✅ 交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。链接守护脚本实跑统计：35 文件 / 733 链接 / 490 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）。
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ✅ 阶段 0-6 主体能力已实现并通过全量测试（849 pass / 0 fail）：HMR 核心与 unit 快照恢复、对象运行时最小集（contract/document/store/link/delta）、MCP 插件、进程外审计 sink、严格 realm 事件隔离、研究轨四道护栏（digest / 预算恒等式 / 观察等价 / 语义 tripwire）。研究护栏与 fitness 默认仍为 no-op seam、不进默认装配；对象运行时的 IPC/WS/SQLite/rollout 按设计不实现。证据：`packages/components/loader/src/hmr.spec.ts`、`packages/framework/src/objects/`、`packages/agent/src/plugins/mcp/`、`packages/components/security/src/audit.socket.spec.ts`、`packages/agent/src/research/guardrails.spec.ts`。
-- ⏳ 当前差距与下一批处置见执行文档（不在版本库内）；交付节奏与验收判据以 [delivery/roadmap.md](./delivery/roadmap.md) 为准。
+- ✅ 阶段 0-6 的组件级最小能力已存在并通过 849 个测试：HMR 状态机与 unit 快照、对象运行时进程内最小集、MCP 最小插件、显式 socket 审计、framework 事件 realm 隔离、研究轨四道可选护栏。
+- ⏳ 默认装配、公共 API、真实 HMR、完整 MCP、持久会话、ExecutionBackend、多租户 facade、跨进程对象、daemon/remote 与研究轨尚未端到端验收；现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，完整建设路线以执行文档为准。

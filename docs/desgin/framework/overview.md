@@ -11,7 +11,7 @@
 
 ## 1 定位与设计目标
 
-`@zeta-agent/framework` 是**通用框架**：它由 **6 个内部组件子包**拼装而成（`components/cordis`、`events`、`capabilities`、`loader`、`observability`、`security`，见 [§2](#2-包结构与导出)），对外暴露封装好的 facade API。Cordis 论文复刻只是其中**一个组件**（`components/cordis/`，提供 effect/coeffect/fiber 语义），**不是框架全部**——这是与早期草案的关键区别。scope/seam/registry/health 职责并入 `capabilities`，HMR 并入 `loader`，observability/security 分别提供观测与安全能力；store/link/objects 等数据/跨进程组件暂未实现（YAGNI）。S12 的 `vendor/cordis/src/*` 是 `cordis` 组件的一手复刻蓝本；其 `packages/boot/*` 等是通用框架其他组件的蓝本。
+`@zeta-agent/framework` 是**通用框架**：它由 **6 个内部组件子包**拼装而成（`components/cordis`、`events`、`capabilities`、`loader`、`observability`、`security`，见 [§2](#2-包结构与导出)），对外暴露封装好的 facade API。Cordis 论文复刻只是其中**一个组件**（`components/cordis/`，提供 effect/coeffect/fiber 语义），**不是框架全部**——这是与早期草案的关键区别。scope/seam/registry/health 职责并入 `capabilities`，HMR 并入 `loader`，observability/security 分别提供观测与安全能力；`@zeta-agent/framework/objects` 已提供 contract/document/store/link/delta 的进程内最小实现，host/facet/Reference、IPC/WS、SQLite、group commit、outbox、jobs/derive/rollout 属于完整对象运行时的后续阶段。S12 的 `vendor/cordis/src/*` 是 `cordis` 组件的一手复刻蓝本；其 `packages/boot/*` 等是通用框架其他组件的蓝本。
 
 > **依赖边界（重要）**：本组件是对论文的**自行实现**，**不引入任何上游 Cordis 包**（`cordis`、`@cordisjs/*`、`@deepseek-ai/cordis` 均不进依赖树）。`@zeta-agent/cordis`（及 C 方案下的 `packages/components/cordis/`）只是我们对该组件的命名；S12 源码仅作只读蓝本，不进入构建产物。本文出现的 `@cordisjs/group`、`@cordisjs/include`、`@cordisjs/hmr` 等名称均出自[01 论文精读](../research/cordis-paper-theory.md)对上游 Cordis 的描述，**不是我们的依赖**，对应的实现由我们的 `components/loader`（HMR 已并入）以自研方式提供。
 
@@ -60,11 +60,11 @@ packages/
   ".": "./src/index.ts",
   "./package.json": "./package.json",
   "./types": "./src/types.ts"
-  // 仅声明源码真实存在的子路径；不存在的 group/include/objects/store/testing 草案路径不声明
+  // 仅声明源码真实存在的子路径；objects 已存在，group/include/store/testing 草案路径不声明
 }
 ```
 
-> **实现状态（2026-11-20 更新）**：facade 包已落地 `exports`（含 `.` / `./package.json` / 实际存在的子路径，见各包 `package.json`，由 `scripts/check-facade-exports.mjs` 校验）。早期草案里的 `./group` / `./include` / `./objects` / `./store` / `./testing` 在源码中无对应稳定入口文件，按"不声明不存在的 path"裁剪；需要时先补入口文件再声明。子路径只再导出 facade 稳定契约，不暴露组件内部实现；`scripts/guard-architecture.mjs` 同时校验"应用不得 import `components/**` 内部实现"与"业务组件不得直接 import `@opentui/solid`"，已纳入 `bun run check`。聚合包 `@zeta-agent/components` / `@zeta-agent/agent-components` 已从空壳填为真实聚合出口。
+> **实现状态（2026-11-20 更新）**：facade 包已落地 `exports`（含 `.` / `./package.json` / 实际存在的子路径，见各包 `package.json`，由 `scripts/check-facade-exports.mjs` 校验）。早期草案里的 `./group` / `./include` / `./store` / `./testing` 在源码中无对应稳定入口文件，按“不声明不存在的 path”裁剪；`./objects` 已有稳定入口并对外导出。子路径只再导出 facade 稳定契约，不暴露组件内部实现；`scripts/guard-architecture.mjs` 同时校验"应用不得 import `components/**` 内部实现"与"业务组件不得直接 import `@opentui/solid`"，已纳入 `bun run check`。聚合包 `@zeta-agent/components` / `@zeta-agent/agent-components` 已从空壳填为真实聚合出口。
 
 
 ## 文档关系
