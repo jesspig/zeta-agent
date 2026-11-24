@@ -33,10 +33,47 @@ export interface ToolExecutionUpdate {
   readonly partialResult: unknown;
 }
 
+/** 完整 JSON Schema 的最小对象形状；旧的字符串 allowlist 仍被接受。 */
+export interface JsonSchemaProperty {
+  readonly type: "string" | "number" | "boolean" | "object" | "array";
+  readonly items?: JsonSchemaProperty;
+}
+
+export interface JsonSchemaObject {
+  readonly type?: "object";
+  readonly properties?: Readonly<Record<string, JsonSchemaProperty>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties?: boolean;
+}
+
+export type ToolInputSchema = readonly string[] | JsonSchemaObject;
+
+export interface ToolRetryPolicy {
+  readonly maxAttempts: number;
+  readonly delayMs?: number;
+}
+
+export interface ToolBudgets {
+  readonly maxOutputChars?: number;
+  readonly maxToolCalls?: number;
+  readonly maxTurns?: number;
+}
+
+/** finalize 完成后、发布最终结果之前调用；返回的 promise 即 cleanup acknowledgement。 */
+export interface ToolCleanupContext {
+  readonly callId: string;
+  readonly tool: string;
+  readonly output: unknown;
+}
+
+export type ToolCompletionSink = (result: ToolResult) => void | Promise<void>;
+
 /** 统一结果形状：流水线字段与 loop 消息字段共存，旧消费者各取所需。 */
 export interface ToolResult {
   readonly callId: string;
   readonly tool?: string;
+  /** start/update/end 事件共用；finalize 把调用参数原样带回。 */
+  readonly args?: unknown;
   readonly output?: unknown;
   readonly message?: AgentMessage;
   readonly isError?: boolean;

@@ -38,7 +38,7 @@ export type AgentEvent =
   | { readonly type: "message_end"; readonly message: AgentMessage }
   | { readonly type: "tool_execution_start"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown }
   | { readonly type: "tool_execution_update"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly partialResult: unknown }
-  | { readonly type: "tool_execution_end"; readonly toolCallId: string; readonly toolName: string; readonly result: unknown; readonly isError: boolean; readonly durationMs?: number };
+  | { readonly type: "tool_execution_end"; readonly toolCallId: string; readonly toolName: string; readonly args?: unknown; readonly result: unknown; readonly isError: boolean; readonly durationMs?: number };
 
 export const AGENT_EVENT_TYPES = [
   "agent_start",

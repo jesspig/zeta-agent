@@ -11,11 +11,14 @@ import type {
 import { nextAction } from "./decision";
 import type { Inbox, InboxMessage } from "./inbox";
 import type { ToolPipeline } from "../tools/pipeline";
+import { shouldTerminateToolBatch } from "../tools/pipeline";
 import type {
   LoopToolCall,
   LoopToolResult,
+  ToolCompletionSink,
   ToolDeclarationDelta,
   ToolExecutionUpdate,
+  ToolResult as UnifiedToolResult,
 } from "../tools/types";
 
 export type { ToolExecutionUpdate } from "../tools/types";
@@ -67,6 +70,8 @@ export interface LoopRuntime {
   pollFollowUp?(signal?: AbortSignal): readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
   /** 兼容开关：文本工具标记由上层可选解析，统一管线本身不依赖该协议。 */
   readonly allowTextToolMarkers?: boolean;
+  /** 单次 run 允许的 provider 回合上限；超出后不发下一轮请求。 */
+  readonly turnBudget?: number;
   /** 仅测试可见：按进入顺序记录 11 步流水线阶段，用于校验真实执行顺序。 */
   onStep?(step: string): void;
 }
@@ -124,6 +129,7 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
   let ended = false;
   let enterInner = true;
   let hasMoreToolCalls = false;
+  let turnCount = 0;
   let pending: readonly InboxMessage[] = inbox.poll("nextTurn");
 
   const emit = async (event: AgentEvent): Promise<void> => {
@@ -164,6 +170,12 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
         await emit({ type: "message_end", message: item.body });
       }
       pending = [];
+
+      turnCount += 1;
+      if (runtime.turnBudget !== undefined && turnCount > runtime.turnBudget) {
+        await emitAgentEnd();
+        return runtime.getState();
+      }
 
       runtime.onStep?.("prepareRequest");
       const request = await runtime.prepareRequest?.({ messages: runtime.getState().messages }, signal)
@@ -213,34 +225,67 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
             isError: true,
           }));
         } else if (runtime.toolPipeline !== undefined) {
-          const pipelineResults = await runtime.toolPipeline.executeBatch(toolCalls, signal);
+          const callsById = new Map(toolCalls.map((call) => [call.id, call]));
+          for (const call of toolCalls) {
+            await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
+          }
+          // completion sink 在每个 finalize/cleanup 完成后立即发事件：end 顺序即完成顺序。
+          const sink: ToolCompletionSink = async (result) => {
+            const call = callsById.get(result.callId);
+            const name = result.tool ?? call?.name ?? "";
+            const args = result.args ?? call?.args ?? {};
+            for (const update of result.updates ?? []) {
+              await emit({
+                type: "tool_execution_update",
+                toolCallId: result.callId,
+                toolName: name,
+                args,
+                partialResult: update.partialResult,
+              });
+            }
+            await emit({
+              type: "tool_execution_end",
+              toolCallId: result.callId,
+              toolName: name,
+              args,
+              result: result.message?.content ?? result.output,
+              isError: result.isError ?? false,
+              ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+            });
+          };
+          const pipelineResults = await runtime.toolPipeline.executeBatch(toolCalls, signal, sink);
           results = pipelineResults.map((result) => result as ToolResult);
         } else if (runtime.executeToolCalls !== undefined) {
           results = await runtime.executeToolCalls(toolCalls, signal);
         }
-        for (const call of toolCalls) {
-          await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
-        }
-        for (const result of results) {
-          for (const update of result.updates ?? []) {
+        // 兼容路径没有 completion sink：整批返回后按结果数组顺序补发事件。
+        if (response.stopReason === "length" || runtime.toolPipeline === undefined) {
+          for (const call of toolCalls) {
+            await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
+          }
+          for (const result of results) {
+            for (const update of result.updates ?? []) {
+              await emit({
+                type: "tool_execution_update",
+                toolCallId: result.callId,
+                toolName: result.tool ?? "",
+                args: {},
+                partialResult: update.partialResult,
+              });
+            }
             await emit({
-              type: "tool_execution_update",
+              type: "tool_execution_end",
               toolCallId: result.callId,
               toolName: result.tool ?? "",
-              args: {},
-              partialResult: update.partialResult,
+              result: result.message.content,
+              isError: result.isError ?? false,
+              ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
             });
           }
-          await emit({
-            type: "tool_execution_end",
-            toolCallId: result.callId,
-            toolName: result.tool ?? "",
-            result: result.message.content,
-            isError: result.isError ?? false,
-            ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
-          });
         }
       }
+      const terminating =
+        results.length > 0 && shouldTerminateToolBatch(results as readonly UnifiedToolResult[]);
 
       runtime.onStep?.("appendToolResultsAndFinishTurn");
       const resultByCallId = new Map(results.map((result) => [result.callId, result]));
@@ -255,7 +300,8 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
         await emit({ type: "message_end", message });
       }
       const turn: LastTurn = { message: response.message, toolResults: toolResultMessages };
-      const action = await resolveAction(runtime, turn, toolCalls.length, signal);
+      // 全 terminate：保留本批真实结果，但不再发起下一轮 provider 调用。
+      const action = terminating ? "end" : await resolveAction(runtime, turn, toolCalls.length, signal);
       await emit({ type: "turn_end", message: response.message, toolResults: toolResultMessages });
       lastTurn = turn;
 

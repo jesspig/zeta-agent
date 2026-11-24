@@ -27,8 +27,8 @@ import {
   type LoopDecision,
   type LoopRuntime,
   type ToolCall,
-  type ToolResult,
 } from "./loop";
+import { createToolPipeline, createToolRegistry } from "../tools/pipeline";
 
 const ACTIVE_CAPABILITIES: Capabilities = Object.freeze({
   isolation: "active",
@@ -78,6 +78,8 @@ export interface CoreAgentOptions {
   readonly pipeline?: Partial<PluginPipelineConfig>;
   readonly pluginManager?: AgentPluginManager;
   readonly loopHooks?: CoreLoopHooks;
+  /** 单次 run 的 provider 回合上限。 */
+  readonly turnBudget?: number;
 }
 
 export interface CorePluginApi extends AgentPluginApi {
@@ -86,11 +88,11 @@ export interface CorePluginApi extends AgentPluginApi {
 
 const END_DECISION: LoopDecision = Object.freeze({ action: "end" });
 
-type CoreTool = { readonly name: string; readonly execute: (input: never, signal?: AbortSignal) => unknown };
-
-function runTool(tool: CoreTool, args: unknown, signal?: AbortSignal): unknown {
-  return (tool.execute as (input: unknown, signal?: AbortSignal) => unknown)(args, signal);
-}
+type CoreTool = {
+  readonly name: string;
+  readonly execute: (input: never, signal?: AbortSignal) => unknown;
+  readonly executionMode?: "sequential" | "parallel";
+};
 
 interface RunLease {
   readonly generation: number;
@@ -112,6 +114,7 @@ export class Agent {
   private readonly addRedactorFn: (rule: RedactRule) => Disposer;
   private readonly systemPrompt: string | (() => string) | undefined;
   private readonly loopHooks: CoreLoopHooks;
+  private readonly turnBudget: number | undefined;
   private readonly inbox: Inbox = createInbox();
 
   private abortedValue = false;
@@ -134,6 +137,7 @@ export class Agent {
     this.addRedactorFn = options.addRedactor ?? (() => () => {});
     this.systemPrompt = options.systemPrompt;
     this.loopHooks = options.loopHooks ?? {};
+    this.turnBudget = options.turnBudget;
 
     for (const tool of options.tools ?? []) this.tools.set(tool.name, tool);
 
@@ -302,9 +306,22 @@ export class Agent {
     await this.manager.run("steering", inbox, signal);
     await this.manager.run("followUp", inbox, signal);
 
+    const registry = createToolRegistry();
+    for (const [name, tool] of this.tools) {
+      registry.registerTool({
+        name,
+        // 核心工具不声明参数 schema：允许任意键，类型与业务校验由工具自身负责。
+        inputSchema: { type: "object", properties: {}, additionalProperties: true },
+        executionMode: tool.executionMode,
+        execute: (input, exec) =>
+          (tool.execute as (value: unknown, signal?: AbortSignal) => unknown)(input, exec.signal),
+      });
+    }
+
     const runtime: LoopRuntime = {
       inbox,
       signal,
+      turnBudget: this.turnBudget,
       emit: (event) => this.stream.emit(event, signal),
       getState: () => this.stream.getState(),
       prepareNextTurn: async () => {
@@ -335,7 +352,11 @@ export class Agent {
         return await this.loopHooks.pollFollowUp?.(signal) ?? followUps;
       },
       streamAssistant: async (request): Promise<AssistantResult> => this.streamAssistant(request, signal),
-      executeToolCalls: async (calls) => this.executeToolCalls(calls, signal),
+      toolPipeline: createToolPipeline({
+        registry,
+        manager: this.manager,
+        signal: lease.controller.signal,
+      }),
     };
 
     try {
@@ -406,46 +427,6 @@ export class Agent {
     };
   }
 
-  private async executeToolCalls(calls: readonly ToolCall[], signal: AbortSignal): Promise<readonly ToolResult[]> {
-    const results: ToolResult[] = [];
-    for (const [index, call] of calls.entries()) {
-      const execute = this.tools.get(call.name);
-      let output: unknown = "TOOL_NOT_FOUND";
-      let isError = execute === undefined;
-      if (execute !== undefined && !signal.aborted) {
-        try {
-          await this.manager.run("beforeToolCall", {
-            type: "tool_execution_start",
-            toolCallId: call.id,
-            toolName: call.name,
-            args: call.args,
-          }, signal);
-          if (signal.aborted) throw new Error("ABORTED");
-          output = await runTool(execute, call.args, signal);
-          await this.manager.run("afterToolCall", {
-            type: "tool_execution_end",
-            toolCallId: call.id,
-            toolName: call.name,
-            result: output,
-            isError: false,
-          }, signal);
-        } catch (error) {
-          isError = true;
-          output = { ok: false, error: error instanceof Error ? error.message : String(error) };
-        }
-      } else if (signal.aborted) {
-        isError = true;
-        output = "ABORTED";
-      }
-      const id = call.id || `call-${index + 1}`;
-      results.push({
-        callId: id,
-        message: { role: "toolResult", content: output, toolCallId: id, toolName: call.name },
-        isError,
-      });
-    }
-    return results;
-  }
 }
 
 function isStopReason(value: unknown): value is AssistantResult["stopReason"] {

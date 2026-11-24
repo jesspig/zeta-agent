@@ -110,12 +110,18 @@ export class AgentPluginManager {
    * 运行命名链。配置关闭时只走 legacy 字段赋值；
    * 开启时若 hook 抛错且允许回退，仍以 legacy 赋值兜底。
    */
-  async run<I>(chainName: string, input: I, signal?: AbortSignal): Promise<I> {
+  async run<I>(
+    chainName: string,
+    input: I,
+    signal?: AbortSignal,
+    options?: { readonly failClosed?: boolean }
+  ): Promise<I> {
     if (!this.configValue.enabled) return this.runLegacy(chainName, input);
     try {
       return await this.chain<I>(chainName).run(input, signal);
     } catch (error) {
-      if (!this.configValue.fallbackToLegacy) throw error;
+      // 工具流水线要求 fail-closed：hook 抛错时不得回退 legacy 赋值后放行。
+      if (options?.failClosed === true || !this.configValue.fallbackToLegacy) throw error;
       return this.runLegacy(chainName, input);
     }
   }

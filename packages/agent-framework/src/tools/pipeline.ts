@@ -6,13 +6,20 @@ import {
   shouldTerminateToolBatch,
   toolInput,
   toolName,
+  type JsonSchemaObject,
+  type JsonSchemaProperty,
   type PipelineToolCall,
   type PipelineToolResult,
+  type ToolBudgets,
   type ToolCall as UnifiedToolCall,
+  type ToolCleanupContext,
+  type ToolCompletionSink,
+  type ToolInputSchema,
   type ToolResult as UnifiedToolResult,
   type ToolDeclarationDelta,
   type ToolExecutionConfig,
   type ToolExecutionMode,
+  type ToolRetryPolicy,
 } from "./types";
 
 export type { ToolExecutionMode, ToolExecutionConfig, ToolDeclarationDelta } from "./types";
@@ -78,8 +85,9 @@ export interface ToolExecuteContext {
 
 export interface ToolDescriptor {
   readonly name: string;
-  readonly inputSchema: readonly string[];
-  readonly outputSchema: readonly string[];
+  readonly inputSchema: ToolInputSchema;
+  /** 省略时不做输出字段约束（应用层工具的返回值形状由自身契约负责）。 */
+  readonly outputSchema?: readonly string[];
   readonly execute: (
     input: Readonly<Record<string, unknown>>,
     exec: ToolExecuteContext
@@ -87,6 +95,10 @@ export interface ToolDescriptor {
   /** 兼容 shim：在校验前把原始参数投影为工具期望的形状。 */
   readonly prepareArguments?: (args: unknown) => unknown | Promise<unknown>;
   readonly executionMode?: ToolExecutionMode;
+  readonly timeoutMs?: number;
+  readonly retry?: ToolRetryPolicy;
+  /** 返回 promise 即视为 acknowledgement；ack 之前不发布事件。 */
+  readonly cleanup?: (context: ToolCleanupContext) => void | Promise<void>;
 }
 
 export interface ToolRegistry {
@@ -190,7 +202,16 @@ export type AfterToolCallHook = (
 
 /** T-02 插件管理器满足该结构，工具流水线不直接依赖具体实现。 */
 export interface ToolHookRunner {
-  run<I>(chain: string, input: I, signal?: AbortSignal): Promise<I>;
+  run<I>(
+    chain: string,
+    input: I,
+    signal?: AbortSignal,
+    options?: { readonly failClosed?: boolean }
+  ): Promise<I>;
+}
+
+export interface ToolPublisher {
+  (result: ToolResult): ToolResult | Promise<ToolResult>;
 }
 
 export interface BatchContext {
@@ -207,15 +228,59 @@ export interface BatchContext {
   readonly beforeToolCall?: BeforeToolCallHook | readonly BeforeToolCallHook[];
   readonly afterToolCall?: AfterToolCallHook | readonly AfterToolCallHook[];
   readonly signal?: AbortSignal;
+  /** finalize（含 cleanup）完成后按完成顺序调用；loop 据此实时发 end 事件。 */
+  readonly completionSink?: ToolCompletionSink;
+  /** 发布前的最后变换点（facade 在此提交 durable effects 并回填真实结果）。 */
+  readonly publisher?: ToolPublisher;
+  /** 每次调用的缺省超时；工具自身的 timeoutMs 优先。 */
+  readonly timeoutMs?: number;
+  readonly budgets?: ToolBudgets;
+}
+
+function valueMatchesSchema(value: unknown, property: JsonSchemaProperty): boolean {
+  switch (property.type) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number";
+    case "boolean":
+      return typeof value === "boolean";
+    case "object":
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "array":
+      return Array.isArray(value) &&
+        (property.items === undefined || value.every((item) => valueMatchesSchema(item, property.items!)));
+    default:
+      return false;
+  }
 }
 
 export function validateInput(tool: ToolDescriptor, input: unknown): void {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new Error("TOOL_INPUT_NOT_OBJECT");
   }
-  const allowed = new Set(tool.inputSchema);
-  for (const key of Object.keys(input as Record<string, unknown>)) {
-    if (!allowed.has(key)) throw new Error(`TOOL_INPUT_EXTRA_FIELD: ${key}`);
+  const record = input as Record<string, unknown>;
+  const schema = tool.inputSchema;
+  if (Array.isArray(schema)) {
+    const allowed = new Set(schema);
+    for (const key of Object.keys(record)) {
+      if (!allowed.has(key)) throw new Error(`TOOL_INPUT_EXTRA_FIELD: ${key}`);
+    }
+    return;
+  }
+  const objectSchema = schema as JsonSchemaObject;
+  const properties = objectSchema.properties ?? {};
+  const allowExtra = objectSchema.additionalProperties !== false;
+  for (const key of Object.keys(record)) {
+    const property = properties[key];
+    if (property === undefined) {
+      if (!allowExtra) throw new Error(`TOOL_INPUT_EXTRA_FIELD: ${key}`);
+      continue;
+    }
+    if (!valueMatchesSchema(record[key], property)) throw new Error(`TOOL_INPUT_TYPE: ${key}`);
+  }
+  for (const key of objectSchema.required ?? []) {
+    if (!(key in record)) throw new Error(`TOOL_INPUT_REQUIRED: ${key}`);
   }
 }
 
@@ -224,10 +289,12 @@ function errorMessage(error: unknown): string {
 }
 
 function errorResult(call: ToolCall, reason: string, startedAt: number, endedAt: number): ToolResult {
-  const output = { error: reason };
+  // 字符串输出让 String(content) 仍能读到原因，兼容旧调用方的文本断言。
+  const output = reason;
   return {
     callId: call.id,
     tool: toolName(call),
+    args: toolInput(call),
     output,
     isError: true,
     durationMs: Math.max(0, endedAt - startedAt),
@@ -298,7 +365,7 @@ async function runBeforeHooks(
       toolCallId: input.call.id,
       toolName: input.tool,
     };
-    const value = await ctx.manager.run<unknown>("beforeToolCall", eventLike, signal);
+    const value = await ctx.manager.run<unknown>("beforeToolCall", eventLike, signal, { failClosed: true });
     merged = { ...merged, ...pickBefore(value) };
   }
   for (const hook of toArray(ctx.beforeToolCall)) {
@@ -323,7 +390,7 @@ async function runAfterHooks(
       result: input.output,
       isError: input.isError,
     };
-    const value = await ctx.manager.run<unknown>("afterToolCall", eventLike, signal);
+    const value = await ctx.manager.run<unknown>("afterToolCall", eventLike, signal, { failClosed: true });
     merged = { ...merged, ...pickAfter(value) };
   }
   for (const hook of toArray(ctx.afterToolCall)) {
@@ -378,8 +445,8 @@ export async function prepareToolCall(
   try {
     let raw: unknown = toolInput(normalized);
     if (tool.prepareArguments !== undefined) raw = await tool.prepareArguments(raw);
-    const args = normalizeToolArgs(raw);
-    validateInput(tool, args);
+    const preparedArgs = normalizeToolArgs(raw);
+    validateInput(tool, preparedArgs);
 
     const guard = ctx.guard ?? createPermissionGuard();
     const verdict = guard.evaluate(ctx.verdicts ?? [], { bypass: ctx.bypass ?? false });
@@ -390,16 +457,19 @@ export async function prepareToolCall(
       return errorResult(normalized, `TOOL_PERMISSION_ASK: ${verdict.reason ?? "confirmation required"}`, clock(), clock());
     }
 
-    const before = await runBeforeHooks({ call: normalized, tool: tool.name, args }, ctx, ctx.signal);
+    const before = await runBeforeHooks({ call: normalized, tool: tool.name, args: preparedArgs }, ctx, ctx.signal);
     if (before.block === true) {
       const reason = `TOOL_BLOCKED_BY_HOOK: ${before.reason ?? "blocked"}`;
       return { ...errorResult(normalized, reason, clock(), clock()), terminate: before.terminate === true };
     }
+    // hook 改写参数后必须重新校验，否则 before 阶段能注入未声明字段。
+    const args = before.args ?? preparedArgs;
+    validateInput(tool, args);
     return {
       kind: "prepared",
       call: normalized,
       tool,
-      args: before.args ?? args,
+      args,
       terminate: before.terminate === true,
     };
   } catch (error) {
@@ -407,7 +477,7 @@ export async function prepareToolCall(
   }
 }
 
-/** execute 阶段：计时只包 execute()；onUpdate 的 promise 在 settle 后统一 await，迟到更新丢弃。 */
+/** execute 阶段：计时只包 execute()；retry/timeout 归一化为错误结果；onUpdate 迟到丢弃。 */
 export async function executePreparedToolCall(
   prepared: PreparedToolCall,
   ctx: BatchContext
@@ -447,93 +517,107 @@ export async function executePreparedToolCall(
   const startedAt = clock();
   let output: unknown;
   let endedAt = startedAt;
-  let executeSettled = false;
   let executionError: unknown;
-  try {
-    const returned = prepared.tool.execute(prepared.args, exec);
-    if (
-      returned !== null &&
-      typeof returned === "object" &&
-      typeof (returned as PromiseLike<unknown>).then === "function"
-    ) {
-      output = await new Promise<unknown>((resolve, reject) => {
-        Promise.resolve(returned).then(
-          (value) => {
-            endedAt = clock();
-            executeSettled = true;
-            resolve(value);
-          },
-          (error) => {
-            endedAt = clock();
-            executeSettled = true;
-            reject(error);
-          }
-        );
-      });
-    } else {
-      // 同步返回时立刻停表，后续 onUpdate 的 promise 等待不计入 durationMs。
-      endedAt = clock();
-      executeSettled = true;
-      output = returned;
+  const timeoutMs = prepared.tool.timeoutMs ?? ctx.timeoutMs;
+  const maxAttempts = Math.max(1, prepared.tool.retry?.maxAttempts ?? 1);
+  const retryDelay = Math.max(0, prepared.tool.retry?.delayMs ?? 0);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let attemptSettled = false;
+    try {
+      const returned = prepared.tool.execute(prepared.args, exec);
+      if (
+        returned !== null &&
+        typeof returned === "object" &&
+        typeof (returned as PromiseLike<unknown>).then === "function"
+      ) {
+        output = await new Promise<unknown>((resolve, reject) => {
+          const timer =
+            timeoutMs === undefined ? undefined : setTimeout(() => reject(new Error("TOOL_TIMEOUT")), timeoutMs);
+          Promise.resolve(returned).then(
+            (value) => {
+              if (timer !== undefined) clearTimeout(timer);
+              endedAt = clock();
+              attemptSettled = true;
+              resolve(value);
+            },
+            (error) => {
+              if (timer !== undefined) clearTimeout(timer);
+              endedAt = clock();
+              attemptSettled = true;
+              reject(error);
+            }
+          );
+        });
+      } else {
+        // 同步返回时立刻停表，后续 onUpdate 的 promise 等待不计入 durationMs。
+        endedAt = clock();
+        attemptSettled = true;
+        output = returned;
+      }
+      executionError = undefined;
+      break;
+    } catch (error) {
+      executionError = error;
+      if (!attemptSettled) endedAt = clock();
+      if (attempt < maxAttempts && retryDelay > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelay));
+      }
     }
-  } catch (error) {
-    executionError = error;
-    if (!executeSettled) endedAt = clock();
   }
   settled = true;
   await Promise.allSettled(pending);
   const durationMs = Math.max(0, endedAt - startedAt);
   const terminate = prepared.terminate || terminateRequested;
+  const failure = (reason: string): ExecutedToolCall => ({
+    kind: "executed",
+    prepared,
+    output: { error: reason },
+    durationMs,
+    isError: true,
+    reason,
+    terminate,
+    updates,
+  });
 
   if (executionError !== undefined) {
-    const reason = `TOOL_EXECUTION_ERROR: ${errorMessage(executionError)}`;
-    return {
-      kind: "executed",
-      prepared,
-      output: { error: reason },
-      durationMs,
-      isError: true,
-      reason,
-      terminate,
-      updates,
-    };
+    return failure(`TOOL_EXECUTION_ERROR: ${errorMessage(executionError)}`);
   }
-  if (output === undefined || output === null) {
-    return {
-      kind: "executed",
-      prepared,
-      output: { error: "TOOL_OUTPUT_MISSING" },
-      durationMs,
-      isError: true,
-      reason: "TOOL_OUTPUT_MISSING",
-      terminate,
-      updates,
-    };
-  }
-  if (typeof output === "object") {
-    const extra = Object.keys(output as Record<string, unknown>).find(
-      (key) => !prepared.tool.outputSchema.includes(key)
-    );
-    if (extra !== undefined) {
-      const reason = `TOOL_OUTPUT_EXTRA_FIELD: ${extra}`;
-      return {
-        kind: "executed",
-        prepared,
-        output: { error: reason },
-        durationMs,
-        isError: true,
-        reason,
-        terminate,
-        updates,
-      };
+  if (output === undefined || output === null) return failure("TOOL_OUTPUT_MISSING");
+
+  const maxOutputChars = ctx.budgets?.maxOutputChars;
+  if (maxOutputChars !== undefined) {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(output);
+    } catch {
+      serialized = String(output);
     }
+    if (serialized.length > maxOutputChars) return failure("TOOL_OUTPUT_BUDGET_EXCEEDED");
+  }
+  const outputSchema = prepared.tool.outputSchema;
+  if (outputSchema !== undefined && typeof output === "object" && output !== null) {
+    const extra = Object.keys(output as Record<string, unknown>).find((key) => !outputSchema.includes(key));
+    if (extra !== undefined) return failure(`TOOL_OUTPUT_EXTRA_FIELD: ${extra}`);
   }
 
+  const failedOutput =
+    typeof output === "object" && output !== null && (output as { ok?: unknown }).ok === false;
   const structuredContent =
     typeof output === "object" && output !== null
       ? (output as Record<string, unknown>).structuredContent
       : undefined;
-  return { kind: "executed", prepared, output, durationMs, isError: false, terminate, structuredContent, updates };
+  return {
+    kind: "executed",
+    prepared,
+    output,
+    durationMs,
+    isError: failedOutput,
+    ...(failedOutput ? { reason: "TOOL_OUTPUT_ERROR" } : {}),
+    terminate,
+    structuredContent,
+    updates,
+  };
 }
 
 /** finalize 阶段：afterToolCall 按字段覆盖 → structuredContent 规则 → toolResult 消息。 */
@@ -570,6 +654,7 @@ export async function finalizeExecutedToolCall(
   const result: ToolResult = {
     callId: executed.prepared.call.id,
     tool: toolName(executed.prepared.call),
+    args: toolInput(executed.prepared.call),
     output,
     isError: after.isError ?? executed.isError,
     durationMs: executed.durationMs,
@@ -580,7 +665,32 @@ export async function finalizeExecutedToolCall(
     usage: after.usage,
     updates: executed.updates,
   };
+  const cleanup = executed.prepared.tool.cleanup;
+  if (cleanup !== undefined) {
+    try {
+      await cleanup({ callId: result.callId, tool: result.tool ?? "", output });
+    } catch (error) {
+      const reason = `TOOL_CLEANUP_FAILED: ${errorMessage(error)}`;
+      return createToolResultMessage(executed.prepared.call, {
+        ...errorResult(executed.prepared.call, reason, 0, executed.durationMs),
+        terminate: executed.terminate,
+        updates: executed.updates,
+      }) as ToolResult;
+    }
+  }
   return createToolResultMessage(executed.prepared.call, result) as ToolResult;
+}
+
+/** 发布：先经过 publisher（facade 的 durable commit 回填），再按完成顺序通知 sink。 */
+export async function publishResult(result: ToolResult, ctx: BatchContext): Promise<ToolResult> {
+  try {
+    const published = ctx.publisher === undefined ? result : await ctx.publisher(result);
+    if (ctx.completionSink !== undefined) await ctx.completionSink(published);
+    return published;
+  } catch (error) {
+    const reason = `TOOL_PUBLISH_ERROR: ${errorMessage(error)}`;
+    return { ...result, isError: true, reason, output: { error: reason } };
+  }
 }
 
 /** 三段管线的串行编排，供 executeBatch 与嵌套调用复用。 */
@@ -601,25 +711,40 @@ export function resolveToolExecutionMode(batch: readonly UnifiedToolCall[], ctx:
   return "parallel";
 }
 
-/** 兼容导出：默认并行；preflight 串行，执行并行，结果按源码顺序落盘。 */
+function budgetBlocked(call: UnifiedToolCall): ToolResult {
+  return errorResult(asPipelineCall(call), "TOOL_CALL_BUDGET_EXCEEDED", 0, 0);
+}
+
+/** 兼容导出：默认并行；preflight 串行，执行并行，完成即发布，结果按源码顺序落盘。 */
 export async function executeBatch(
   batch: readonly UnifiedToolCall[],
   ctx: BatchContext
 ): Promise<readonly ToolResult[]> {
   if (resolveToolExecutionMode(batch, ctx) === "sequential") {
     const results: ToolResult[] = [];
-    for (const call of batch) results.push(await executeCall(call, ctx));
+    for (const [index, call] of batch.entries()) {
+      const overBudget = ctx.budgets?.maxToolCalls !== undefined && index >= ctx.budgets.maxToolCalls;
+      const result = overBudget ? budgetBlocked(call) : await executeCall(call, ctx);
+      results.push(await publishResult(result, ctx));
+    }
     return results;
   }
 
   const prepared: Array<PreparedToolCall | ToolResult> = [];
-  for (const call of batch) prepared.push(await prepareToolCall(call, ctx));
+  for (const [index, call] of batch.entries()) {
+    if (ctx.budgets?.maxToolCalls !== undefined && index >= ctx.budgets.maxToolCalls) {
+      prepared.push(budgetBlocked(call));
+    } else {
+      prepared.push(await prepareToolCall(call, ctx));
+    }
+  }
   return Promise.all(
-    prepared.map(async (item) =>
-      isPreparedToolCall(item)
-        ? finalizeExecutedToolCall(await executePreparedToolCall(item, ctx), ctx)
-        : item
-    )
+    prepared.map(async (item) => {
+      const result = isPreparedToolCall(item)
+        ? await finalizeExecutedToolCall(await executePreparedToolCall(item, ctx), ctx)
+        : item;
+      return publishResult(result, ctx);
+    })
   );
 }
 
@@ -658,7 +783,11 @@ export interface ToolPipeline {
   executePreparedToolCall(prepared: PreparedToolCall): Promise<ExecutedToolCall>;
   finalizeExecutedToolCall(executed: ExecutedToolCall): Promise<ToolResult>;
   executeCall(call: UnifiedToolCall): Promise<ToolResult>;
-  executeBatch(batch: readonly UnifiedToolCall[], signal?: AbortSignal): Promise<readonly ToolResult[]>;
+  executeBatch(
+    batch: readonly UnifiedToolCall[],
+    signal?: AbortSignal,
+    completionSink?: ToolCompletionSink
+  ): Promise<readonly ToolResult[]>;
   runToolCall(call: UnifiedToolCall): Promise<ToolResult>;
   declareToolChanges(previous: readonly string[], next: readonly string[], systemPrompt?: string): ToolDeclarationDelta;
   shouldTerminate(results: readonly UnifiedToolResult[]): boolean;
@@ -672,7 +801,12 @@ export function createToolPipeline(ctx: BatchContext): ToolPipeline {
     executePreparedToolCall: (prepared) => executePreparedToolCall(prepared, ctx),
     finalizeExecutedToolCall: (executed) => finalizeExecutedToolCall(executed, ctx),
     executeCall: (call) => executeCall(call, ctx),
-    executeBatch: (batch, signal) => executeBatch(batch, signal === undefined ? ctx : { ...ctx, signal }),
+    executeBatch: (batch, signal, completionSink) =>
+      executeBatch(batch, {
+        ...ctx,
+        ...(signal === undefined ? {} : { signal }),
+        ...(completionSink === undefined ? {} : { completionSink }),
+      }),
     runToolCall: (call) => runToolCall(call, ctx),
     declareToolChanges,
     shouldTerminate: shouldTerminateToolBatch,

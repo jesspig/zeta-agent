@@ -201,7 +201,9 @@ describe("T-17 conditional parallel, terminate and late updates", () => {
     });
     expect(executed).toEqual(["a", "b"]);
     expect(controller.terminated).toBe(true);
-    expect(results[1]?.reason).toContain("BATCH_TERMINATED");
+    // T-08：终止只阻止后续批次/LLM，本批真实结果必须原样保留。
+    expect(results[1]?.output).toEqual({ ok: true });
+    expect(results[1]?.terminate).toBe(true);
   });
 
   test("late onUpdate callbacks are dropped after the batch settles", async () => {

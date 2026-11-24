@@ -34,8 +34,25 @@ import {
   type ToolCall,
   type ToolResult,
 } from "@zeta-agent/agent-framework";
+import {
+  createToolPipeline,
+  createToolRegistry,
+  type BeforeToolCallHook,
+  type AfterToolCallHook,
+  type ToolDescriptor,
+  type ToolPublisher,
+} from "@zeta-agent/agent-framework";
 import type { Disposer } from "@zeta-agent/framework";
 import type { PermissionGate } from "./plugins/permissions/guard";
+import {
+  createApprovalBroker,
+  type ApprovalChannel,
+  type ApprovalState,
+} from "./plugins/permissions/approval";
+import {
+  evaluatePermissionPolicy,
+  type PermissionPolicy,
+} from "./plugins/permissions/policy";
 import {
   createDurableEffects,
   type DurableEffects,
@@ -55,13 +72,16 @@ import {
 } from "@zeta-agent/observability";
 import {
   createEgressPolicy,
+  createLocalSafeBackend,
+  createProfileBackend,
   createSocketAuditSink,
-  createUnconnectedBackend,
   isCriticalLayerDegraded,
   isEgressAllowed,
+  resolveStructuredBackend,
   verifyAuditChain,
   type AuditRecord,
   type AuditSink,
+  type BackendProfile,
   type SocketAuditSink,
   type CredentialVault,
   type EgressPolicy,
@@ -69,6 +89,7 @@ import {
   type ExecutionBackend,
   type FinalizedState,
   type SecretBroker,
+  type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import { createProviderStreamFn } from "./providers/dispatch";
 
@@ -119,6 +140,7 @@ const DEFAULT_EMISSION_TOOLS: readonly string[] = Object.freeze([
 function builtinTools(options: {
   readonly securityBackend: ExecutionBackend;
   readonly allowedDirectories: readonly string[];
+  readonly structuredBackend?: StructuredExecutionBackend;
 }): ToolDefinition[] {
   return [...builtinToolDefinitions(options)];
 }
@@ -237,10 +259,14 @@ export interface AgentStreamRequest {
 
 export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<AgentStreamChunk>;
 
-function defaultSecurityBackend(): ExecutionBackend {
-  // 未接入真实隔离执行器：能力声明为 unsupported，能力探测即失败关闭。
-  // 不再把"未执行"伪装成 active 并报告成功。
-  return createUnconnectedBackend({ name: "facade-default-placeholder" });
+function defaultSecurityBackend(
+  allowedDirectories: readonly string[],
+  profile: BackendProfile
+): ExecutionBackend {
+  // local-safe 是真实的结构化文件边界；进程隔离层保持 unsupported 并失败关闭。
+  // 其他 profile 未接真实执行器时明确声明 unsupported/degraded，绝不伪装 active。
+  if (profile === "local-safe") return createLocalSafeBackend({ allowedDirectories });
+  return createProfileBackend(profile, { allowedDirectories });
 }
 
 function defaultLoggerOptions(): LoggerOptions {
@@ -336,6 +362,10 @@ export interface AgentOptions {
   readonly loopHooks?: CoreLoopHooks;
   readonly includeBuiltins?: boolean;
   readonly securityBackend?: ExecutionBackend;
+  /** 后端档位：local-safe（默认，真实结构化文件边界）或沙箱档位（未接线时失败关闭）。 */
+  readonly backendProfile?: BackendProfile;
+  /** 显式注入结构化后端；优先于 securityBackend 的兼容解析。 */
+  readonly structuredBackend?: StructuredExecutionBackend;
   readonly observability?: LoggerOptions;
   readonly effectBridge?: EffectBridge;
   readonly coreContext?: CoreContextLike;
@@ -385,6 +415,14 @@ export interface AgentOptions {
   readonly secretBroker?: SecretBroker;
   /** 可选审计链：仅注入时为拒绝/发射/工具执行写 AuditRecord。 */
   readonly auditSink?: AuditSink;
+  /** 权限策略 AST：与 gate 叠加，restrict 单调收紧，override 不可提升 bypass-immune 拒绝。 */
+  readonly permissionPolicy?: PermissionPolicy;
+  /** 四态审批通道；未注入时 ASK 保持 fail-closed（confirmChannel 作为兼容适配器）。 */
+  readonly approvalChannel?: ApprovalChannel;
+  /** 单次 run 的 provider 回合上限。 */
+  readonly turnBudget?: number;
+  /** 工具调用缺省超时（毫秒）；工具自身 timeoutMs 优先。 */
+  readonly toolTimeoutMs?: number;
   /**
    * 审计传输形态：默认 "memory" 保持零回归；"socket" 走进程外 daemon（仅含端点，不含密钥）。
    * 仅当未注入 auditSink 时生效。
@@ -444,11 +482,20 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
   const includeBuiltins = options.includeBuiltins !== false;
   const plugins = options.plugins ?? [];
-  const securityBackend = options.securityBackend ?? defaultSecurityBackend();
+  const allowedDirectories = options.allowedDirectories ?? [];
+  const backendProfile = options.backendProfile ?? "local-safe";
+  const securityBackend =
+    options.securityBackend ?? defaultSecurityBackend(allowedDirectories, backendProfile);
+  const structuredBackend =
+    options.structuredBackend ?? resolveStructuredBackend(securityBackend, allowedDirectories);
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
   const confirmChannel = options.confirmChannel;
-  const allowedDirectories = options.allowedDirectories ?? [];
+  const approvalBroker = createApprovalBroker(options.approvalChannel);
+  const permissionPolicy = options.permissionPolicy;
+  let approvalSeq = 0;
+  let runToolSeq = 0;
+  const nextApprovalId = (): string => `approval-${++approvalSeq}`;
   const emissionPolicy = options.emissionPolicy ?? "withhold";
   const baseEmissionTools = options.emissionTools ?? (emissionPolicy === "direct" ? [] : DEFAULT_EMISSION_TOOLS);
   const pluginEmissionRefs = new Map<string, number>();
@@ -456,11 +503,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const recomputeEmissionTools = (): void => {
     emissionTools = new Set([...baseEmissionTools, ...pluginEmissionRefs.keys()]);
   };
-  /** 默认发射工具的真实执行入口；每次 runTurn 重建工具表后立即刷新。 */
-  let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>, signal?: AbortSignal) => unknown | Promise<unknown>> = new Map();
   let activeSignal: AbortSignal | undefined;
-  // D6（延期）：框架 createToolPipeline 原语可用，facade 当前仅装配 declareToolChanges 声明 hook；
-  // 完整以 toolPipeline 替换 executeToolCalls 涉及权限/withhold/durable 逻辑耦合，按 O-03 裁决延期。
+  let activePipeline: ReturnType<typeof createToolPipeline> | undefined;
+  /** 发射工具在 commit 阶段经同一管线派发，此时不再重复 enqueue。 */
+  let dispatchingEmission = false;
   /** withhold 策略下总是创建默认效果：插件（如 MCP）可在装配后声明发射工具。 */
   const usesDefaultEffects = options.durableEffects === undefined && emissionPolicy !== "direct";
   const durableEffects = options.durableEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
@@ -491,14 +537,25 @@ export function createAgent(options: AgentOptions = {}): Agent {
         readonly tool: string;
         readonly args: Readonly<Record<string, unknown>>;
       };
-      const execute = activeToolRegistry.get(payload.tool);
-      if (execute === undefined) return { ok: false, error: `EMISSION_TOOL_NOT_FOUND: ${payload.tool}` };
+      if (activePipeline === undefined) return { ok: false, error: "TOOL_PIPELINE_UNAVAILABLE" };
       try {
         if (activeSignal?.aborted === true) throw new Error("ABORTED");
-        return await execute(payload.args, activeSignal);
+        // commit 阶段仍走统一管线（权限/审批/钩子/cleanup），但不再二次 enqueue。
+        dispatchingEmission = true;
+        const result = await activePipeline.runToolCall({
+          id: `emission:${payload.tool}:${intent.key}`,
+          tool: payload.tool,
+          input: payload.args,
+        });
+        if (result.isError === true) {
+          return { ok: false, error: String(result.reason ?? "EMISSION_FAILED") };
+        }
+        return result.output;
       } catch (error) {
         // 与基线 executeToolCalls 的 catch 一致：异常转成结构化失败结果，保持工具对外契约零回归。
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      } finally {
+        dispatchingEmission = false;
       }
     });
   }
@@ -519,6 +576,43 @@ export function createAgent(options: AgentOptions = {}): Agent {
     auditSink.append(record);
   }
 
+  /** ASK 决策统一走四态审批通道；confirmChannel 仅作为布尔兼容适配器。 */
+  async function resolveApproval(
+    stage: string,
+    tool: string,
+    args: Readonly<Record<string, unknown>>,
+    reason: string | undefined,
+    toolSignal: AbortSignal | undefined
+  ): Promise<{ readonly approved: boolean; readonly state: ApprovalState }> {
+    if (options.approvalChannel !== undefined) {
+      const decision = await approvalBroker.request(
+        {
+          requestId: nextApprovalId(),
+          stage,
+          tool,
+          args,
+          ...(reason !== undefined ? { reason } : {}),
+        },
+        toolSignal ?? activeSignal
+      );
+      return { approved: decision.allowed, state: decision.state };
+    }
+    if (confirmChannel !== undefined) {
+      try {
+        const approved = await confirmChannel.confirm({
+          stage,
+          tool,
+          args,
+          ...(reason !== undefined ? { reason } : {}),
+        });
+        return { approved, state: approved ? "allowed-once" : "rejected" };
+      } catch {
+        return { approved: false, state: "unavailable" };
+      }
+    }
+    return { approved: false, state: "unavailable" };
+  }
+
   function localFinalization(revision: number): AuditFinalization {
     if (auditSink === undefined) return { configured: false, finalized: "not-configured", entries: 0, verified: false };
     const finalized = auditSink.finalized(revision);
@@ -527,7 +621,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   const toolDefinitions = includeBuiltins
-    ? builtinTools({ securityBackend, allowedDirectories })
+    ? builtinTools({ securityBackend, allowedDirectories, structuredBackend })
     : [];
   const contributions: PluginContribution[] = includeBuiltins
     ? toolDefinitions.map((tool) => ({ kind: "tool", tool }))
@@ -764,7 +858,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   async function executeRun(lease: RunLease, userText?: string): Promise<readonly AgentMessage[]> {
     const signal = lease.controller.signal;
-    const abortController = lease.controller;
     const initialMessageCount = stream.getState().messages.length;
     activeSignal = signal;
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
@@ -786,7 +879,176 @@ export function createAgent(options: AgentOptions = {}): Agent {
     }
     for (const [name, entry] of pluginTools) toolRegistry.set(name, (args, toolSignal) => (entry.tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
     for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    activeToolRegistry = toolRegistry;
+    /** 发射工具 callId → durable key，commit 后由 publisher 回填真实结果。 */
+    const emissionSlots = new Map<string, string>();
+    let commitPromise: Promise<readonly Receipt[]> | undefined;
+    let committed: Map<string, Receipt> | undefined;
+    const publisher: ToolPublisher = async (result) => {
+      if (emissionSlots.size === 0 || durableEffects === undefined) return result;
+      if (committed === undefined) {
+        // 并行 finalize 会同时触发 publisher；单次 commit 必须共享同一个 in-flight promise。
+        if (commitPromise === undefined) commitPromise = durableEffects.commit();
+        const receipts = await commitPromise;
+        committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
+        for (const receipt of receipts) {
+          recordAudit(
+            receipt.kind,
+            receipt.key,
+            receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED",
+            receipt.ok ? "OK" : "FAILED",
+            receipt.key
+          );
+        }
+      }
+      if (!usesDefaultEffects) return result;
+      const key = emissionSlots.get(result.callId);
+      const receipt = key === undefined ? undefined : committed.get(key);
+      if (receipt === undefined) return result;
+      const value = receipt.value;
+      const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+      const content = receipt.ok
+        ? value === undefined ? NO_TOOL_RESULT : value
+        : { ok: false, error: "EMISSION_DISPATCH_FAILED", key };
+      const message = result.message ?? {
+        role: "toolResult" as const,
+        content,
+        toolCallId: result.callId,
+        toolName: result.tool ?? "",
+      };
+      return {
+        ...result,
+        isError: !receipt.ok || failed,
+        output: content,
+        message: { ...message, content },
+      };
+    };
+
+    const before: BeforeToolCallHook = async (input, toolSignal) => {
+      const name = input.tool;
+      const args = input.args;
+      const argsDigest = stableHash(JSON.stringify(args));
+      if (toolSignal?.aborted === true || activeSignal?.aborted === true) {
+        return { block: true, reason: "ABORTED" };
+      }
+      if (permissionGate !== undefined) {
+        const decision = await permissionGate.authorize(permissionStage, name, args);
+        if (decision.behavior !== "ALLOW") {
+          const reason = decision.reason ?? "PERMISSION_DENIED";
+          let approved = false;
+          let state: ApprovalState = "unavailable";
+          if (decision.behavior === "ASK") {
+            const resolved = await resolveApproval(permissionStage, name, args, reason, toolSignal);
+            approved = resolved.approved;
+            state = resolved.state;
+          }
+          if (!approved) {
+            const decisionName = state === "cancelled" ? "PERMISSION_CANCELLED" : "PERMISSION_DENIED";
+            recordAudit(name, argsDigest, decisionName, reason, input.call.id);
+            fiberLogger.warn(`${decisionName} stage=${permissionStage} tool=${name} reason=${reason}`);
+            return { block: true, reason: `PERMISSION_DENIED: ${reason}` };
+          }
+          recordAudit(name, argsDigest, "ASK_APPROVED", reason, input.call.id);
+        }
+      }
+      if (permissionPolicy !== undefined) {
+        const verdict = evaluatePermissionPolicy(permissionPolicy, {
+          stage: permissionStage,
+          tool: name,
+          input: args,
+        });
+        if (verdict.behavior === "DENY" || verdict.behavior === "ASK") {
+          let approved = false;
+          if (verdict.behavior === "ASK") {
+            approved = (await resolveApproval(permissionStage, name, args, verdict.reason, toolSignal)).approved;
+          }
+          if (!approved) {
+            const reason = verdict.reason ?? "POLICY_DENIED";
+            recordAudit(name, argsDigest, `TOOL_POLICY_${verdict.behavior}`, reason, input.call.id);
+            return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${reason}` };
+          }
+        }
+      }
+      const egress = checkEgress(args, egressPolicy);
+      if (egress.status === "denied") {
+        const key = `${name}:${argsDigest}`;
+        recordAudit(name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", input.call.id);
+        if (isEmissionTool(name)) {
+          failedEmissionReceipts.push({ kind: name, key, ok: false, value: { error: "EGRESS_DENIED" } });
+        }
+        return { block: true, reason: "EGRESS_DENIED" };
+      }
+      if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
+        emissionSlots.set(input.call.id, `${name}:${argsDigest}`);
+      }
+      for (const fn of beforeToolCalls) {
+        await fn(
+          { type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args },
+          toolSignal ?? signal
+        );
+      }
+      return {};
+    };
+
+    const after: AfterToolCallHook = async (input, toolSignal) => {
+      const name = input.call.tool ?? input.call.name ?? "";
+      if (!isEmissionTool(name)) {
+        const args = input.call.input ?? input.call.args ?? {};
+        const argsDigest = stableHash(JSON.stringify(args));
+        recordAudit(
+          name,
+          argsDigest,
+          input.isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
+          stableHash(JSON.stringify(input.output ?? "")),
+          input.call.id
+        );
+      }
+      for (const fn of afterToolCalls) {
+        await fn(
+          {
+            type: "tool_execution_end",
+            toolCallId: input.call.id,
+            toolName: input.call.tool ?? input.call.name ?? "",
+            result: input.output,
+            isError: input.isError,
+          },
+          toolSignal ?? signal
+        );
+      }
+    };
+
+    const pipelineRegistry = createToolRegistry();
+    for (const [name, execute] of toolRegistry) {
+      const pipelineTool: ToolDescriptor = {
+        name,
+        inputSchema: { type: "object", properties: {}, additionalProperties: true },
+        execute: (args, exec) => {
+          if (exec.signal?.aborted === true) throw new Error("ABORTED");
+          const digest = stableHash(JSON.stringify(args));
+          exec.onUpdate(`executing ${name}`);
+          if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
+            const key = `${name}:${digest}`;
+            const verdict = checkEgress(args, egressPolicy);
+            durableEffects.enqueue(name, key, {
+              tool: name,
+              args,
+              ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
+            });
+            recordAudit(name, digest, "EMISSION_WITHHELD", key, "pending");
+            return { ok: true, withheld: true, tool: name, key };
+          }
+          return execute(args, exec.signal);
+        },
+      };
+      pipelineRegistry.registerTool(pipelineTool);
+    }
+    activePipeline = createToolPipeline({
+      registry: pipelineRegistry,
+      signal,
+      beforeToolCall: before,
+      afterToolCall: after,
+      publisher,
+      timeoutMs: options.toolTimeoutMs,
+    });
 
     const effectiveStreamFn = activeStreamFn();
     const emitConverted = async (input: unknown): Promise<void> => {
@@ -799,6 +1061,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     const runtime: LoopRuntime = {
       inbox,
       signal,
+      turnBudget: options.turnBudget,
       emit: (event) => stream.emit(event, signal),
       getState: () => stream.getState(),
       prepareNextTurn: async () => {
@@ -962,161 +1225,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         };
       },
 
-      async executeToolCalls(calls: readonly ToolCall[], toolSignal?: AbortSignal): Promise<readonly ToolResult[]> {
-        const signal = toolSignal ?? activeSignal;
-        const results: ToolResult[] = [];
-        /** 已 enqueue 的工具调用位次 → 幂等键，commit 后据此回填真实执行结果。 */
-        const emissionSlots = new Map<number, string>();
-        let enqueuedEmission = false;
-        for (const [index, call] of calls.entries()) {
-          const updates = [{ partialResult: `executing ${call.name}` }];
-          const execute = toolRegistry.get(call.name);
-          let isError = false;
-          let output: unknown = NO_TOOL_RESULT;
-          let denialReason: string | undefined;
-          if (execute === undefined) {
-            isError = true;
-            output = "TOOL_NOT_FOUND";
-          } else if (signal?.aborted === true) {
-            isError = true;
-            output = "ABORTED";
-          } else {
-            try {
-              const args = typeof call.args === "object" && call.args !== null
-                ? (call.args as Readonly<Record<string, unknown>>)
-                : {};
-              const argsDigest = stableHash(JSON.stringify(args));
-              const isEmission = isEmissionTool(call.name);
-              let denied = false;
-              if (permissionGate !== undefined) {
-                // 每次执行都读取 gate 当前状态：增删 hook / declareTools 后立即生效，无需 reload。
-                const decision = await permissionGate.authorize(permissionStage, call.name, args);
-                if (decision.behavior !== "ALLOW") {
-                  const reason = decision.reason ?? "PERMISSION_DENIED";
-                  // DENY 始终拒绝；ASK 仅在注入确认通道且确认通过时放行，否则维持 fail-closed。
-                  const approved = decision.behavior === "ASK" && confirmChannel !== undefined
-                    ? await confirmChannel.confirm({
-                        stage: permissionStage,
-                        tool: call.name,
-                        args,
-                        ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
-                      })
-                    : false;
-                  if (!approved) {
-                    denied = true;
-                    isError = true;
-                    output = {
-                      ok: false,
-                      error: "PERMISSION_DENIED",
-                      reason,
-                      stage: permissionStage,
-                      tool: call.name,
-                    };
-                    denialReason = `PERMISSION_DENIED: ${reason}`;
-                    recordAudit(call.name, argsDigest, "PERMISSION_DENIED", reason, call.id ?? "");
-                    // 审计走既有机制：logger 写 sink，loop 随后发带 isError 的 tool_execution_end。
-                    fiberLogger.warn(`PERMISSION_DENIED stage=${permissionStage} tool=${call.name} reason=${reason}`);
-                  } else {
-                    recordAudit(call.name, argsDigest, "ASK_APPROVED", reason, call.id ?? "");
-                  }
-                }
-              }
-              if (!denied) {
-                const verdict = checkEgress(args, egressPolicy);
-                if (verdict.status === "denied") {
-                  // egress 默认拒绝覆盖所有路径：发射工具写失败回执，非发射工具直接拒绝执行。
-                  isError = true;
-                  denialReason = "EGRESS_DENIED";
-                  const key = `${call.name}:${argsDigest}`;
-                  recordAudit(call.name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", call.id ?? "");
-                  if (isEmission) {
-                    const receipt: Receipt = { kind: call.name, key, ok: false, value: { error: "EGRESS_DENIED" } };
-                    failedEmissionReceipts.push(receipt);
-                    output = { ok: false, error: "EGRESS_DENIED", tool: call.name, key };
-                  } else {
-                    output = { ok: false, error: "EGRESS_DENIED", tool: call.name };
-                  }
-                } else if (isEmission && durableEffects !== undefined) {
-                  // 发射工具：事务内只 enqueue，真实副作用留到批次结束的 commit 统一派发。
-                  const key = `${call.name}:${argsDigest}`;
-                  durableEffects.enqueue(call.name, key, {
-                    tool: call.name,
-                    args,
-                    ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
-                  });
-                  emissionSlots.set(index, key);
-                  enqueuedEmission = true;
-                  recordAudit(call.name, argsDigest, "EMISSION_WITHHELD", key, call.id ?? "");
-                  output = { ok: true, withheld: true, tool: call.name, key };
-                } else {
-                  // 非发射工具（或 direct 策略）走原路径，行为与基线完全一致。
-                  for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args }, signal);
-                  if (aborted) throw new Error("ABORTED");
-                  const value = await execute(args, signal);
-                  // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
-                  const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
-                  if (failed) isError = true;
-                  for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed }, signal);
-                  output = value === undefined ? NO_TOOL_RESULT : value;
-                  recordAudit(
-                    call.name,
-                    argsDigest,
-                    failed || isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
-                    stableHash(JSON.stringify(output ?? "")),
-                    call.id ?? ""
-                  );
-                }
-              }
-            } catch (error) {
-              isError = true;
-              output = { ok: false, error: error instanceof Error ? error.message : String(error) };
-            }
-          }
-          results.push({
-            callId: call.id || `call-${index + 1}`,
-            message: {
-              role: "toolResult",
-              content: output,
-              toolCallId: call.id || `call-${index + 1}`,
-              toolName: call.name,
-            },
-            isError,
-            ...(denialReason !== undefined ? { reason: denialReason } : {}),
-            updates,
-          });
-        }
-        // 工具批次结束：统一 commit，副作用只在此刻发生；重复 (kind,key) 由 durableEffects 去重。
-        if (enqueuedEmission && durableEffects !== undefined) {
-          const receipts = await durableEffects.commit();
-          const byKey = new Map(receipts.map((receipt) => [receipt.key, receipt]));
-          for (const receipt of receipts) {
-            recordAudit(receipt.kind, receipt.key, receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED", receipt.ok ? "OK" : "FAILED", receipt.key);
-          }
-          if (usesDefaultEffects) {
-            // 默认发射工具对外仍呈现真实执行结果，避免改变既有工具的返回契约。
-            return results.map((result, index) => {
-              const key = emissionSlots.get(index);
-              const receipt = key === undefined ? undefined : byKey.get(key);
-              const message = result.message;
-              if (receipt === undefined || message === undefined) return result;
-              const value = receipt.value;
-              const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
-              return {
-                ...result,
-                isError: !receipt.ok || failed,
-                message: {
-                  ...message,
-                  content: receipt.ok
-                    ? (value === undefined ? NO_TOOL_RESULT : value)
-                    : { ok: false, error: "EMISSION_DISPATCH_FAILED", key },
-                },
-              };
-            });
-          }
-        }
-        return results;
-      },
-
+      toolPipeline: activePipeline,
     };
 
     try {
@@ -1184,13 +1293,67 @@ export function createAgent(options: AgentOptions = {}): Agent {
     resolveLogSink: (options) => resolveLogSink(options),
     logger,
     async runTool(call) {
-      if (isCriticalLayerDegraded(securityBackend.capabilities())) {
-        return { ok: false, reason: "CRITICAL_LAYER_DEGRADED" };
-      }
+      // 裸回调入口也必须经过同一管线：权限、审批、egress、超时与 cleanup 共用一套实现。
+      const check: BeforeToolCallHook = async (input) => {
+        if (permissionGate !== undefined) {
+          const decision = await permissionGate.authorize(permissionStage, input.tool, input.args);
+          if (decision.behavior !== "ALLOW") {
+            let approved = false;
+            if (decision.behavior === "ASK") {
+              approved = (
+                await resolveApproval(permissionStage, input.tool, input.args, decision.reason, activeSignal)
+              ).approved;
+            }
+            if (!approved) {
+              return { block: true, reason: `PERMISSION_DENIED: ${decision.reason ?? "PERMISSION_DENIED"}` };
+            }
+          }
+        }
+        if (permissionPolicy !== undefined) {
+          const verdict = evaluatePermissionPolicy(permissionPolicy, {
+            stage: permissionStage,
+            tool: input.tool,
+            input: input.args,
+          });
+          if (verdict.behavior !== "ALLOW" && verdict.behavior !== "PASSTHROUGH") {
+            return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${verdict.reason ?? "denied"}` };
+          }
+        }
+        if (checkEgress(input.args, egressPolicy).status === "denied") {
+          return { block: true, reason: "EGRESS_DENIED" };
+        }
+        return {};
+      };
+      let invoked = false;
+      const registry = createToolRegistry();
+      registry.registerTool({
+        name: call.name,
+        inputSchema: { type: "object", properties: {}, additionalProperties: true },
+        execute: async () => {
+          if (isCriticalLayerDegraded(securityBackend.capabilities())) {
+            throw new Error("CRITICAL_LAYER_DEGRADED");
+          }
+          await securityBackend.run({ argv: [call.name] });
+          invoked = true;
+          return call.execute();
+        },
+      });
       try {
-        await securityBackend.run({ argv: [call.name] });
-        const value = await call.execute();
-        return { ok: true, value };
+        const pipeline = createToolPipeline({
+          registry,
+          signal: activeSignal,
+          beforeToolCall: check,
+          timeoutMs: options.toolTimeoutMs,
+        });
+        const result = await pipeline.runToolCall({
+          id: `runTool-${++runToolSeq}`,
+          tool: call.name,
+          input: {},
+        });
+        if (result.isError === true || !invoked) {
+          return { ok: false, reason: String(result.reason ?? "TOOL_FAILED") };
+        }
+        return { ok: true, value: result.output };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
       }

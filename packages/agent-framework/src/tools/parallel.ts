@@ -3,6 +3,7 @@ import {
   finalizeExecutedToolCall,
   isPreparedToolCall,
   prepareToolCall,
+  publishResult,
   resolveToolExecutionMode,
   shouldTerminateToolBatch,
   type BatchContext,
@@ -22,6 +23,7 @@ function blockedResult(call: ConditionalCall, reason: string): ToolResult {
   return {
     callId: call.id,
     tool: call.tool,
+    args: call.input,
     output,
     isError: true,
     durationMs: 0,
@@ -75,9 +77,11 @@ export async function executeConditionalBatch(
     }
 
     const runItem = async (item: PreparedLevelItem): Promise<ToolResult> => {
-      if (item.kind === "blocked") return item.result;
-      if (!isPreparedToolCall(item.outcome)) return item.outcome;
-      return finalizeExecutedToolCall(await executePreparedToolCall(item.outcome, ctx), ctx);
+      // preflight 已按源码顺序完成；publishResult 在 finalize/cleanup 后立即发事件（完成顺序）。
+      if (item.kind === "blocked") return publishResult(item.result, ctx);
+      if (!isPreparedToolCall(item.outcome)) return publishResult(item.outcome, ctx);
+      const finalized = await finalizeExecutedToolCall(await executePreparedToolCall(item.outcome, ctx), ctx);
+      return publishResult(finalized, ctx);
     };
     const settled: readonly PromiseSettledResult<ToolResult>[] = sequential
       ? await (async () => {
@@ -109,11 +113,8 @@ export async function executeConditionalBatch(
   // 混合批次保持未终止，后续批次可继续执行。
   if (ctx.controller !== undefined && shouldTerminateToolBatch(finalized)) {
     ctx.controller.terminate("all-terminated");
-    return finalized.map((result, index) => ({
-      ...blockedResult(batch[index] as ConditionalCall, "BATCH_TERMINATED"),
-      terminate: true,
-      durationMs: result.durationMs,
-    }));
+    // 终止只阻止后续批次/LLM；本批次真实结果原样保留，供 transcript 与事件使用。
+    return finalized.map((result) => ({ ...result, terminate: true }));
   }
   return finalized;
 }
