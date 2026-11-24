@@ -4,6 +4,14 @@ import {
   declareToolChanges,
   runLoop,
   AgentPluginManager,
+  createBudgetTracker,
+  createCompactionListener,
+  createMemoryWorkspaceStore,
+  createOffloader,
+  createSessionSurface,
+  type CompactionBudget,
+  type CompactionEvent,
+  type CompactionLineage,
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
@@ -19,7 +27,11 @@ import {
   type CoreContextLike,
   type CoreLoopHooks,
   type DurableExtensionSpec,
+  type BudgetTracker,
   type EffectMeta,
+  type Offloader,
+  type SessionSurface,
+  type WorkspaceStore,
   type EventBus,
   type FinishTurn,
   type Inbox,
@@ -92,6 +104,10 @@ import {
   type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import { createProviderStreamFn } from "./providers/dispatch";
+import { builtinIdsForProfile, resolveAssemblyProfile, type AssemblyProfile } from "./assembly/builtins";
+import { createAssemblyManifest, type CapabilityDiagnostic } from "./assembly/manifest";
+import { diagnoseCapabilities, executableToolNames } from "./assembly/profile";
+import type { SessionStore } from "./session/store";
 
 export type {
   AgentEvent,
@@ -113,14 +129,8 @@ export type {
 } from "@zeta-agent/agent-framework";
 export { defineCompatExtension, defineDurableExtension } from "@zeta-agent/agent-framework";
 
-export const DEFAULT_ASSEMBLY: readonly string[] = Object.freeze([
-  "builtin:read",
-  "builtin:bash",
-  "builtin:edit",
-  "builtin:write",
-  "skills:registry",
-  "session:store",
-]);
+/** 默认装配清单来自真实 BUILTIN_PLUGINS 注册表，不再手写 skills/session/mode。 */
+export const DEFAULT_ASSEMBLY: readonly string[] = builtinIdsForProfile("local-safe");
 
 export function listAssembly(): readonly string[] {
   return [...DEFAULT_ASSEMBLY];
@@ -364,6 +374,13 @@ export interface AgentOptions {
   readonly securityBackend?: ExecutionBackend;
   /** 后端档位：local-safe（默认，真实结构化文件边界）或沙箱档位（未接线时失败关闭）。 */
   readonly backendProfile?: BackendProfile;
+  /** 产品 profile：local-safe 默认收敛，local-full 显式 opt-in；只控制暴露范围，不伪造能力。 */
+  readonly assemblyProfile?: AssemblyProfile;
+  /**
+   * 本 agent 实际安装的服务名；由统一装配 manifest 注入。
+   * 缺省时按 assemblyProfile 从注册表派生，避免 facade 与 manifest 手写清单漂移。
+   */
+  readonly services?: readonly string[];
   /** 显式注入结构化后端；优先于 securityBackend 的兼容解析。 */
   readonly structuredBackend?: StructuredExecutionBackend;
   readonly observability?: LoggerOptions;
@@ -432,6 +449,32 @@ export interface AgentOptions {
   readonly auditEndpoint?: string;
   /** @deprecated facade 不再自行写无签名旁路文件；落盘由 daemon 独占。 */
   readonly auditDir?: string;
+  /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
+  readonly sessionStore?: SessionStore;
+  /**
+   * 可选压缩装配：surface/offloader 由 facade 创建并随 agent_end 落 SessionStore；
+   * 不注入时压缩路径完全不启用，保持既有调用方零回归。
+   */
+  readonly compaction?: AgentCompactionOptions;
+}
+
+export interface AgentCompactionOptions {
+  readonly budget: CompactionBudget;
+  /** 可注入自定义 surface（缺省新建内存 surface）。 */
+  readonly surface?: SessionSurface;
+  /** 可注入自定义 offloader 或 workspace store。 */
+  readonly offloader?: Offloader;
+  readonly workspaceStore?: WorkspaceStore;
+  /** 传给默认 offloader 的输出字节上限。 */
+  readonly maxOutputBytes?: number;
+  /** started/completed/failed/interrupted 事件；facade 同时把它们写入审计链。 */
+  readonly emit?: (event: CompactionEvent) => void | Promise<void>;
+}
+
+export interface AgentCompactionHandle {
+  readonly surface: SessionSurface;
+  readonly offloader: Offloader;
+  readonly budgetTracker: BudgetTracker;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -456,6 +499,11 @@ export interface Agent extends PluginApiSurface {
   readonly toolNames: readonly string[];
   readonly toolDefinitions: readonly ToolDefinition[];
   readonly assembly: readonly string[];
+  readonly assemblyProfile: AssemblyProfile;
+  /** 能力诊断：每个 builtin 工具/后端操作/关键层的真实状态。 */
+  readonly capabilityDiagnostics: readonly CapabilityDiagnostic[];
+  /** 最终 active registry 中可供模型选择的工具名（可执行或显式注入）。 */
+  readonly activeToolNames: readonly string[];
   readonly reasoningEffort: string | undefined;
   setReasoningEffort(effort: string | undefined): void;
   /** 发射回执快照：durableEffects 的真实回执 + egress 拒绝的失败回执。 */
@@ -468,6 +516,8 @@ export interface Agent extends PluginApiSurface {
   closeAudit(): Promise<void>;
   /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
+  readonly sessionStore: SessionStore | undefined;
+  readonly compaction: AgentCompactionHandle | undefined;
 }
 
 function streamErrorMessage(error: unknown): string {
@@ -477,6 +527,14 @@ function streamErrorMessage(error: unknown): string {
 
 export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
+  const sessionStore = options.sessionStore;
+  if (sessionStore !== undefined) {
+    // agent_end 只含本次 newMessages；事件流 await listener，故 prompt resolve 前消息已落盘。
+    stream.subscribe(async (event) => {
+      if (event.type !== "agent_end") return;
+      for (const item of event.messages) await sessionStore.append(item);
+    });
+  }
   const baseStreamFn = options.streamFn;
   let reasoningEffort: string | undefined = options.reasoningEffort;
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
@@ -488,6 +546,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
     options.securityBackend ?? defaultSecurityBackend(allowedDirectories, backendProfile);
   const structuredBackend =
     options.structuredBackend ?? resolveStructuredBackend(securityBackend, allowedDirectories);
+  const assemblyProfile = resolveAssemblyProfile(options.assemblyProfile);
+  const capabilityDiagnostics = diagnoseCapabilities(
+    assemblyProfile,
+    securityBackend.capabilities(),
+    structuredBackend.operations
+  );
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
   const confirmChannel = options.confirmChannel;
@@ -576,6 +640,47 @@ export function createAgent(options: AgentOptions = {}): Agent {
     auditSink.append(record);
   }
 
+  // 压缩装配复用 SessionStore 的 appendRecap 血缘与 agent_end 屏障，不另建会话协议。
+  const compactionOptions = options.compaction;
+  const compaction: AgentCompactionHandle | undefined = compactionOptions === undefined
+    ? undefined
+    : (() => {
+        const surface = compactionOptions.surface ?? createSessionSurface();
+        const offloader = compactionOptions.offloader ?? createOffloader(
+          compactionOptions.workspaceStore ?? createMemoryWorkspaceStore(),
+          compactionOptions.maxOutputBytes === undefined ? {} : { maxOutputBytes: compactionOptions.maxOutputBytes }
+        );
+        return { surface, offloader, budgetTracker: createBudgetTracker(compactionOptions.budget) };
+      })();
+  let persistedLineageCount = 0;
+  async function persistCompaction(lineages: readonly CompactionLineage[]): Promise<void> {
+    if (sessionStore === undefined) return;
+    for (const lineage of lineages.slice(persistedLineageCount)) {
+      await sessionStore.appendRecap(lineage.recap, lineage.uris, {
+        threshold: lineage.threshold,
+        preTokenCount: lineage.preTokenCount,
+      });
+    }
+    persistedLineageCount = lineages.length;
+  }
+  async function emitCompaction(event: CompactionEvent): Promise<void> {
+    if (compactionOptions?.emit !== undefined) await compactionOptions.emit(event);
+    if (auditSink === undefined) return;
+    recordAudit(
+      "compaction",
+      stableHash(JSON.stringify({ threshold: "threshold" in event ? event.threshold : 0, preTokenCount: event.preTokenCount })),
+      event.type,
+      stableHash(JSON.stringify(event)),
+      `compaction:${event.preTokenCount}`
+    );
+  }
+  if (compaction !== undefined) {
+    // 已完成消息进入 surface；system 提示词只进请求，由 recap.objective 逐字承接。
+    stream.subscribe((event) => {
+      if (event.type === "message_end") compaction.surface.append(event.message);
+    });
+  }
+
   /** ASK 决策统一走四态审批通道；confirmChannel 仅作为布尔兼容适配器。 */
   async function resolveApproval(
     stage: string,
@@ -626,11 +731,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const contributions: PluginContribution[] = includeBuiltins
     ? toolDefinitions.map((tool) => ({ kind: "tool", tool }))
     : [];
-  contributions.push({ kind: "service", name: "skills:registry" });
-  contributions.push({ kind: "service", name: "session:store" });
+  // 服务清单由统一装配 manifest 注入；缺省时仍从注册表派生，保持 SDK/CLI 一致。
+  const defaultManifest = createAssemblyManifest({ profile: assemblyProfile });
+  const serviceNames = options.services ?? [...defaultManifest.services, ...defaultManifest.session];
+  for (const name of serviceNames) contributions.push({ kind: "service", name });
   for (const plugin of plugins) contributions.push(...plugin.contributions);
 
-  const assembly = includeBuiltins ? listAssembly() : [];
+  const assembly = includeBuiltins ? builtinIdsForProfile(assemblyProfile) : [];
 
   const toolNamesForPrompt = toolDefinitions.map((tool) => tool.name);
   function resolveSystemPrompt(): string {
@@ -722,6 +829,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     for (const name of pluginTools.keys()) names.add(name);
     for (const name of declaredLoadout.keys()) names.add(name);
     return [...names];
+  }
+
+  /** 最终 active registry：能力不支持的 builtin 被排除，显式注入的插件工具默认可执行。 */
+  function activeToolNamesSnapshot(): readonly string[] {
+    return executableToolNames(toolNamesSnapshot(), capabilityDiagnostics);
   }
 
   /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
@@ -828,6 +940,22 @@ export function createAgent(options: AgentOptions = {}): Agent {
       description: tool.description,
       parameters: tool.parameters,
     };
+  }
+
+  /** provider schema 从最终 active registry 生成，未支持工具不进入模型可见面。 */
+  function providerToolSchemas(): AgentToolSchema[] {
+    const active = new Set(activeToolNamesSnapshot());
+    const schemas: AgentToolSchema[] = [];
+    for (const tool of toolDefinitions) {
+      if (active.has(tool.name)) schemas.push(toToolSchema(tool));
+    }
+    const addPluginTool = (tool: PluginTool): void => {
+      if (!active.has(tool.name)) return;
+      schemas.push({ name: tool.name, description: tool.name, parameters: [] });
+    };
+    for (const entry of pluginTools.values()) addPluginTool(entry.tool);
+    for (const tool of declaredLoadout.values()) addPluginTool(tool);
+    return schemas;
   }
 
   /** 把已拼接的文本投影为 message_update 所需的流式部分快照。 */
@@ -1128,7 +1256,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
             const enriched: AgentStreamRequest = {
               ...base,
               messages: base.messages ?? [],
-              tools: base.tools ?? toolDefinitions.map(toToolSchema),
+              tools: base.tools ?? providerToolSchemas(),
               ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
               signal,
             } as AgentStreamRequest;
@@ -1228,6 +1356,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
       toolPipeline: activePipeline,
     };
 
+    const unsubscribeCompaction = compaction === undefined || compactionOptions === undefined
+      ? undefined
+      : stream.subscribe(createCompactionListener({
+          budget: compactionOptions.budget,
+          surface: compaction.surface,
+          offloader: compaction.offloader,
+          persist: persistCompaction,
+          emit: emitCompaction,
+          budgetTracker: compaction.budgetTracker,
+          signal,
+        }));
     try {
       await runLoop(runtime);
     } catch (error) {
@@ -1239,6 +1378,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       await stream.emit({ type: "message_end", message }, signal);
       await stream.emit({ type: "turn_end", message, toolResults: [] }, signal);
       await stream.emit({ type: "agent_end", messages: stream.getState().messages.slice(initialMessageCount) }, signal);
+    } finally {
+      unsubscribeCompaction?.();
     }
     return stream.getState().messages;
   }
@@ -1268,6 +1409,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
     // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
     // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
+    sessionStore,
+    compaction,
     abort() {
       aborted = true;
       activeRun?.controller.abort();
@@ -1369,6 +1512,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     toolDefinitions,
     assembly,
+    assemblyProfile,
+    capabilityDiagnostics,
+    get activeToolNames() {
+      return activeToolNamesSnapshot();
+    },
     get reasoningEffort() {
       return reasoningEffort;
     },

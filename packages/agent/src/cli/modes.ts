@@ -1,4 +1,5 @@
 import type { Agent, AgentMessage } from "../facade";
+import { encodeControlFrame, type RuntimeProtocol } from "../assembly/protocol";
 
 export type ModeName = "interactive" | "print" | "json" | "rpc";
 
@@ -14,6 +15,8 @@ export interface ModeOptions {
   readonly lines?: readonly string[];
   readonly output?: (line: string) => void;
   readonly tty?: boolean;
+  /** 统一 session/control/event 协议；四种模式都经它访问运行时。 */
+  readonly protocol?: RuntimeProtocol;
 }
 
 export interface ModePlugin {
@@ -78,8 +81,14 @@ async function runTranscript(
   });
   let messages: readonly AgentMessage[];
   try {
-    messages = await agent.prompt(opts.prompt ?? opts.lines?.[0] ?? "");
-    await agent.waitForIdle();
+    const text = opts.prompt ?? opts.lines?.[0] ?? "";
+    if (opts.protocol !== undefined) {
+      const result = await opts.protocol.control.dispatch(encodeControlFrame({ action: "prompt", text }));
+      messages = result.messages ?? agent.state.messages;
+    } else {
+      messages = await agent.prompt(text);
+      await agent.waitForIdle();
+    }
   } finally {
     dispose();
   }
@@ -96,8 +105,14 @@ async function runInteractive(agent: Agent, opts: ModeOptions): Promise<number> 
         : [];
   for (const text of prompts) {
     output(`> ${text}`);
-    const messages = await agent.prompt(text);
-    await agent.waitForIdle();
+    let messages: readonly AgentMessage[];
+    if (opts.protocol !== undefined) {
+      const result = await opts.protocol.control.dispatch(encodeControlFrame({ action: "prompt", text }));
+      messages = result.messages ?? agent.state.messages;
+    } else {
+      messages = await agent.prompt(text);
+      await agent.waitForIdle();
+    }
     for (const message of messages) {
       if (message.role === "assistant") output(String(message.content));
     }
@@ -121,14 +136,29 @@ async function runRpc(agent: Agent, opts: ModeOptions): Promise<number> {
     if (method === "prompt" || method === "continue") {
       const params = isRecord(frame.params) ? frame.params : undefined;
       let messages: readonly AgentMessage[];
-      if (method === "prompt") {
-        const text = params?.text;
-        if (typeof text !== "string") throw new Error("RPC_INVALID_PARAMS");
-        messages = await agent.prompt(text);
+      if (opts.protocol !== undefined) {
+        const text = method === "prompt" ? params?.text : undefined;
+        if (method === "prompt" && typeof text !== "string") throw new Error("RPC_INVALID_PARAMS");
+        const result = await opts.protocol.dispatch(
+          method === "prompt"
+            ? encodeControlFrame({ action: "prompt", text: text as string })
+            : encodeControlFrame({ action: "continue" })
+        );
+        if (!result.ok) {
+          output(encodeRpcFrame({ id, error: { code: -32000, message: result.error ?? "RUN_FAILED" } }));
+          continue;
+        }
+        messages = result.messages ?? agent.state.messages;
       } else {
-        messages = await agent.continue();
+        if (method === "prompt") {
+          const text = params?.text;
+          if (typeof text !== "string") throw new Error("RPC_INVALID_PARAMS");
+          messages = await agent.prompt(text);
+        } else {
+          messages = await agent.continue();
+        }
+        await agent.waitForIdle();
       }
-      await agent.waitForIdle();
       if (detectRunError(messages)) {
         output(encodeRpcFrame({ id, error: { code: -32000, message: "RUN_FAILED" } }));
         continue;

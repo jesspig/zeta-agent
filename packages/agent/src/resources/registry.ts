@@ -1,19 +1,21 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { builtinParsers, parseResource, type ParseResult, type ParserPlugin } from "./parser";
 import type { TrustGate } from "./trust";
 
 // MCP server 配置 coeffect 由 plugins/mcp 实现（@zeta-agent/mcp:servers）。
-export type ResourceType = "skill" | "prompt" | "theme";
+export type ResourceType = "skill" | "prompt" | "theme" | "agents";
 export type ResourceScope = "agent" | "project";
 
-/** 三类资源在目录中的约定：目录名、扩展名、是否递归。 */
+/** 四类资源在目录中的约定：目录名、扩展名、是否递归。 */
 const RESOURCE_LAYOUT: Readonly<Record<ResourceType, { dir: string; ext: string; recursive: boolean }>> = {
   skill: { dir: "skills", ext: "SKILL.md", recursive: true },
   prompt: { dir: "prompts", ext: ".md", recursive: false },
   theme: { dir: "themes", ext: ".json", recursive: false },
+  agents: { dir: "agents", ext: "AGENTS.md", recursive: true },
 };
 
-export const RESOURCE_TYPES: readonly ResourceType[] = Object.freeze(["skill", "prompt", "theme"]);
+export const RESOURCE_TYPES: readonly ResourceType[] = Object.freeze(["skill", "prompt", "theme", "agents"]);
 
 export interface ResourceEntry {
   readonly id: string;
@@ -24,6 +26,8 @@ export interface ResourceEntry {
   readonly root: string;
   /** 相对于类型目录的路径。 */
   readonly relativePath: string;
+  /** load 时的 typed 解析结果；发现阶段为 undefined。 */
+  readonly parse?: ParseResult;
 }
 
 export interface ResourceManifest {
@@ -44,6 +48,8 @@ export interface ResourceRegistryOptions {
   readonly agentRoot: string;
   readonly projectRoot?: string;
   readonly trust?: TrustGate;
+  /** 可替换的解析器插件；缺省为内建 skill/prompt/theme/agents 解析器。 */
+  readonly parsers?: readonly ParserPlugin[];
 }
 
 function walk(dir: string, recursive: boolean): string[] {
@@ -140,7 +146,9 @@ export function createResourceRegistry(options: ResourceRegistryOptions): Resour
       } catch {
         content = "";
       }
-      return { ...entry, content };
+      // 解析失败不抛出：以 typed ParseResult 附着，单条坏资源不拖垮其它资源。
+      const parsers = options.parsers ?? builtinParsers;
+      return { ...entry, content, parse: parseResource(entry, content, parsers) };
     },
   };
 }
