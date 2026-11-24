@@ -7,6 +7,8 @@ export * from "./runtime/core";
 export * from "./plugins/types";
 export * from "./plugins/hook-chain";
 export * from "./plugins/manager";
+export * from "./plugins/registry";
+export * from "./plugins/contribution-host";
 export * from "./session/surface";
 export * from "./session/recap";
 export * from "./session/offload";

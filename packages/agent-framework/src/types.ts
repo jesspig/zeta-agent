@@ -37,7 +37,19 @@ export interface EventBus {
 export type Converter = (input: unknown) => AgentEvent | undefined;
 export type ContextTransform = (context: unknown) => unknown;
 export type BeforeHook = (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
-export type AfterHook = (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
+/** after 钩子可返回字段覆盖：facade 会把 content/structuredContent/details 等投影到流水线结果。 */
+export type AfterHookResult = {
+  readonly content?: unknown;
+  readonly details?: unknown;
+  readonly structuredContent?: unknown;
+  readonly isError?: boolean;
+  readonly usage?: unknown;
+  readonly terminate?: boolean;
+};
+export type AfterHook = (
+  event: AgentEvent,
+  signal?: AbortSignal
+) => AfterHookResult | void | Promise<AfterHookResult | void>;
 export type FinishTurn = (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
 export type PrepareRequest = (request: unknown, signal?: AbortSignal) => unknown | Promise<unknown>;
 export type PrepareNextTurn = (context: unknown, signal?: AbortSignal) => unknown | Promise<unknown>;

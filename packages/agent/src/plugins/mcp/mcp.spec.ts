@@ -69,6 +69,13 @@ function createFakeServer(tools: readonly McpToolDescriptor[]): FakeServer {
 function createLoopbackTransport(fake: FakeServer): McpTransport {
   return {
     async request(message: McpJsonRpcRequest): Promise<McpJsonRpcResponse> {
+      if (message.method === "initialize") {
+        return {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "fake", version: "1" } },
+        };
+      }
       if (message.method === "tools/list") {
         return { jsonrpc: "2.0", id: message.id, result: { tools: fake.tools } };
       }
@@ -79,12 +86,17 @@ function createLoopbackTransport(fake: FakeServer): McpTransport {
       }
       return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "METHOD_NOT_FOUND" } };
     },
+    async notify() {},
     onNotification(listener) {
       fake.listeners.add(listener);
       return () => {
         fake.listeners.delete(listener);
       };
     },
+    onRequest() {
+      return () => {};
+    },
+    async respond() {},
     dispose() {
       fake.disposed += 1;
     },
@@ -195,6 +207,7 @@ describe("T-04 MCP 插件", () => {
     const newTool: McpToolDescriptor = { name: "search_code", annotations: { readOnlyHint: true } };
     h.fake.tools = [newTool];
     await h.fake.emitChange();
+    await new Promise((resolve) => setTimeout(resolve, 40));
 
     expect(h.notifyKeys).toContainEqual(["@zeta-agent/mcp:servers"]);
     expect(h.agent.toolNames).not.toContain(READ_NAME);

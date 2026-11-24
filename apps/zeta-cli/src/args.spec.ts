@@ -10,6 +10,7 @@ describe("CLI 参数解析", () => {
       version: false,
       profile: "local-safe",
       capabilities: false,
+      watchDirs: [],
     });
   });
 
@@ -21,6 +22,7 @@ describe("CLI 参数解析", () => {
       version: false,
       profile: "local-safe",
       capabilities: false,
+      watchDirs: [],
     });
   });
 

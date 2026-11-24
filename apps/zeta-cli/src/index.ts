@@ -34,6 +34,7 @@ const HELP = [
   "  zeta --headless \"提示词\"   headless 打印模式（无需 TTY）",
   "  zeta --json \"提示词\"       headless JSON 事件流",
   "  zeta --rpc <帧>            headless RPC 帧",
+  "  zeta --watch <目录>        监视插件目录，文件变更不重启生效（可重复）",
   "  zeta --help                显示帮助",
   "  zeta --version             显示版本",
   "",
@@ -115,7 +116,7 @@ interface AgentBundle {
 }
 
 /** 统一 loader：config → 默认装配（含 root fiber）→ 返回共享运行时句柄。 */
-async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
+export async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
   const resolution = resolveModelConfig(process.env);
   let connection: Connection | undefined =
     resolution.kind === "configured"
@@ -132,6 +133,7 @@ async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
     streamFn,
     allowedDirectories: [process.cwd()],
     profile: args.profile,
+    hotReloadDirs: args.watchDirs,
   });
   return {
     runtime,

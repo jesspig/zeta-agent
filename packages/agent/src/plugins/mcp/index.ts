@@ -12,8 +12,10 @@ import {
   createMcpConnection,
   openMcpSession,
   type McpSession,
+  type McpToolDescriptor,
   type McpTransportFactory,
 } from "./client";
+import { projectMcpResult, type McpResultSink } from "./result-projection";
 import {
   isEmissionMcpTool,
   mcpServersKey,
@@ -24,6 +26,10 @@ import {
 
 export * from "./client";
 export * from "./config";
+export * from "./protocol";
+export * from "./transport";
+export * from "./result-projection";
+export * from "./oauth-grant";
 
 export interface McpPluginOptions {
   /** facade 插件 API：工具注册、发射工具声明都经由它，保持单一执行路径。 */
@@ -42,7 +48,39 @@ export interface McpPluginOptions {
   readonly permissionStage?: string;
   /** 缺省 ctx.notify；可注入以观察重激活通知。 */
   readonly notify?: (keys: readonly CoeffectKey<any>[]) => Promise<void>;
+  /** 二进制/资源落盘边界；缺省时遇到二进制内容直接失败关闭。 */
+  readonly resultSink?: McpResultSink;
   readonly componentName?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 原始 JSON Schema → provider 可消费的参数表，保留 required 与 description。 */
+export function parametersFromInputSchema(schema: unknown): readonly {
+  readonly name: string;
+  readonly type: "string" | "number" | "boolean";
+  readonly description: string;
+  readonly required?: boolean;
+}[] {
+  if (!isRecord(schema)) return [];
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  return Object.entries(properties).flatMap(([name, raw]) => {
+    if (!isRecord(raw)) return [];
+    const type = raw.type === "number" || raw.type === "integer" ? "number"
+      : raw.type === "boolean" ? "boolean"
+      : raw.type === "string" ? "string"
+      : undefined;
+    if (type === undefined) return [];
+    return [{
+      name,
+      type,
+      description: typeof raw.description === "string" ? raw.description : name,
+      ...(required.includes(name) ? { required: true } : {}),
+    }];
+  });
 }
 
 export interface McpSnapshot {
@@ -113,7 +151,19 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
       const unwind = async (): Promise<void> => {
         for (const dispose of [...disposers].reverse()) await dispose();
       };
-
+      const mcpToolNames = new Set<string>();
+      disposers.push(api.addAfterToolCall(async (event) => {
+        const toolEvent = event as Extract<typeof event, { type: "tool_execution_end" }>;
+        const name = toolEvent.toolName ?? "";
+        if (!mcpToolNames.has(name)) return undefined;
+        const projected = await projectMcpResult(toolEvent.result as never, options.resultSink === undefined ? {} : { sink: options.resultSink });
+        return {
+          content: projected.content,
+          ...(projected.structuredContent === undefined ? {} : { structuredContent: projected.structuredContent }),
+          ...(projected.details === undefined ? {} : { details: projected.details }),
+          ...(projected.isError === undefined ? {} : { isError: projected.isError }),
+        };
+      }));
       try {
         for (const server of activeServers) {
           const target = networkTargetOf(server);
@@ -139,6 +189,7 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
 
           for (const tool of await connection.listTools()) {
             const name = mcpToolName(server.name, tool.name);
+            mcpToolNames.add(name);
             toolNames.push(name);
             if (isEmissionMcpTool(tool)) emissionToolNames.push(name);
 
@@ -151,7 +202,7 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
               api.registerTool({
                 name,
                 description: tool.description ?? `MCP tool ${tool.name}`,
-                parameters: [],
+                parameters: parametersFromInputSchema(tool.inputSchema),
                 execute: (args: Readonly<Record<string, unknown>>) => connection.callTool(tool.name, args),
               } as never)
             );

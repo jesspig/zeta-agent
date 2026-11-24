@@ -11,6 +11,8 @@ export interface CliArgs {
   readonly profile: AssemblyProfile;
   /** 打印统一装配的能力诊断后退出（不加载 TUI、不发模型请求）。 */
   readonly capabilities: boolean;
+  /** 插件热重载目录；可重复指定，变更后不重启进程即生效。 */
+  readonly watchDirs: readonly string[];
 }
 
 const MODE_FLAGS: Readonly<Record<string, CliMode>> = {
@@ -26,6 +28,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   let version = false;
   let capabilities = false;
   let profile: string | undefined;
+  const watchDirs: string[] = [];
   const promptParts: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -49,6 +52,13 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       index += 1;
       continue;
     }
+    if (arg === "--watch") {
+      const value = argv[index + 1];
+      if (typeof value !== "string" || value.startsWith("--")) throw new Error("WATCH_DIR_REQUIRED");
+      watchDirs.push(value);
+      index += 1;
+      continue;
+    }
     if (Object.prototype.hasOwnProperty.call(MODE_FLAGS, arg)) {
       mode = MODE_FLAGS[arg] as CliMode;
       continue;
@@ -66,5 +76,6 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     version,
     profile: resolveAssemblyProfile(profile),
     capabilities,
+    watchDirs,
   };
 }

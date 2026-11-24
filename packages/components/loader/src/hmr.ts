@@ -3,13 +3,15 @@ import { watch as fsWatch, type FSWatcher } from "node:fs";
 import type { FiberId } from "@zeta-agent/framework";
 
 /**
- * cordis 官方 HMR 的 Bun 适配版（显式偏离，非官方实现）。
- * - 官方强依赖 Node ≥22 内部 API：`ModuleLoader.fromInternal()` + `--expose-internals`、
- *   ESM loadCache / CJS require.cache 的 evict/restore、`restoreResolutions`。Bun 无这些能力。
- *   本实现保留等价路径：构建产物独立 data URL（内容寻址）+ `Fiber.reload` 复用同一 identity，
- *   快照只作用于 hmr.ts 自身的 states / instance 引用。
- * - unit 连通分组简化：官方按"共享驱逐模块的连通单元"分区（_partition），
- *   这里 unit = FiberId 独立分组（data URL 内容寻址使各产物互不共享模块图）。
+ * 组件级 unit 快照恢复的最小原语（遗留兼容入口）。
+ *
+ * 完整 HMR 事务（输入闭包 digest、import graph accepted/declined 不动点、
+ * 共享模块连通 unit、同 fiber replace/revision、runExclusive/readiness barrier、
+ * 文件签名与故障恢复）已落在 `@zeta-agent/framework` 的 loader/hmr，并以公开 facade 提供；
+ * 本模块仅保留既有 FiberId 形态的快照/部分提交测试契约，不再代表 HMR 的完整承诺。
+ *
+ * - 官方强依赖 Node ≥22 内部 API（`--expose-internals`、ESM loadCache / CJS require.cache
+ *   的 evict/restore、`restoreResolutions`），Bun 无这些能力；完整实现走独立产物 + digest。
  */
 export interface UnitRef {
   readonly id: FiberId;

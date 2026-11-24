@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./context": "./src/context.ts",
     "./objects": "./src/objects/index.ts",
+    "./loader": "./src/loader/index.ts",
     "./types": "./src/types.ts",
     "./package.json": "./package.json"
   },

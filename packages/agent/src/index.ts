@@ -3,6 +3,7 @@ export * from "./plugins/permissions/guard";
 export * from "./plugins/permissions/policy";
 export * from "./plugins/permissions/approval";
 export * from "./plugins/mcp";
+export * from "./plugins/hot-reload";
 export * from "./facade";
 export * from "./assembly";
 export * from "./extensions/loader";
