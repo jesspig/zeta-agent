@@ -95,6 +95,7 @@ import {
   type AuditSink,
   type BackendProfile,
   type SocketAuditSink,
+  type CredentialBoundaryRef,
   type CredentialVault,
   type EgressPolicy,
   type EgressTarget,
@@ -431,6 +432,8 @@ export interface AgentOptions {
   readonly credentialVault?: CredentialVault;
   /** 可选凭据代理，需与 credentialVault 成对注入才启用占位符路径。 */
   readonly secretBroker?: SecretBroker;
+  /** 统一 credential boundary（IF-11）：provider 创建时优先级高于 vault 对。 */
+  readonly credentialBoundary?: CredentialBoundaryRef;
   /** 可选审计链：仅注入时为拒绝/发射/工具执行写 AuditRecord。 */
   readonly auditSink?: AuditSink;
   /** 权限策略 AST：与 gate 叠加，restrict 单调收紧，override 不可提升 bypass-immune 拒绝。 */
@@ -448,6 +451,8 @@ export interface AgentOptions {
   readonly auditTransport?: "memory" | "socket";
   /** socket 模式的本地端点（unix:路径 或 tcp:host:port），绝不传签名密钥。 */
   readonly auditEndpoint?: string;
+  /** socket 模式的客户端认证令牌；缺省从 AUDIT_CLIENT_TOKEN_ENV 读取，不进产物。 */
+  readonly auditToken?: string;
   /** @deprecated facade 不再自行写无签名旁路文件；落盘由 daemon 独占。 */
   readonly auditDir?: string;
   /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
@@ -590,6 +595,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const egressPolicy = options.egressPolicy ?? createEgressPolicy();
   const credentialVault = options.credentialVault;
   const secretBroker = options.secretBroker;
+  const credentialBoundary = options.credentialBoundary;
   const auditTransport = options.auditTransport ?? "memory";
   const auditEndpoint = options.auditEndpoint;
   if (auditTransport === "socket" && (typeof auditEndpoint !== "string" || auditEndpoint.length === 0)) {
@@ -597,7 +603,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
   const socketSink: SocketAuditSink | undefined =
     auditTransport === "socket" && options.auditSink === undefined
-      ? createSocketAuditSink({ endpoint: auditEndpoint! })
+      ? createSocketAuditSink({ endpoint: auditEndpoint!, ...(options.auditToken === undefined ? {} : { token: options.auditToken }) })
       : undefined;
   if (socketSink !== undefined) void socketSink.ready().catch(() => {});
   const auditSink: AuditSink | undefined = options.auditSink ?? socketSink;
@@ -1572,6 +1578,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
           ...config,
           ...(credentialVault !== undefined ? { credentialVault } : {}),
           ...(secretBroker !== undefined ? { secretBroker } : {}),
+          ...(credentialBoundary !== undefined ? { credentialBoundary } : {}),
         },
         fetchImpl
       );

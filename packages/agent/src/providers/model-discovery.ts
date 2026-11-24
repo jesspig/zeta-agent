@@ -1,6 +1,11 @@
+import { withCredentialFetch, type CredentialBoundaryRef } from "@zeta-agent/security";
+
 export interface ModelDiscoveryConfig {
   readonly baseUrl: string;
-  readonly apiKey: string;
+  /** 直接模式：旧调用方仍可显式提供 key；边界模式由 broker 在 fetch 前注入。 */
+  readonly apiKey?: string;
+  /** 统一 credential boundary：明文只在 broker 中，config 序列化不泄露。 */
+  readonly credentialBoundary?: CredentialBoundaryRef;
 }
 
 interface ModelsResponse {
@@ -12,10 +17,17 @@ export async function fetchModelIds(
   config: ModelDiscoveryConfig,
   fetchImpl: typeof fetch = fetch
 ): Promise<readonly string[]> {
+  if (config.credentialBoundary === undefined && (config.apiKey === undefined || config.apiKey.length === 0)) {
+    throw new Error("MODELS_CREDENTIAL_REQUIRED");
+  }
   const url = `${config.baseUrl.replace(/\/+$/, "")}/models`;
-  const response = await fetchImpl(url, {
+  const boundary = config.credentialBoundary;
+  const gated = boundary === undefined
+    ? fetchImpl
+    : withCredentialFetch(boundary.broker, boundary.handle, fetchImpl);
+  const response = await gated(url, {
     method: "GET",
-    headers: { Authorization: `Bearer ${config.apiKey}` },
+    ...(boundary === undefined ? { headers: { Authorization: `Bearer ${config.apiKey}` } } : {}),
   });
   if (!response.ok) {
     const hint =
