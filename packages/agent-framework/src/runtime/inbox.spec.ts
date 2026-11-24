@@ -23,12 +23,13 @@ describe("T-14 inbox 双队列与 QueueMode", () => {
     expect(second.id).toBeGreaterThan(first.id);
   });
 
-  test("followUp 追加到 nextTurn 且 poll 后清空", () => {
+  test("followUp 追加到独立队列且 poll 后清空", () => {
     const inbox = createInbox();
     inbox.followUp(msg("f1"));
     inbox.followUp(msg("f2"));
-    expect(contents(inbox.poll("nextTurn"))).toEqual(["f1", "f2"]);
     expect(inbox.size("nextTurn")).toBe(0);
+    expect(contents(inbox.poll("followUp"))).toEqual(["f1", "f2"]);
+    expect(inbox.size("followUp")).toBe(0);
   });
 
   test("QueueMode all：steer 的消息全部进入 nextTurn", () => {

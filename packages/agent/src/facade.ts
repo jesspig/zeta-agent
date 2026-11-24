@@ -17,6 +17,7 @@ import {
   type ContextTransform,
   type Converter,
   type CoreContextLike,
+  type CoreLoopHooks,
   type DurableExtensionSpec,
   type EffectMeta,
   type EventBus,
@@ -177,6 +178,24 @@ export interface AgentToolSchema {
 }
 
 /** provider 流式块：纯文本字符串为兼容形态；对象形态携带推理与工具调用。 */
+export type AgentStopReason = "stop" | "length" | "error" | "aborted";
+
+export interface AgentUsage {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+  readonly [key: string]: unknown;
+}
+
+export interface AgentStreamError {
+  readonly code: string;
+  readonly message: string;
+  readonly status?: number;
+  readonly retryAfterMs?: number;
+  readonly provider?: string;
+  readonly responseId?: string;
+}
+
 export type AgentStreamChunk =
   | string
   | { readonly type: "text"; readonly text: string }
@@ -187,10 +206,27 @@ export type AgentStreamChunk =
       readonly name: string;
       /** JSON 字符串形式的参数。 */
       readonly arguments?: string;
+    }
+  | {
+      readonly type: "done";
+      readonly stopReason: AgentStopReason;
+      readonly usage?: AgentUsage;
+      readonly durationMs?: number;
+      readonly responseId?: string;
+    }
+  | {
+      readonly type: "error";
+      readonly error: AgentStreamError;
+      readonly durationMs?: number;
+      readonly responseId?: string;
     };
 
 export interface AgentStreamRequest {
   readonly messages: readonly AgentMessage[];
+  /** broker 路由使用的显式 provider；省略时按 model 前缀或 routes 解析。 */
+  readonly provider?: string;
+  /** broker 路由使用的模型引用；具体 provider 适配器仍使用各自构造配置。 */
+  readonly model?: string;
   /** 本轮可用的工具 schema；provider 据此发送原生 function calling。 */
   readonly tools?: readonly AgentToolSchema[];
   /** 思考强度档位（如 low/medium/high/xhigh），由 provider 映射到原生字段。 */
@@ -296,6 +332,8 @@ export interface ConfirmChannel {
 export interface AgentOptions {
   readonly streamFn?: AgentStreamFn;
   readonly plugins?: readonly AgentPlugin[];
+  readonly pluginManager?: AgentPluginManager;
+  readonly loopHooks?: CoreLoopHooks;
   readonly includeBuiltins?: boolean;
   readonly securityBackend?: ExecutionBackend;
   readonly observability?: LoggerOptions;
@@ -359,8 +397,8 @@ export interface AgentOptions {
 }
 
 export interface Agent extends PluginApiSurface {
-  prompt(text: string): Promise<readonly AgentMessage[]>;
-  continue(): Promise<readonly AgentMessage[]>;
+  prompt(text: string, signal?: AbortSignal): Promise<readonly AgentMessage[]>;
+  continue(signal?: AbortSignal): Promise<readonly AgentMessage[]>;
   /** 运行中注入 steer 消息：下一轮轮首进入 transcript，无需等待新 prompt。 */
   steer(message: AgentMessage): void;
   /** 运行中注入 followUp 消息：按队列语义留到下一次轮首消费。 */
@@ -394,6 +432,11 @@ export interface Agent extends PluginApiSurface {
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
 }
 
+function streamErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null && "message" in error) return String(error.message);
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
   const baseStreamFn = options.streamFn;
@@ -414,7 +457,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
     emissionTools = new Set([...baseEmissionTools, ...pluginEmissionRefs.keys()]);
   };
   /** 默认发射工具的真实执行入口；每次 runTurn 重建工具表后立即刷新。 */
-  let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>> = new Map();
+  let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>, signal?: AbortSignal) => unknown | Promise<unknown>> = new Map();
+  let activeSignal: AbortSignal | undefined;
   // D6（延期）：框架 createToolPipeline 原语可用，facade 当前仅装配 declareToolChanges 声明 hook；
   // 完整以 toolPipeline 替换 executeToolCalls 涉及权限/withhold/durable 逻辑耦合，按 O-03 裁决延期。
   /** withhold 策略下总是创建默认效果：插件（如 MCP）可在装配后声明发射工具。 */
@@ -450,7 +494,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       const execute = activeToolRegistry.get(payload.tool);
       if (execute === undefined) return { ok: false, error: `EMISSION_TOOL_NOT_FOUND: ${payload.tool}` };
       try {
-        return await execute(payload.args);
+        if (activeSignal?.aborted === true) throw new Error("ABORTED");
+        return await execute(payload.args, activeSignal);
       } catch (error) {
         // 与基线 executeToolCalls 的 catch 一致：异常转成结构化失败结果，保持工具对外契约零回归。
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -526,8 +571,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
   });
 
   let aborted = false;
-  /** 当前回合的取消控制器；abort() 触发它，使等待中的网络请求立即结束。 */
-  let abortController: AbortController | undefined;
+  let generation = 0;
+  interface RunLease {
+    readonly generation: number;
+    readonly controller: AbortController;
+    promise: Promise<readonly AgentMessage[]>;
+  }
+  let activeRun: RunLease | undefined;
   /** 当前回合是否使用了 provider 原生 tool_calls（决定是否自动续跑消费工具结果）。 */
   let lastTurnHadNativeTools = false;
 
@@ -536,8 +586,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const declaredLoadout = new Map<string, PluginTool>();
   const converters: Converter[] = [];
   const contextTransforms: ContextTransform[] = [];
-  const beforeToolCalls: Array<(event: AgentEvent) => void | Promise<void>> = [];
-  const afterToolCalls: Array<(event: AgentEvent) => void | Promise<void>> = [];
+  const beforeToolCalls: Array<(event: AgentEvent, signal?: AbortSignal) => void | Promise<void>> = [];
+  const afterToolCalls: Array<(event: AgentEvent, signal?: AbortSignal) => void | Promise<void>> = [];
   const turnBoundaries: FinishTurn[] = [];
   const prepareRequestFns: PrepareRequest[] = [];
   const prepareNextTurnFns: PrepareNextTurn[] = [];
@@ -545,7 +595,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const followUpSources: QueueSource[] = [];
   const streamFnProviders: StreamFn[] = [];
   // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
-  const pluginManager = new AgentPluginManager();
+  const pluginManager = options.pluginManager ?? new AgentPluginManager();
   const events = createEventBus();
   /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
   const inbox: Inbox = createInbox();
@@ -565,7 +615,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   function activeStreamFn(): AgentStreamFn | undefined {
     const provider = streamFnProviders[streamFnProviders.length - 1];
     if (provider !== undefined) {
-      return (request: AgentStreamRequest) => provider(request) as AsyncIterable<string>;
+      return (request: AgentStreamRequest) => provider(request) as AsyncIterable<AgentStreamChunk>;
     }
     return baseStreamFn;
   }
@@ -691,44 +741,69 @@ export function createAgent(options: AgentOptions = {}): Agent {
     return { type: "text_delta", delta: content };
   }
 
-  async function runTurn(userText?: string): Promise<readonly AgentMessage[]> {
+  function startRun(userText: string | undefined, externalSignal?: AbortSignal): Promise<readonly AgentMessage[]> {
+    if (activeRun !== undefined) throw new Error("ACTIVE_RUN: 同一 Agent 同时只能运行一个 prompt/continue");
+    const controller = new AbortController();
+    const onAbort = (): void => {
+      aborted = true;
+      controller.abort(externalSignal?.reason);
+    };
+    if (externalSignal?.aborted === true) onAbort();
+    else externalSignal?.addEventListener("abort", onAbort, { once: true });
+    const lease: RunLease = { generation: ++generation, controller, promise: Promise.resolve([]) };
+    activeRun = lease;
     aborted = false;
-    abortController = new AbortController();
+    lastTurnHadNativeTools = false;
+    const execution = executeRun(lease, userText).finally(() => {
+      externalSignal?.removeEventListener("abort", onAbort);
+      if (activeRun === lease) activeRun = undefined;
+    });
+    lease.promise = execution;
+    return execution;
+  }
+
+  async function executeRun(lease: RunLease, userText?: string): Promise<readonly AgentMessage[]> {
+    const signal = lease.controller.signal;
+    const abortController = lease.controller;
+    const initialMessageCount = stream.getState().messages.length;
+    activeSignal = signal;
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
-    await stream.emit({ type: "agent_start" });
+    await stream.emit({ type: "agent_start" }, signal);
 
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
     for (const source of steeringSources) {
-      inbox.steer(source.next() as AgentMessage);
+      inbox.steer(await source.next() as AgentMessage);
     }
     for (const source of followUpSources) {
-      inbox.followUp(source.next() as AgentMessage);
+      inbox.followUp(await source.next() as AgentMessage);
     }
 
-    const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>>();
+    const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>, signal?: AbortSignal) => unknown | Promise<unknown>>();
     for (const item of contributions) {
       if (item.kind !== "tool") continue;
       const tool = item.tool;
-      toolRegistry.set(tool.name, (args) => (tool.execute as (input: never) => unknown)(args as never));
+      toolRegistry.set(tool.name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
     }
-    for (const [name, entry] of pluginTools) toolRegistry.set(name, (args) => (entry.tool.execute as (input: never) => unknown)(args as never));
-    for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args) => (tool.execute as (input: never) => unknown)(args as never));
+    for (const [name, entry] of pluginTools) toolRegistry.set(name, (args, toolSignal) => (entry.tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
+    for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
     activeToolRegistry = toolRegistry;
 
     const effectiveStreamFn = activeStreamFn();
-    const emitConverted = (input: unknown): void => {
+    const emitConverted = async (input: unknown): Promise<void> => {
       for (const converter of converters) {
-        const event = converter(input);
-        if (event !== undefined) void stream.emit(event);
+        const event = await converter(input);
+        if (event !== undefined) await stream.emit(event, signal);
       }
     };
 
     const runtime: LoopRuntime = {
       inbox,
-      emit: (event) => stream.emit(event),
+      signal,
+      emit: (event) => stream.emit(event, signal),
       getState: () => stream.getState(),
-      prepareNextTurn: () => {
-        for (const fn of prepareNextTurnFns) fn(stream.getState());
+      prepareNextTurn: async () => {
+        for (const fn of prepareNextTurnFns) await fn(stream.getState(), signal);
+        await options.loopHooks?.prepareNextTurn?.(stream.getState(), signal);
       },
       declareToolChanges: () => {
         const next = toolNamesSnapshot();
@@ -737,7 +812,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         // 权限策略热更新不改变工具集合时返回 undefined，避免无意义的 system 声明/reload。
         return delta.messages.length > 0 ? delta : undefined;
       },
-      prepareRequest: (request) => {
+      prepareRequest: async (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
         const prompt = resolveSystemPrompt();
         // 系统提示词只进入请求，不写入会话状态，避免 transcript 出现 system 行。
@@ -749,14 +824,19 @@ export function createAgent(options: AgentOptions = {}): Agent {
               : (base.messages ?? []),
         };
         let result: unknown = seeded;
-        for (const transform of contextTransforms) result = transform(result);
-        for (const fn of prepareRequestFns) result = fn(result);
-        return result;
+        for (const transform of contextTransforms) result = await transform(result);
+        for (const fn of prepareRequestFns) result = await fn(result, signal);
+        return await options.loopHooks?.prepareRequest?.(result, signal) ?? result;
       },
-      pollFollowUp: () => inbox.poll("nextTurn").map((item) => item.body),
-      finishTurn: (turn) => {
+      pollFollowUp: async () => {
+        const followUps = inbox.poll("followUp").map((item) => item.body);
+        return await options.loopHooks?.pollFollowUp?.(signal) ?? followUps;
+      },
+      finishTurn: async (turn) => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-        for (const fn of turnBoundaries) fn(event);
+        for (const fn of turnBoundaries) await fn(event, signal);
+        const legacy = await options.loopHooks?.finishTurn?.(turn, signal);
+        if (legacy !== undefined) return legacy;
         // 原生工具调用需要续跑一轮，让模型消费工具结果；文本标记协议保持单轮收束。
         return lastTurnHadNativeTools && turn.toolResults.length > 0 ? undefined : TURN_END_DECISION;
       },
@@ -771,52 +851,71 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const streamedCalls: Array<{ id?: string; name: string; arguments?: string }> = [];
         lastTurnHadNativeTools = false;
         let partialSeq = 0;
+        let stopReason: AssistantResult["stopReason"] = "stop";
+        let terminal: { usage?: unknown; durationMs?: number; responseId?: string } = {};
+        let failure: unknown;
         const snapshot = (): AgentMessage => ({
           role: "assistant",
           content,
           ...(thinking.length > 0 ? { thinking } : {}),
         });
-        if (effectiveStreamFn !== undefined) {
-          const base = (request ?? {}) as Partial<AgentStreamRequest>;
-          const enriched: AgentStreamRequest = {
-            ...base,
-            messages: base.messages ?? [],
-            tools: base.tools ?? toolDefinitions.map(toToolSchema),
-            ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-            signal: abortController?.signal,
-          } as AgentStreamRequest;
-          for await (const chunk of effectiveStreamFn(enriched)) {
-            if (aborted) {
-              return {
-                message: snapshot(),
-                toolCalls: [],
-                stopReason: "aborted",
-                updates,
-              };
-            }
-            if (typeof chunk === "string") {
-              emitConverted(chunk);
-              content += chunk;
-            } else if (chunk.type === "text") {
-              content += chunk.text;
-            } else if (chunk.type === "reasoning") {
-              emitConverted(chunk.text);
-              thinking += chunk.text;
-            } else if (chunk.type === "tool_call") {
-              streamedCalls.push(chunk);
-            }
-            if (onPartial !== undefined && (content.length > 0 || thinking.length > 0)) {
-              partialSeq += 1;
-              await onPartial(snapshot());
-              updates.push({ type: "text_delta", delta: content, seq: partialSeq });
+        try {
+          if (effectiveStreamFn !== undefined) {
+            const base = (request ?? {}) as Partial<AgentStreamRequest>;
+            const enriched: AgentStreamRequest = {
+              ...base,
+              messages: base.messages ?? [],
+              tools: base.tools ?? toolDefinitions.map(toToolSchema),
+              ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+              signal,
+            } as AgentStreamRequest;
+            for await (const chunk of effectiveStreamFn(enriched)) {
+              if (signal.aborted) { stopReason = "aborted"; break; }
+              if (typeof chunk === "string") {
+                await emitConverted(chunk);
+                content += chunk;
+              } else if (chunk.type === "text") {
+                content += chunk.text;
+              } else if (chunk.type === "reasoning") {
+                await emitConverted(chunk.text);
+                thinking += chunk.text;
+              } else if (chunk.type === "tool_call") {
+                streamedCalls.push(chunk);
+              } else if (chunk.type === "done") {
+                stopReason = chunk.stopReason;
+                terminal = {
+                  ...(chunk.usage !== undefined ? { usage: chunk.usage } : {}),
+                  ...(chunk.durationMs !== undefined ? { durationMs: chunk.durationMs } : {}),
+                  ...(chunk.responseId !== undefined ? { responseId: chunk.responseId } : {}),
+                };
+                break;
+              } else if (chunk.type === "error") {
+                stopReason = "error";
+                failure = chunk.error;
+                terminal = {
+                  ...(chunk.durationMs !== undefined ? { durationMs: chunk.durationMs } : {}),
+                  ...(chunk.responseId !== undefined ? { responseId: chunk.responseId } : {}),
+                };
+                break;
+              }
+              if (onPartial !== undefined && (content.length > 0 || thinking.length > 0)) {
+                partialSeq += 1;
+                await onPartial(snapshot());
+                updates.push({ type: "text_delta", delta: content, seq: partialSeq });
+              }
             }
           }
+        } catch (error) {
+          stopReason = signal.aborted ? "aborted" : "error";
+          failure = error;
         }
+        if (signal.aborted) stopReason = "aborted";
+        if (stopReason === "error") content = `Error: ${streamErrorMessage(failure)}`;
 
         const toolCalls: ToolCall[] = [];
         const records: AgentToolCallRecord[] = [];
         lastTurnHadNativeTools = streamedCalls.length > 0;
-        if (!aborted) {
+        if (stopReason !== "error" && stopReason !== "aborted") {
           for (const call of streamedCalls) {
             const id = call.id ?? `call-${toolCalls.length + 1}`;
             let args: unknown = {};
@@ -855,13 +954,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
             ...(records.length > 0 ? { toolCalls: records } : {}),
           },
           toolCalls,
-          stopReason: aborted ? "aborted" : "stop",
+          stopReason,
+          ...terminal,
+          ...(failure !== undefined ? { error: failure } : {}),
           // 增量已在流式过程中通过 onPartial 发出，避免重复。
           updates: onPartial === undefined ? updates : [],
         };
       },
 
-      async executeToolCalls(calls: readonly ToolCall[]): Promise<readonly ToolResult[]> {
+      async executeToolCalls(calls: readonly ToolCall[], toolSignal?: AbortSignal): Promise<readonly ToolResult[]> {
+        const signal = toolSignal ?? activeSignal;
         const results: ToolResult[] = [];
         /** 已 enqueue 的工具调用位次 → 幂等键，commit 后据此回填真实执行结果。 */
         const emissionSlots = new Map<number, string>();
@@ -875,7 +977,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
           if (execute === undefined) {
             isError = true;
             output = "TOOL_NOT_FOUND";
-          } else if (aborted) {
+          } else if (signal?.aborted === true) {
             isError = true;
             output = "ABORTED";
           } else {
@@ -948,12 +1050,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
                   output = { ok: true, withheld: true, tool: call.name, key };
                 } else {
                   // 非发射工具（或 direct 策略）走原路径，行为与基线完全一致。
-                  for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args });
-                  const value = await execute(args);
+                  for (const fn of beforeToolCalls) await fn({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args }, signal);
+                  if (aborted) throw new Error("ABORTED");
+                  const value = await execute(args, signal);
                   // 工具以 {ok:false} 表达的失败也要传播为 isError，不能只靠抛错。
                   const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
                   if (failed) isError = true;
-                  for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed });
+                  for (const fn of afterToolCalls) await fn({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result: value, isError: failed }, signal);
                   output = value === undefined ? NO_TOOL_RESULT : value;
                   recordAudit(
                     call.name,
@@ -1023,19 +1126,30 @@ export function createAgent(options: AgentOptions = {}): Agent {
         role: "assistant",
         content: `Error: ${error instanceof Error ? error.message : String(error)}`,
       };
-      await stream.emit({ type: "message_start", message });
-      await stream.emit({ type: "message_end", message });
-      await stream.emit({ type: "agent_end", messages: stream.getState().messages });
+      await stream.emit({ type: "message_start", message }, signal);
+      await stream.emit({ type: "message_end", message }, signal);
+      await stream.emit({ type: "turn_end", message, toolResults: [] }, signal);
+      await stream.emit({ type: "agent_end", messages: stream.getState().messages.slice(initialMessageCount) }, signal);
     }
     return stream.getState().messages;
   }
 
   return {
-    prompt(text) {
-      if (typeof text !== "string") throw new Error("prompt: expected a string");
-      return runTurn(text);
+    prompt(text, signal) {
+      if (typeof text !== "string") return Promise.reject(new Error("prompt: expected a string"));
+      try {
+        return startRun(text, signal);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     },
-    continue: () => runTurn(),
+    continue(signal) {
+      try {
+        return startRun(undefined, signal);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    },
     steer: (message) => {
       inbox.steer(message);
     },
@@ -1047,17 +1161,23 @@ export function createAgent(options: AgentOptions = {}): Agent {
     subscribe: (listener) => stream.subscribe(listener),
     abort() {
       aborted = true;
-      abortController?.abort();
+      activeRun?.controller.abort();
     },
     reset() {
+      if (activeRun !== undefined) throw new Error("ACTIVE_RUN: reset 必须等待当前 run 结束");
+      generation += 1;
       aborted = false;
-      abortController = undefined;
+      activeSignal = undefined;
       lastTurnHadNativeTools = false;
       inbox.clear("nextTurn");
       inbox.clear("nextStep");
+      inbox.clear("followUp");
       stream.reset();
     },
-    waitForIdle: () => stream.waitForIdle(),
+    async waitForIdle() {
+      while (activeRun !== undefined) await activeRun.promise.catch(() => {});
+      await stream.waitForIdle();
+    },
     ...api,
     api,
     emitEffect: (meta) => effectBridge.emit(meta),

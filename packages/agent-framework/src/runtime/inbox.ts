@@ -1,7 +1,7 @@
 import type { AgentMessage } from "./agent";
 
 export type QueueMode = "all" | "interrupt" | "step";
-export type QueueTarget = "nextTurn" | "nextStep";
+export type QueueTarget = "nextTurn" | "nextStep" | "followUp";
 export type MessageId = number;
 
 export interface InboxMessage {
@@ -29,9 +29,12 @@ export function createInbox(options: { mode?: QueueMode } = {}): Inbox {
   let nextId = 0;
   let nextTurn: InboxMessage[] = [];
   let nextStep: InboxMessage[] = [];
+  let followUp: InboxMessage[] = [];
 
   function queueFor(target: QueueTarget): InboxMessage[] {
-    return target === "nextTurn" ? nextTurn : nextStep;
+    if (target === "nextTurn") return nextTurn;
+    if (target === "followUp") return followUp;
+    return nextStep;
   }
 
   function make(body: AgentMessage): InboxMessage {
@@ -63,7 +66,7 @@ export function createInbox(options: { mode?: QueueMode } = {}): Inbox {
     },
     followUp(body) {
       const message = make(body);
-      nextTurn.push(message);
+      followUp.push(message);
       return message;
     },
     claim(target) {
@@ -81,6 +84,7 @@ export function createInbox(options: { mode?: QueueMode } = {}): Inbox {
     },
     clear(target) {
       if (target === "nextTurn") nextTurn = [];
+      else if (target === "followUp") followUp = [];
       else nextStep = [];
     },
     getMode() {

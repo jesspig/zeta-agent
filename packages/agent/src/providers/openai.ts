@@ -1,4 +1,5 @@
 import type { AgentMessage, AgentStreamChunk, AgentStreamFn, AgentStreamRequest, AgentToolSchema } from "../facade";
+import { doneChunk, errorChunk, httpError } from "./protocol";
 
 export interface OpenAiConfig {
   readonly baseUrl: string;
@@ -65,7 +66,9 @@ function extractReasoning(delta: ChatDelta): string {
 }
 
 interface ChatChunk {
-  readonly choices?: readonly { readonly delta?: ChatDelta }[];
+  readonly id?: string;
+  readonly choices?: readonly { readonly delta?: ChatDelta; readonly finish_reason?: string | null }[];
+  readonly usage?: unknown;
 }
 
 function toOpenAiParameters(schema: AgentToolSchema): Record<string, unknown> {
@@ -114,10 +117,13 @@ export function toOpenAiMessages(messages: readonly AgentMessage[]): readonly Re
   });
 }
 
-async function* parseSse(body: ReadableStream<Uint8Array>): AsyncIterableIterator<AgentStreamChunk> {
+async function* parseSse(body: ReadableStream<Uint8Array>, startedAt: number): AsyncIterableIterator<AgentStreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let responseId: string | undefined;
+  let usage: unknown;
+  let finishReason: string | undefined;
   const toolCalls = new Map<number, { id?: string; name: string; arguments: string }>();
 
   const flushToolCalls = function* (): IterableIterator<AgentStreamChunk> {
@@ -129,61 +135,67 @@ async function* parseSse(body: ReadableStream<Uint8Array>): AsyncIterableIterato
     toolCalls.clear();
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (payload === "[DONE]") {
-          yield* flushToolCalls();
-          return;
-        }
-        if (payload.length === 0) continue;
-        let parsed: ChatChunk;
-        try {
-          parsed = JSON.parse(payload) as ChatChunk;
-        } catch {
-          continue;
-        }
-        const delta = parsed.choices?.[0]?.delta;
-        if (delta === undefined) continue;
-        const reasoning = extractReasoning(delta);
-        if (reasoning.length > 0) yield { type: "reasoning", text: reasoning };
-        if (typeof delta.content === "string" && delta.content.length > 0) {
-          yield delta.content;
-        } else if (Array.isArray(delta.content)) {
-          for (const part of delta.content as readonly ChatContentPart[]) {
-            if (typeof part === "string") {
-              yield part;
-            } else if (part.type === "thinking" || part.type === "reasoning") {
-              const text = part.thinking ?? part.text ?? "";
-              if (text.length > 0) yield { type: "reasoning", text };
-            } else if (typeof part.text === "string" && part.text.length > 0) {
-              yield part.text;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") {
+            yield* flushToolCalls();
+            yield doneChunk(finishReason === "length" ? "length" : finishReason === "content_filter" ? "error" : "stop", { usage, responseId, startedAt });
+            return;
+          }
+          if (payload.length === 0) continue;
+          let parsed: ChatChunk;
+          try {
+            parsed = JSON.parse(payload) as ChatChunk;
+          } catch {
+            continue;
+          }
+          if (typeof parsed.id === "string") responseId = parsed.id;
+          if (parsed.usage !== undefined) usage = parsed.usage;
+          const choice = parsed.choices?.[0];
+          if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+          const delta = choice?.delta;
+          if (delta === undefined) continue;
+          const reasoning = extractReasoning(delta);
+          if (reasoning.length > 0) yield { type: "reasoning", text: reasoning };
+          if (typeof delta.content === "string" && delta.content.length > 0) {
+            yield delta.content;
+          } else if (Array.isArray(delta.content)) {
+            for (const part of delta.content as readonly ChatContentPart[]) {
+              if (typeof part === "string") {
+                yield part;
+              } else if (part.type === "thinking" || part.type === "reasoning") {
+                const text = part.thinking ?? part.text ?? "";
+                if (text.length > 0) yield { type: "reasoning", text };
+              } else if (typeof part.text === "string" && part.text.length > 0) {
+                yield part.text;
+              }
             }
           }
-        }
-        for (const call of delta.tool_calls ?? []) {
-          const index = call.index ?? toolCalls.size;
-          const current = toolCalls.get(index) ?? { name: "", arguments: "" };
-          if (typeof call.id === "string" && call.id.length > 0) current.id = call.id;
-          if (typeof call.function?.name === "string" && call.function.name.length > 0) {
-            current.name = call.function.name;
+          for (const call of delta.tool_calls ?? []) {
+            const index = call.index ?? toolCalls.size;
+            const current = toolCalls.get(index) ?? { name: "", arguments: "" };
+            if (typeof call.id === "string" && call.id.length > 0) current.id = call.id;
+            if (typeof call.function?.name === "string" && call.function.name.length > 0) current.name = call.function.name;
+            if (typeof call.function?.arguments === "string") current.arguments += call.function.arguments;
+            toolCalls.set(index, current);
           }
-          if (typeof call.function?.arguments === "string") {
-            current.arguments += call.function.arguments;
-          }
-          toolCalls.set(index, current);
         }
       }
     }
+    yield* flushToolCalls();
+    yield doneChunk(finishReason === "length" ? "length" : finishReason === "content_filter" ? "error" : "stop", { usage, responseId, startedAt });
+  } finally {
+    reader.releaseLock();
   }
-  yield* flushToolCalls();
 }
 
 /**
@@ -195,6 +207,7 @@ export function createOpenAiStreamFn(
   fetchImpl: typeof fetch = fetch
 ): AgentStreamFn {
   return async function* (request: AgentStreamRequest) {
+    const startedAt = Date.now();
     const url = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
     const tools = config.tools === false ? undefined : request.tools;
     const body: Record<string, unknown> = {
@@ -224,19 +237,13 @@ export function createOpenAiStreamFn(
       ...(request.signal !== undefined ? { signal: request.signal } : {}),
     });
     if (!response.ok) {
-      const hint =
-        response.status === 401
-          ? "请检查 ZETA_API_KEY"
-          : response.status === 429
-            ? "请求被限流或额度不足，请稍后重试"
-            : response.status === 404
-              ? "请检查 ZETA_BASE_URL 与 ZETA_MODEL"
-              : "";
-      throw new Error(`OPENAI_HTTP_${response.status}${hint ? ` (${hint})` : ""}`);
+      yield errorChunk({ ...httpError("openai", response), message: `OPENAI_HTTP_${response.status}` });
+      return;
     }
     if (response.body === null) {
-      throw new Error("OPENAI_NO_BODY");
+      yield errorChunk({ code: "no_body", message: "OPENAI_NO_BODY", provider: "openai" });
+      return;
     }
-    yield* parseSse(response.body);
+    yield* parseSse(response.body, startedAt);
   };
 }

@@ -3,7 +3,7 @@ import type { AgentEvent } from "../runtime/agent";
 
 export interface PluginTool<P = never> {
   readonly name: string;
-  readonly execute: (input: P) => unknown;
+  readonly execute: (input: P, signal?: AbortSignal) => unknown | Promise<unknown>;
 }
 
 export type PluginContribution =

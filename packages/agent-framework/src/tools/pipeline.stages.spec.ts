@@ -227,7 +227,7 @@ describe("T-03 prepare/execute/finalize 三段管线", () => {
       order.push(event.type);
     });
     const inbox = createInbox();
-    inbox.followUp({ role: "user", content: "go" });
+    inbox.steer({ role: "user", content: "go" });
     const systemMessage: AgentMessage = { role: "system", content: "sys (tools: read)" };
     const runtime: LoopRuntime = {
       inbox,
@@ -260,7 +260,7 @@ describe("T-03 runToolCall 嵌套复用同一管线但不发事件不加消息",
       events.push(event);
     });
     const inbox = createInbox();
-    inbox.followUp({ role: "user", content: "go" });
+    inbox.steer({ role: "user", content: "go" });
 
     let nested: ToolResult | undefined;
     let nestedStarted = false;

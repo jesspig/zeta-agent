@@ -15,6 +15,11 @@ function sseResponse(frames: readonly string[]): Response {
 
 const config: OpenAiConfig = { baseUrl: "https://example.test/v1", apiKey: "test-key", model: "m1" };
 
+function lastErrorMessage(chunks: readonly AgentStreamChunk[]): string {
+  const last = chunks.at(-1);
+  return typeof last === "object" && last.type === "error" ? last.error.message : "";
+}
+
 describe("OpenAI 兼容 provider", () => {
   test("按 SSE delta 产出内容片段", async () => {
     const request: AgentStreamRequest = { messages: [{ role: "user", content: "hi" }] };
@@ -119,16 +124,11 @@ describe("OpenAI 兼容 provider", () => {
     expect(messages[1]).toEqual({ role: "tool", tool_call_id: "c1", content: "out" });
   });
 
-  test("非 2xx 响应抛错且不泄露 key", async () => {
+  test("非 2xx 响应产出 sanitized error chunk 且不泄露 key", async () => {
     const fakeFetch = (async () => new Response("nope", { status: 401 })) as unknown as typeof fetch;
     const request: AgentStreamRequest = { messages: [{ role: "user", content: "hi" }] };
-    let message = "";
-    try {
-      for await (const _ of createOpenAiStreamFn(config, fakeFetch)(request)) void _;
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain("OPENAI_HTTP_401");
-    expect(message).not.toContain("test-key");
+    const chunks = await Array.fromAsync(createOpenAiStreamFn(config, fakeFetch)(request));
+    expect(lastErrorMessage(chunks)).toContain("OPENAI_HTTP_401");
+    expect(JSON.stringify(chunks)).not.toContain("test-key");
   });
 });

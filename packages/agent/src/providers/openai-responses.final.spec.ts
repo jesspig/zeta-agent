@@ -30,19 +30,13 @@ describe("T-08 Responses 流终态门槛", () => {
         'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"a\\":1}"}\n\n',
         'data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n',
       ])) as unknown as typeof fetch;
-    let threw = false;
-    let chunks: AgentStreamChunk[] = [];
-    try {
-      chunks = await collect(
-        createOpenAiResponsesStreamFn(
-          { baseUrl: "https://api.test/v1", apiKey: "k", model: "m" },
-          fake,
-        )({ messages: [] }),
-      );
-    } catch {
-      threw = true;
-    }
-    expect(threw).toBe(true);
+    const chunks = await collect(
+      createOpenAiResponsesStreamFn(
+        { baseUrl: "https://api.test/v1", apiKey: "k", model: "m" },
+        fake,
+      )({ messages: [] }),
+    );
+    expect(chunks.at(-1)).toMatchObject({ type: "done", stopReason: "length" });
     expect(chunks.filter((c) => typeof c === "object" && c.type === "tool_call")).toHaveLength(0);
   });
 

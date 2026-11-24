@@ -24,7 +24,7 @@ export interface RedactRule {
 
 export interface AgentTool<P = unknown> {
   readonly name: string;
-  readonly execute: (input: P) => unknown | Promise<unknown>;
+  readonly execute: (input: P, signal?: AbortSignal) => unknown | Promise<unknown>;
   /** 工具声明的执行偏好；统一流水线据此决定整批串行或并行。 */
   readonly executionMode?: ToolExecutionMode;
 }
@@ -36,15 +36,15 @@ export interface EventBus {
 
 export type Converter = (input: unknown) => AgentEvent | undefined;
 export type ContextTransform = (context: unknown) => unknown;
-export type BeforeHook = (event: AgentEvent) => void | Promise<void>;
-export type AfterHook = (event: AgentEvent) => void | Promise<void>;
-export type FinishTurn = (event: AgentEvent) => void | Promise<void>;
-export type PrepareRequest = (request: unknown) => unknown;
-export type PrepareNextTurn = (context: unknown) => unknown;
+export type BeforeHook = (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
+export type AfterHook = (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
+export type FinishTurn = (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
+export type PrepareRequest = (request: unknown, signal?: AbortSignal) => unknown | Promise<unknown>;
+export type PrepareNextTurn = (context: unknown, signal?: AbortSignal) => unknown | Promise<unknown>;
 
 export interface QueueSource {
   readonly name: string;
-  readonly next: () => unknown;
+  readonly next: () => unknown | Promise<unknown>;
 }
 
 export type StreamFn = (input: unknown) => AsyncIterable<unknown>;

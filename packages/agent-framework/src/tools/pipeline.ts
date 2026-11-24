@@ -658,7 +658,7 @@ export interface ToolPipeline {
   executePreparedToolCall(prepared: PreparedToolCall): Promise<ExecutedToolCall>;
   finalizeExecutedToolCall(executed: ExecutedToolCall): Promise<ToolResult>;
   executeCall(call: UnifiedToolCall): Promise<ToolResult>;
-  executeBatch(batch: readonly UnifiedToolCall[]): Promise<readonly ToolResult[]>;
+  executeBatch(batch: readonly UnifiedToolCall[], signal?: AbortSignal): Promise<readonly ToolResult[]>;
   runToolCall(call: UnifiedToolCall): Promise<ToolResult>;
   declareToolChanges(previous: readonly string[], next: readonly string[], systemPrompt?: string): ToolDeclarationDelta;
   shouldTerminate(results: readonly UnifiedToolResult[]): boolean;
@@ -672,7 +672,7 @@ export function createToolPipeline(ctx: BatchContext): ToolPipeline {
     executePreparedToolCall: (prepared) => executePreparedToolCall(prepared, ctx),
     finalizeExecutedToolCall: (executed) => finalizeExecutedToolCall(executed, ctx),
     executeCall: (call) => executeCall(call, ctx),
-    executeBatch: (batch) => executeBatch(batch, ctx),
+    executeBatch: (batch, signal) => executeBatch(batch, signal === undefined ? ctx : { ...ctx, signal }),
     runToolCall: (call) => runToolCall(call, ctx),
     declareToolChanges,
     shouldTerminate: shouldTerminateToolBatch,
