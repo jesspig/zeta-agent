@@ -1,21 +1,67 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { createTui, type RendererBackend, type TuiHandle } from "./index";
+import {
+  createBackendKeyEvent,
+  createTui,
+  type BackendClipboard,
+  type BackendEvent,
+  type BackendKeyEvent,
+  type BackendMountOptions,
+  type BackendSize,
+  type Frame,
+  type RendererBackend,
+  type TuiHandle,
+} from "./index";
+import type { FrameState } from "./frame-state";
 import { createSlotRegistry } from "./slots";
 
 class UserBackend implements RendererBackend {
-  render(frame: { width: number; height: number; lines: readonly string[] }): { snapshot: string } {
+  private destroyed = false;
+  private mounted = false;
+  private readonly listeners = new Set<(event: BackendEvent) => void>();
+  readonly clipboard: BackendClipboard = {
+    copy: () => {},
+  };
+
+  private assertAlive(): void {
+    if (this.destroyed) throw new Error("UserBackend: already destroyed");
+  }
+
+  render(frame: FrameState): Frame {
+    this.assertAlive();
     return { snapshot: frame.lines.join("\n") };
   }
-  async testRender() {
+  mount(_options: BackendMountOptions): void {
+    this.assertAlive();
+    this.mounted = true;
+  }
+  input(key: BackendKeyEvent): boolean {
+    this.assertAlive();
+    if (!this.mounted) throw new Error("UserBackend: not mounted");
+    for (const listener of [...this.listeners]) listener({ type: "key", key });
+    return this.listeners.size > 0;
+  }
+  event(listener: (event: BackendEvent) => void): () => void {
+    this.assertAlive();
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  resize(size: BackendSize): void {
+    this.assertAlive();
+    for (const listener of [...this.listeners]) listener({ type: "resize", size });
+  }
+  async testRender(): ReturnType<RendererBackend["testRender"]> {
     return {
       async renderOnce() {},
       captureCharFrame: () => "user-backend",
       destroy() {},
     };
   }
-  destroy() {}
+  destroy(): void {
+    this.destroyed = true;
+    this.listeners.clear();
+  }
 }
 
 test("createTui 可注入用户自带后端（非仓库发布实现）", () => {

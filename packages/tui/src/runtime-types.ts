@@ -1,3 +1,7 @@
+import type { RuntimeProtocol } from "@zeta-agent/agent";
+import type { RendererBackend } from "./backend";
+import type { ApprovalUiChannel } from "./approval-ui";
+import type { KeyBinding } from "./keymap";
 import type { AgentSignals, EventSource } from "./signal";
 import type { SolidPlugin } from "./slots-native";
 import type { ZetaNativeSlots } from "./slots-native";
@@ -73,6 +77,14 @@ export interface RuntimeTuiOptions {
   readonly resources?: RuntimeResources;
   /** 真实遥测（token/成本/分支/会话）：运行时从事件源补齐 token，再交给 footer。 */
   readonly telemetry?: AgentUsageTelemetry;
+  /** 注入可替换渲染后端：注入后由它接管终端输入/尺寸/剪贴板，不再创建默认原生渲染器。 */
+  readonly backend?: RendererBackend;
+  /** 与 headless/RPC 共享的统一控制协议；键盘动作投影为 control 帧。 */
+  readonly protocol?: RuntimeProtocol;
+  /** user/app/TUI 三层自定义键位；同层同键冲突显式报错。 */
+  readonly keyBindings?: readonly KeyBinding[];
+  /** TUI 审批 UI 通道；与 agent 的 ApprovalChannel/broker 同一路径。 */
+  readonly approvalUi?: ApprovalUiChannel;
 }
 
 export interface RuntimeTuiHandle {
@@ -87,4 +99,6 @@ export interface RuntimeTuiHandle {
   waitForExit(): Promise<void>;
   destroy(): Promise<void>;
   getSignals(): AgentSignals | undefined;
+  /** 注入 backend 时暴露审批 UI 状态，宿主可将其绑定到自有 UI 层。 */
+  readonly approvalUi?: ApprovalUiChannel;
 }
