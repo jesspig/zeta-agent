@@ -73,3 +73,52 @@ describe("T-13 扩展加载端到端", () => {
     expect(resolved.replaced).toEqual(["banner"]);
   });
 });
+
+/**
+ * T-06：evaluation 失败时 data URL 内容寻址 + `Fiber.reload` 复用 identity 的等价路径，
+ * 必须保留旧导出与宿主会话（对应 cordis 的"按 unit 恢复旧实例 / FAILED 留待重试"）。
+ * Node 内部缓存驱逐 API 在 Bun 不可达，故以导出对象引用不变作为会话保留证据。
+ */
+describe("T-06 e2e reload 保留会话与旧导出", () => {
+  test("语法错误 reload 保留旧导出对象引用与会话状态，恢复后重试成功", async () => {
+    const dir = tempDir();
+    const file = join(dir, "session.ts");
+    writeFileSync(
+      file,
+      'export default { name: "session", version: 1, session: { count: 0 } };\n'
+    );
+
+    const loader = createExtensionLoader();
+    const first = await loader.load([file]);
+    expect(first.failures).toHaveLength(0);
+    expect(asRecord(first.entries[0]?.exports.default).version).toBe(1);
+
+    // reload 到 v2，拿到新导出，并在其上累积宿主会话状态。
+    writeFileSync(
+      file,
+      'export default { name: "session", version: 2, session: { count: 0 } };\n'
+    );
+    const second = await loader.reload();
+    const v2 = asRecord(second.entries[0]?.exports.default);
+    expect(v2.version).toBe(2);
+    (asRecord(v2.session) as Record<string, unknown>).count = 42;
+
+    // 语法错误：reload 记录失败，但导出仍是同一个 v2 对象（旧导出未破坏，会话不丢失）。
+    writeFileSync(file, "export default { broken\n");
+    const failed = await loader.reload();
+    expect(failed.failures).toHaveLength(1);
+    const afterFail = failed.entries[0]?.exports.default;
+    expect(afterFail).toBe(v2);
+    expect(asRecord(asRecord(afterFail).session)).toBe(asRecord(v2.session));
+    expect(asRecord(asRecord(afterFail).session).count).toBe(42);
+
+    // 恢复源码后重试成功，失败单元被重新拉起。
+    writeFileSync(
+      file,
+      'export default { name: "session", version: 3, session: { count: 0 } };\n'
+    );
+    const third = await loader.reload();
+    expect(third.failures).toHaveLength(0);
+    expect(asRecord(third.entries[0]?.exports.default).version).toBe(3);
+  });
+});

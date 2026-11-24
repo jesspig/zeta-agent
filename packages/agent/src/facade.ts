@@ -130,6 +130,11 @@ export interface PluginApiSurface extends AgentPluginApi {
    * 返回值）纳入 facade 的生命周期撤销栈；返回幂等 disposer，按 LIFO 撤销。
    */
   trackDisposer(dispose: () => void): Disposer;
+  /**
+   * 声明插件贡献的发射工具名（引用计数，多次声明独立撤销）；与 options.emissionTools
+   * 合并后由 facade 的 withhold/durable 路径统一派发，插件不另开副作用直通路径。
+   */
+  declareEmissionTools(names: readonly string[]): Disposer;
 }
 
 /** 插件间共享的轻量事件总线；按注册顺序同步派发。 */
@@ -402,17 +407,21 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const confirmChannel = options.confirmChannel;
   const allowedDirectories = options.allowedDirectories ?? [];
   const emissionPolicy = options.emissionPolicy ?? "withhold";
-  const emissionTools = new Set(
-    options.emissionTools ?? (emissionPolicy === "direct" ? [] : DEFAULT_EMISSION_TOOLS)
-  );
-  const withholdEnabled = emissionPolicy !== "direct" && emissionTools.size > 0;
+  const baseEmissionTools = options.emissionTools ?? (emissionPolicy === "direct" ? [] : DEFAULT_EMISSION_TOOLS);
+  const pluginEmissionRefs = new Map<string, number>();
+  let emissionTools = new Set(baseEmissionTools);
+  const recomputeEmissionTools = (): void => {
+    emissionTools = new Set([...baseEmissionTools, ...pluginEmissionRefs.keys()]);
+  };
   /** 默认发射工具的真实执行入口；每次 runTurn 重建工具表后立即刷新。 */
   let activeToolRegistry: ReadonlyMap<string, (args: Readonly<Record<string, unknown>>) => unknown | Promise<unknown>> = new Map();
   // D6（延期）：框架 createToolPipeline 原语可用，facade 当前仅装配 declareToolChanges 声明 hook；
   // 完整以 toolPipeline 替换 executeToolCalls 涉及权限/withhold/durable 逻辑耦合，按 O-03 裁决延期。
-  /** 只有未注入 durableEffects 且启用 withhold 时，才为默认清单创建内置效果。 */
-  const usesDefaultEffects = options.durableEffects === undefined && withholdEnabled;
+  /** withhold 策略下总是创建默认效果：插件（如 MCP）可在装配后声明发射工具。 */
+  const usesDefaultEffects = options.durableEffects === undefined && emissionPolicy !== "direct";
   const durableEffects = options.durableEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
+  const isEmissionTool = (name: string): boolean =>
+    emissionPolicy !== "direct" && durableEffects !== undefined && emissionTools.has(name);
   // 未注入策略时采用默认拒绝：没有显式 allow 规则，任何可推导的外联目标都被挡下。
   const egressPolicy = options.egressPolicy ?? createEgressPolicy();
   const credentialVault = options.credentialVault;
@@ -630,6 +639,22 @@ export function createAgent(options: AgentOptions = {}): Agent {
     addRedactor: (rule) => logger.addRedactor(rule),
     trackDisposer(dispose) {
       return addDisposer(dispose);
+    },
+    declareEmissionTools(names) {
+      const added = [...new Set(names)];
+      for (const name of added) pluginEmissionRefs.set(name, (pluginEmissionRefs.get(name) ?? 0) + 1);
+      recomputeEmissionTools();
+      let armed = true;
+      return addDisposer(() => {
+        if (!armed) return;
+        armed = false;
+        for (const name of added) {
+          const count = pluginEmissionRefs.get(name) ?? 0;
+          if (count <= 1) pluginEmissionRefs.delete(name);
+          else pluginEmissionRefs.set(name, count - 1);
+        }
+        recomputeEmissionTools();
+      });
     },
     disposeAll() {
       pluginManager.disposeAll();
@@ -859,7 +884,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
                 ? (call.args as Readonly<Record<string, unknown>>)
                 : {};
               const argsDigest = stableHash(JSON.stringify(args));
-              const isEmission = withholdEnabled && durableEffects !== undefined && emissionTools.has(call.name);
+              const isEmission = isEmissionTool(call.name);
               let denied = false;
               if (permissionGate !== undefined) {
                 // 每次执行都读取 gate 当前状态：增删 hook / declareTools 后立即生效，无需 reload。
@@ -909,7 +934,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
                   } else {
                     output = { ok: false, error: "EGRESS_DENIED", tool: call.name };
                   }
-                } else if (isEmission) {
+                } else if (isEmission && durableEffects !== undefined) {
                   // 发射工具：事务内只 enqueue，真实副作用留到批次结束的 commit 统一派发。
                   const key = `${call.name}:${argsDigest}`;
                   durableEffects.enqueue(call.name, key, {
