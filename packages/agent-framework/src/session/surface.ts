@@ -54,11 +54,19 @@ export interface ReplaceOperation {
   readonly preTokenCount: number;
 }
 
+export interface SessionSnapshot {
+  readonly entries: readonly SurfaceEntry[];
+  readonly lineage: readonly CompactionLineage[];
+}
+
 export interface SessionSurface {
   append(message: AgentMessage): void;
   replace(op: ReplaceOperation): void;
   entries(): readonly SurfaceEntry[];
   lineage(): readonly CompactionLineage[];
+  /** 压缩事务开始前取快照，失败时原子回滚。 */
+  snapshot(): SessionSnapshot;
+  restore(snapshot: SessionSnapshot): void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -170,5 +178,15 @@ export function createSessionSurface(): SessionSurface {
     },
     entries: () => [...entries],
     lineage: () => [...lineage],
+    snapshot() {
+      return { entries: [...entries], lineage: [...lineage] };
+    },
+    restore(snapshot) {
+      if (!isRecord(snapshot) || !Array.isArray(snapshot.entries) || !Array.isArray(snapshot.lineage)) {
+        throw new Error("surface.restore: invalid snapshot");
+      }
+      entries = [...snapshot.entries];
+      lineage = [...snapshot.lineage];
+    },
   };
 }

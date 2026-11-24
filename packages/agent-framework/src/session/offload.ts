@@ -1,4 +1,5 @@
 import type { AgentListener } from "../runtime/agent";
+import { classifyRecap, safeCutIndex } from "./recap";
 import {
   createRecap,
   type CompactionLineage,
@@ -26,10 +27,44 @@ export interface WorkspaceStore {
   get(uri: string): unknown | Promise<unknown>;
 }
 
+export interface OffloaderOptions {
+  /** 外置块序列化后的输出字节上限；超限按完整条目裁剪。缺省不限制。 */
+  readonly maxOutputBytes?: number;
+}
+
 export interface Offloader {
   offload(block: unknown, label?: string): Promise<string>;
-  retrieve<T = unknown>(uri: string): Promise<T | undefined>;
+  retrieve<T = unknown>(uri: string, maxOutputBytes?: number): Promise<T | undefined>;
 }
+
+export interface CompactionUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly peakTokens: number;
+  readonly compactionCount: number;
+  readonly preTokenCount: number;
+  readonly postTokenCount: number;
+}
+
+export type CompactionEvent =
+  | { readonly type: "compaction_started"; readonly threshold: number; readonly preTokenCount: number }
+  | {
+      readonly type: "compaction_completed";
+      readonly threshold: number;
+      readonly preTokenCount: number;
+      readonly postTokenCount: number;
+      readonly uris: readonly string[];
+      readonly usage: CompactionUsage;
+    }
+  | {
+      readonly type: "compaction_failed";
+      readonly threshold: number;
+      readonly preTokenCount: number;
+      readonly reason: string;
+      readonly code: string;
+    }
+  | { readonly type: "compaction_interrupted"; readonly preTokenCount: number; readonly reason: string };
 
 export interface CompactionListenerOptions {
   readonly budget: CompactionBudget;
@@ -38,9 +73,16 @@ export interface CompactionListenerOptions {
   readonly persist: (lineages: readonly CompactionLineage[]) => void | Promise<void>;
   readonly countTokens?: (entries: readonly SurfaceEntry[]) => number;
   readonly buildRecap?: (block: readonly SurfaceEntry[], uris: readonly string[]) => SemanticRecap;
+  /** started/completed/failed/interrupted 事件；facade 可据此落审计。 */
+  readonly emit?: (event: CompactionEvent) => void | Promise<void>;
+  /** 中断信号：abort 时不改上下文并发 interrupted。 */
+  readonly signal?: AbortSignal;
+  /** 旁路 peak 指标观测点；与 budget 阈值独立。 */
+  readonly budgetTracker?: BudgetTracker;
 }
 
 const WORKSPACE_PREFIX = "workspace:///";
+const textEncoder = new TextEncoder();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -106,6 +148,26 @@ export function createMemoryWorkspaceStore(): WorkspaceStore {
   };
 }
 
+function serializedBytes(value: unknown): number {
+  return textEncoder.encode(JSON.stringify(value)).length;
+}
+
+/** 按完整条目裁剪序列化输出，避免把半条消息写进 workspace 或回显给调用方。 */
+export function boundOutputBytes<T>(value: T, maxOutputBytes: number | undefined): T {
+  if (maxOutputBytes === undefined || !Number.isFinite(maxOutputBytes) || maxOutputBytes < 0) return value;
+  if (serializedBytes(value) <= maxOutputBytes) return value;
+  if (Array.isArray(value)) {
+    const kept: unknown[] = [];
+    for (const item of value) {
+      const candidate = [...kept, item];
+      if (serializedBytes(candidate) > maxOutputBytes) break;
+      kept.push(item);
+    }
+    return kept as T;
+  }
+  return JSON.stringify(value).slice(0, maxOutputBytes) as T;
+}
+
 // 进程级唯一序列：跨实例（乃至跨重启后复用 store）都不复用同一 URI，
 // 否则旧血缘会指向后来写入的区块。
 let offloaderSequence = 0;
@@ -117,19 +179,20 @@ function nextOffloadId(): string {
   return `${offloaderSequence.toString(36)}-${random}`;
 }
 
-export function createOffloader(store: WorkspaceStore): Offloader {
+export function createOffloader(store: WorkspaceStore, options: OffloaderOptions = {}): Offloader {
   return {
     async offload(block, label = "block") {
       const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "_") || "block";
       const uri = `${WORKSPACE_PREFIX}${safeLabel}-${nextOffloadId()}`;
-      await store.put(uri, block);
+      await store.put(uri, boundOutputBytes(block, options.maxOutputBytes));
       return uri;
     },
-    async retrieve<T>(uri: string) {
+    async retrieve<T>(uri: string, maxOutputBytes?: number) {
       if (typeof uri !== "string" || !uri.startsWith(WORKSPACE_PREFIX)) {
         throw new Error("offloader: expected a workspace uri");
       }
-      return (await store.get(uri)) as T | undefined;
+      const limit = maxOutputBytes ?? options.maxOutputBytes;
+      return boundOutputBytes((await store.get(uri)) as T | undefined, limit);
     },
   };
 }
@@ -141,63 +204,136 @@ function defaultCountTokens(entries: readonly SurfaceEntry[]): number {
   }, 0);
 }
 
-function defaultBuildRecap(block: readonly SurfaceEntry[], uris: readonly string[]): SemanticRecap {
-  const messages = block
-    .filter((entry): entry is Extract<SurfaceEntry, { kind: "message" }> => entry.kind === "message")
-    .map((entry) => entry.message);
-  const system = messages.find((message) => message.role === "system");
-  const objective = typeof system?.content === "string" ? system.content : "";
-  return createRecap({
-    objective,
-    establishedFacts: messages.map((message) => ({
-      text: typeof message.content === "string" ? message.content : JSON.stringify(message.content),
-      kind: "observation",
-    })),
-    appliedChanges: [],
-    verification: [],
-    deadEnds: [],
-    remainingPlan: uris.length > 0 ? ["retrieve offloaded context when needed"] : [],
-  });
+export class CompactionInterruptedError extends Error {
+  readonly code = "COMPACTION_INTERRUPTED";
+  constructor() {
+    super("compaction interrupted");
+    this.name = "CompactionInterruptedError";
+  }
 }
+
+export class CompactionOverflowError extends Error {
+  readonly code = "OVERFLOW_UNRECOVERABLE";
+  constructor(observed: number, limit: number) {
+    super(`totalContextLimit exceeded after one recovery: ${observed} > ${limit}`);
+    this.name = "CompactionOverflowError";
+  }
+}
+
+function errorCode(error: unknown): string {
+  if (isRecord(error) && typeof error.code === "string") return error.code;
+  return "COMPACTION_FAILED";
+}
+
+export { safeCutIndex };
 
 export function createCompactionListener(options: CompactionListenerOptions): AgentListener {
   const { budget, surface, offloader, persist } = options;
   assertBudget(budget);
   const countTokens = options.countTokens ?? defaultCountTokens;
-  const buildRecap = options.buildRecap ?? defaultBuildRecap;
+  const buildRecap = options.buildRecap ?? classifyRecap;
+  const emit = options.emit ?? (() => {});
+  const signal = options.signal;
+  const tracker = options.budgetTracker;
+
+  const fire = async (event: CompactionEvent): Promise<void> => {
+    await emit(event);
+  };
+
+  /** 单次外置 + 原子替换；block/cut 在首个 await 之前捕获，避免错过并发变更窗口。 */
+  async function compactOnce(
+    block: readonly SurfaceEntry[],
+    cut: number,
+    preTokenCount: number
+  ): Promise<readonly string[]> {
+    if (cut <= 0) return [];
+    const uri = await offloader.offload(block, "compaction");
+    if (signal?.aborted === true) throw new CompactionInterruptedError();
+
+    const current = surface.entries();
+    const stillSame =
+      current.length >= cut &&
+      block.every((entry, index) => current[index] === entry);
+    if (stillSame) {
+      surface.replace({
+        start: 0,
+        end: cut,
+        recap: createRecap(buildRecap(block, [uri])),
+        uris: [uri],
+        threshold: budget.compactionThreshold,
+        preTokenCount,
+      });
+    }
+    return [uri];
+  }
 
   return async (event) => {
     if (event.type !== "agent_end") return;
-
-    const entries = surface.entries();
-    const preTokenCount = countTokens(entries);
+    // 同步捕获计划：事件派发中的 await 之前完成，保证条件提交的身份比较仍基于原始条目。
+    const snapshot = surface.snapshot();
+    const preTokenCount = countTokens(snapshot.entries);
     const decision = checkBudget(budget, preTokenCount);
-    if (decision === "exceeded") {
-      throw new Error(`totalContextLimit exceeded: ${preTokenCount} > ${budget.totalContextLimit}`);
+    const cut = safeCutIndex(snapshot.entries, Math.max(1, Math.ceil(snapshot.entries.length / 2)));
+    const plannedBlock = snapshot.entries.slice(0, cut);
+    const abortedAtStart = signal?.aborted === true;
+    tracker?.observe(preTokenCount);
+    await fire({ type: "compaction_started", threshold: budget.compactionThreshold, preTokenCount });
+
+    if (abortedAtStart) {
+      await fire({ type: "compaction_interrupted", preTokenCount, reason: "aborted" });
+      return;
     }
 
-    if (decision === "compact" && entries.length > 0) {
-      const cut = Math.max(1, Math.ceil(entries.length / 2));
-      const block = entries.slice(0, cut);
-      const uri = await offloader.offload(block, "compaction");
-      // 外置可能耗时；期间 surface 可能被其它压缩替换。按条目身份条件提交，
-      // 区间内容已变化时不按旧索引替换，避免移除未外置的条目。
-      const current = surface.entries();
-      const stillSame =
-        current.length >= cut &&
-        block.every((entry, index) => current[index] === entry);
-      if (stillSame) {
-        surface.replace({
-          start: 0,
-          end: cut,
-          recap: createRecap(buildRecap(block, [uri])),
-          uris: [uri],
+    try {
+      let uris: readonly string[] = [];
+      if (decision !== "ok") {
+        uris = await compactOnce(plannedBlock, cut, preTokenCount);
+        if (decision === "exceeded") {
+          // 硬超限只允许一次恢复；再检查仍超限即失败并回滚。
+          const recovered = countTokens(surface.entries());
+          tracker?.observe(recovered);
+          if (checkBudget(budget, recovered) === "exceeded") {
+            throw new CompactionOverflowError(recovered, budget.totalContextLimit);
+          }
+        }
+      }
+
+      const postTokenCount = countTokens(surface.entries());
+      tracker?.observe(postTokenCount);
+      const lineages = surface.lineage();
+      await persist(lineages);
+      const peakTokens = Math.max(tracker?.peak ?? 0, preTokenCount, postTokenCount);
+      const usage: CompactionUsage = {
+        inputTokens: preTokenCount,
+        outputTokens: postTokenCount,
+        totalTokens: preTokenCount + postTokenCount,
+        peakTokens,
+        compactionCount: lineages.length,
+        preTokenCount,
+        postTokenCount,
+      };
+      await fire({
+        type: "compaction_completed",
+        threshold: budget.compactionThreshold,
+        preTokenCount,
+        postTokenCount,
+        uris,
+        usage,
+      });
+    } catch (error) {
+      surface.restore(snapshot);
+      if (error instanceof CompactionInterruptedError) {
+        await fire({ type: "compaction_interrupted", preTokenCount, reason: error.message });
+      } else {
+        await fire({
+          type: "compaction_failed",
           threshold: budget.compactionThreshold,
           preTokenCount,
+          reason: error instanceof Error ? error.message : String(error),
+          code: errorCode(error),
         });
       }
+      throw error;
     }
-
-    await persist(surface.lineage());
   };
 }

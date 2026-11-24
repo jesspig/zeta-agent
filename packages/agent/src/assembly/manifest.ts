@@ -1,3 +1,4 @@
+import { type ResourceType } from "../resources/registry";
 import {
   builtinsForProfile,
   resolveAssemblyProfile,
@@ -16,7 +17,7 @@ export interface CapabilityDiagnostic {
 /** 安装注册表中真实发现的一条资源（由 ResourceRegistry.discover 投影而来）。 */
 export interface InstalledResource {
   readonly id: string;
-  readonly type: "skill" | "prompt" | "theme";
+  readonly type: ResourceType;
   readonly scope: "agent" | "project";
   readonly relativePath: string;
 }

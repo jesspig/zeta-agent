@@ -8,6 +8,7 @@ export * from "./plugins/types";
 export * from "./plugins/hook-chain";
 export * from "./plugins/manager";
 export * from "./session/surface";
+export * from "./session/recap";
 export * from "./session/offload";
 export {
   PERMISSION_BEHAVIORS,

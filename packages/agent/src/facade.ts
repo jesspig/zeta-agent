@@ -4,6 +4,14 @@ import {
   declareToolChanges,
   runLoop,
   AgentPluginManager,
+  createBudgetTracker,
+  createCompactionListener,
+  createMemoryWorkspaceStore,
+  createOffloader,
+  createSessionSurface,
+  type CompactionBudget,
+  type CompactionEvent,
+  type CompactionLineage,
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
@@ -19,7 +27,11 @@ import {
   type CoreContextLike,
   type CoreLoopHooks,
   type DurableExtensionSpec,
+  type BudgetTracker,
   type EffectMeta,
+  type Offloader,
+  type SessionSurface,
+  type WorkspaceStore,
   type EventBus,
   type FinishTurn,
   type Inbox,
@@ -439,6 +451,30 @@ export interface AgentOptions {
   readonly auditDir?: string;
   /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
   readonly sessionStore?: SessionStore;
+  /**
+   * 可选压缩装配：surface/offloader 由 facade 创建并随 agent_end 落 SessionStore；
+   * 不注入时压缩路径完全不启用，保持既有调用方零回归。
+   */
+  readonly compaction?: AgentCompactionOptions;
+}
+
+export interface AgentCompactionOptions {
+  readonly budget: CompactionBudget;
+  /** 可注入自定义 surface（缺省新建内存 surface）。 */
+  readonly surface?: SessionSurface;
+  /** 可注入自定义 offloader 或 workspace store。 */
+  readonly offloader?: Offloader;
+  readonly workspaceStore?: WorkspaceStore;
+  /** 传给默认 offloader 的输出字节上限。 */
+  readonly maxOutputBytes?: number;
+  /** started/completed/failed/interrupted 事件；facade 同时把它们写入审计链。 */
+  readonly emit?: (event: CompactionEvent) => void | Promise<void>;
+}
+
+export interface AgentCompactionHandle {
+  readonly surface: SessionSurface;
+  readonly offloader: Offloader;
+  readonly budgetTracker: BudgetTracker;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -481,6 +517,7 @@ export interface Agent extends PluginApiSurface {
   /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
   readonly sessionStore: SessionStore | undefined;
+  readonly compaction: AgentCompactionHandle | undefined;
 }
 
 function streamErrorMessage(error: unknown): string {
@@ -601,6 +638,47 @@ export function createAgent(options: AgentOptions = {}): Agent {
       causalId,
     };
     auditSink.append(record);
+  }
+
+  // 压缩装配复用 SessionStore 的 appendRecap 血缘与 agent_end 屏障，不另建会话协议。
+  const compactionOptions = options.compaction;
+  const compaction: AgentCompactionHandle | undefined = compactionOptions === undefined
+    ? undefined
+    : (() => {
+        const surface = compactionOptions.surface ?? createSessionSurface();
+        const offloader = compactionOptions.offloader ?? createOffloader(
+          compactionOptions.workspaceStore ?? createMemoryWorkspaceStore(),
+          compactionOptions.maxOutputBytes === undefined ? {} : { maxOutputBytes: compactionOptions.maxOutputBytes }
+        );
+        return { surface, offloader, budgetTracker: createBudgetTracker(compactionOptions.budget) };
+      })();
+  let persistedLineageCount = 0;
+  async function persistCompaction(lineages: readonly CompactionLineage[]): Promise<void> {
+    if (sessionStore === undefined) return;
+    for (const lineage of lineages.slice(persistedLineageCount)) {
+      await sessionStore.appendRecap(lineage.recap, lineage.uris, {
+        threshold: lineage.threshold,
+        preTokenCount: lineage.preTokenCount,
+      });
+    }
+    persistedLineageCount = lineages.length;
+  }
+  async function emitCompaction(event: CompactionEvent): Promise<void> {
+    if (compactionOptions?.emit !== undefined) await compactionOptions.emit(event);
+    if (auditSink === undefined) return;
+    recordAudit(
+      "compaction",
+      stableHash(JSON.stringify({ threshold: "threshold" in event ? event.threshold : 0, preTokenCount: event.preTokenCount })),
+      event.type,
+      stableHash(JSON.stringify(event)),
+      `compaction:${event.preTokenCount}`
+    );
+  }
+  if (compaction !== undefined) {
+    // 已完成消息进入 surface；system 提示词只进请求，由 recap.objective 逐字承接。
+    stream.subscribe((event) => {
+      if (event.type === "message_end") compaction.surface.append(event.message);
+    });
   }
 
   /** ASK 决策统一走四态审批通道；confirmChannel 仅作为布尔兼容适配器。 */
@@ -1278,6 +1356,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
       toolPipeline: activePipeline,
     };
 
+    const unsubscribeCompaction = compaction === undefined || compactionOptions === undefined
+      ? undefined
+      : stream.subscribe(createCompactionListener({
+          budget: compactionOptions.budget,
+          surface: compaction.surface,
+          offloader: compaction.offloader,
+          persist: persistCompaction,
+          emit: emitCompaction,
+          budgetTracker: compaction.budgetTracker,
+          signal,
+        }));
     try {
       await runLoop(runtime);
     } catch (error) {
@@ -1289,6 +1378,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       await stream.emit({ type: "message_end", message }, signal);
       await stream.emit({ type: "turn_end", message, toolResults: [] }, signal);
       await stream.emit({ type: "agent_end", messages: stream.getState().messages.slice(initialMessageCount) }, signal);
+    } finally {
+      unsubscribeCompaction?.();
     }
     return stream.getState().messages;
   }
@@ -1319,6 +1410,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
     sessionStore,
+    compaction,
     abort() {
       aborted = true;
       activeRun?.controller.abort();
