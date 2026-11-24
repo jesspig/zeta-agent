@@ -203,7 +203,7 @@ describe("T-10 完整 AgentPluginApi 契约", () => {
     expect(String(after?.content)).not.toContain('"prepared":1');
   });
 
-  test("addPrepareNextTurn 在每轮开始时触发，disposer 可撤销", async () => {
+  test("addPrepareNextTurn 首轮零触发，disposer 可撤销", async () => {
     const agent = createAgent({
       streamFn: async function* () {
         yield "ok";
@@ -215,10 +215,12 @@ describe("T-10 完整 AgentPluginApi 契约", () => {
     });
 
     await agent.prompt("x");
-    expect(turns).toBe(1);
+    expect(turns).toBe(0); // 首轮严格不进入 step1
+    await agent.continue();
+    expect(turns).toBe(0); // facade 单轮 continue 不构成后续轮次
     stop();
     await agent.continue();
-    expect(turns).toBe(1);
+    expect(turns).toBe(0); // disposer 撤销后保持不变
   });
 
   test("provideSteering 把 source.next() 注入 inbox，disposer 可撤销", async () => {

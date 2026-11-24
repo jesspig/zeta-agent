@@ -123,9 +123,7 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
   // （runAgentLoop 前置 emit + 进入循环前的 getSteeringMessages）；
   // step1（prepareNextTurn → 再轮询 steering → turn_start）只在存在
   // lastCompletedTurn 的后续轮次进入，避免首轮误触发与重复 turn_start。
-  // 首轮保留一次 prepareNextTurn?.(undefined) 兼容调用：A6 #4 既有断言要求
-  // 每个 prompt 至少触发一次 hook；该调用不属于 step1（不记录 onStep、不轮询、不发 turn_start）。
-  runtime.prepareNextTurn?.(undefined);
+  // 首轮不调用 prepareNextTurn：step1 严格只在存在 lastCompletedTurn 的后续轮次进入。
   await emit({ type: "turn_start" });
   let steering: readonly InboxMessage[] = inbox.poll("nextTurn");
 

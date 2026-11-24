@@ -27,6 +27,9 @@ export type HashFn = (input: string) => string;
 
 export type AuditSigner = (payload: string) => string;
 
+/** 签名密钥只由 daemon 进程从该环境变量注入；不进入 facade options、日志与产物。 */
+export const AUDIT_SIGNING_SECRET_ENV = "ZETA_AUDIT_SIGNING_SECRET";
+
 /** 进程外 append-only 存储：只有追加与读取，签名和封存标记由 sink 注入。 */
 export interface AuditStorage {
   append(line: string): void;
@@ -71,7 +74,7 @@ interface StoredFinalizedMarker {
   readonly signature: string;
 }
 
-function defaultHash(input: string): string {
+export function defaultHash(input: string): string {
   let value = 2166136261;
   for (let index = 0; index < input.length; index += 1) {
     value ^= input.charCodeAt(index);
@@ -80,7 +83,7 @@ function defaultHash(input: string): string {
   return (value >>> 0).toString(16);
 }
 
-function fingerprint(seq: number, prevHash: string, record: AuditRecord): string {
+export function fingerprint(seq: number, prevHash: string, record: AuditRecord): string {
   return `${seq}|${prevHash}|${JSON.stringify(record)}`;
 }
 
@@ -94,15 +97,15 @@ function isAuditEntry(value: unknown): value is AuditEntry {
   return isRecord(value.record) && typeof value.record.ts === "number" && typeof value.record.toolName === "string";
 }
 
-function entrySignaturePayload(entry: AuditEntry): string {
+export function entrySignaturePayload(entry: AuditEntry): string {
   return `entry|${fingerprint(entry.seq, entry.prevHash, entry.record)}|${entry.hash}`;
 }
 
-function finalSignaturePayload(revision: number, digest: string, finalized: FinalizedState, seq: number): string {
+export function finalSignaturePayload(revision: number, digest: string, finalized: FinalizedState, seq: number): string {
   return `final|${revision}|${seq}|${digest}|${finalized}`;
 }
 
-function chainDigest(hash: HashFn, entries: readonly AuditEntry[]): string {
+export function chainDigest(hash: HashFn, entries: readonly AuditEntry[]): string {
   return hash(entries.map((entry) => entry.hash).join("|"));
 }
 
@@ -157,7 +160,24 @@ export function verifyAuditIntegrity(options: {
   readonly revision: number;
 }): AuditIntegrityResult {
   const { storage, hash, sign, revision } = options;
-  const lines = storage.readLines();
+  return verifyAuditLines({
+    lines: storage.readLines(),
+    markerText: storage.readMarker(revision),
+    hash,
+    sign,
+    revision,
+  });
+}
+
+/** 校验逻辑的纯函数形式：daemon 用自己读取的行与标记做跨进程校验，密钥不出 daemon。 */
+export function verifyAuditLines(options: {
+  readonly lines: readonly string[];
+  readonly markerText: string | undefined;
+  readonly hash: HashFn;
+  readonly sign: AuditSigner;
+  readonly revision: number;
+}): AuditIntegrityResult {
+  const { lines, markerText, hash, sign, revision } = options;
   const entries: AuditEntry[] = [];
   let previous = "0";
   for (let index = 0; index < lines.length; index += 1) {
@@ -182,7 +202,6 @@ export function verifyAuditIntegrity(options: {
     previous = entry.hash;
   }
 
-  const markerText = storage.readMarker(revision);
   if (markerText === undefined) return { ok: false, reason: "MISSING_FINALIZED_MARKER", entries: entries.length };
   let marker: StoredFinalizedMarker;
   try {

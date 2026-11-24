@@ -523,11 +523,13 @@ const cases: readonly InvariantCase[] = [
       prepareNextTurnCalls: prepare,
       finishTurnLegacy: () => ({ action: "end" }),
     });
-    inbox.followUp({ role: "user", content: "queued" });
+    inbox.inject({ role: "user", content: "queued" });
     await runLoop(runtime);
     const endKeepsQueueObserved =
-      prepare.count === 1 && runtimeOrder.filter((e) => e === "agent_end").length === 1;
-    expect(prepare.count).toBe(1);
+      prepare.count === 0 && runtimeOrder.filter((e) => e === "agent_end").length === 1;
+    expect(prepare.count).toBe(0);
+    // end 决策不清空未消费的队列：注入 nextStep 的消息在 agent_end 后仍保留。
+    expect(inbox.size("nextStep")).toBe(1);
     expect(runtimeOrder.filter((e) => e === "agent_end")).toHaveLength(1);
     expect(endKeepsQueueObserved).toBe(true);
     expect(await legacyHookProbe()).toBe(true);
@@ -537,11 +539,13 @@ const cases: readonly InvariantCase[] = [
       prepareNextTurnCalls: prepare,
       decisionPlugin: () => ({ kind: "exit", reason: "end" }) as const,
     });
-    inbox.followUp({ role: "user", content: "queued" });
+    inbox.inject({ role: "user", content: "queued" });
     await runLoop(runtime);
     const endKeepsQueueObserved =
-      prepare.count === 1 && runtimeOrder.filter((e) => e === "agent_end").length === 1;
-    expect(prepare.count).toBe(1);
+      prepare.count === 0 && runtimeOrder.filter((e) => e === "agent_end").length === 1;
+    expect(prepare.count).toBe(0);
+    // end 决策不清空未消费的队列：注入 nextStep 的消息在 agent_end 后仍保留。
+    expect(inbox.size("nextStep")).toBe(1);
     expect(runtimeOrder.filter((e) => e === "agent_end")).toHaveLength(1);
     expect(endKeepsQueueObserved).toBe(true);
     expect(await pluginHookProbe()).toBe(true);

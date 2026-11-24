@@ -183,8 +183,11 @@ interface Internals {
   readonly system: FiberSystem;
   readonly pending: Set<Promise<unknown>>;
   readonly providers: Map<symbol, Fiber>;
-  readonly listeners: Map<string, Set<(payload: unknown) => void>>;
+  /** 事件监听器按 realm 分桶：事件名 → realm → 监听器集合，避免派生 context 共享监听表。 */
+  readonly listeners: Map<string, Map<symbol, Set<(payload: unknown) => void>>>;
   readonly intercepted: Map<symbol, unknown>;
+  /** 事件隔离域：root 独占一个 realm，isolate 分配新 realm，intercept/fiber 继承父 realm。 */
+  readonly realm: symbol;
   /** accepts 校验用的版本注册表：provider fiber 在 use 装配时登记其声明版本。 */
   readonly providerVersions: Map<symbol, { uid: string; version?: string }>;
   readonly uidSeed: { value: number };
@@ -200,8 +203,13 @@ function track(internals: Internals, promise: Promise<unknown>): void {
   void promise.then(forget, forget);
 }
 
-function makeContext(base: Internals, node: ReflectNode = base.node, registerProvider = base.registerProvider): Context {
-  const internals: Internals = { ...base, node, registerProvider };
+function makeContext(
+  base: Internals,
+  node: ReflectNode = base.node,
+  registerProvider = base.registerProvider,
+  realm = base.realm
+): Context {
+  const internals: Internals = { ...base, node, registerProvider, realm };
 
   const effect = (callback: EffectCallback, label?: string): Disposer =>
     runEffect(internals.host, () => callback(context), label);
@@ -252,8 +260,10 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
     };
   };
 
-  const isolate = <T>(key: CoeffectKey<T>, realm?: symbol): FiberContext =>
-    makeContext(internals, reflectIsolate(internals.node, key, realm ?? Symbol(key.symbol.description ?? key.name)), false);
+  const isolate = <T>(key: CoeffectKey<T>, realm?: symbol): FiberContext => {
+    const nextRealm = realm ?? Symbol(key.symbol.description ?? key.name);
+    return makeContext(internals, reflectIsolate(internals.node, key, nextRealm), false, nextRealm);
+  };
 
   const intercept = <T>(key: CoeffectKey<T>, metadata: unknown): FiberContext => {
     internals.intercepted.set(key.symbol, metadata);
@@ -315,9 +325,11 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
   };
 
   const on = (name: string, listener: (payload: unknown) => void): Disposer => {
-    const bucket = internals.listeners.get(name) ?? new Set();
+    const realms = internals.listeners.get(name) ?? new Map<symbol, Set<(payload: unknown) => void>>();
+    const bucket = realms.get(internals.realm) ?? new Set<(payload: unknown) => void>();
     bucket.add(listener);
-    internals.listeners.set(name, bucket);
+    realms.set(internals.realm, bucket);
+    internals.listeners.set(name, realms);
     let armed = true;
     return () => {
       if (!armed) return;
@@ -327,7 +339,8 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
   };
 
   const emit = (name: string, payload?: unknown): void => {
-    for (const listener of [...(internals.listeners.get(name) ?? [])]) listener(payload);
+    const bucket = internals.listeners.get(name)?.get(internals.realm);
+    for (const listener of [...(bucket ?? [])]) listener(payload);
   };
 
   const notify = async (keys?: readonly CoeffectKey<any>[]): Promise<void> => {
@@ -345,7 +358,8 @@ function makeContext(base: Internals, node: ReflectNode = base.node, registerPro
   const dispose: Disposer = async () => {
     for (const fiber of [...internals.system.fibers.values()]) fiber.remove();
     internals.providers.clear();
-    internals.listeners.clear();
+    // 只清理本 realm 的监听，其他 realm（如 root 或兄弟租户）不受影响。
+    for (const realms of internals.listeners.values()) realms.delete(internals.realm);
     internals.pending.clear();
     await internals.host.dispose();
   };
@@ -381,6 +395,7 @@ export function createContext(options: { uid?: string } = {}): Context {
     providers: new Map(),
     listeners: new Map(),
     intercepted: new Map(),
+    realm: Symbol(`realm:${uid}`),
     providerVersions: new Map(),
     uidSeed: { value: 0 },
     registerProvider: true,
