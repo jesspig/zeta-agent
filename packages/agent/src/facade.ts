@@ -1448,6 +1448,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
     const after: AfterToolCallHook = async (input, toolSignal) => {
       const name = input.call.tool ?? input.call.name ?? "";
+      const overrides: Record<string, unknown> = {};
+      const capture = (value: unknown): void => {
+        if (typeof value !== "object" || value === null) return;
+        const record = value as Record<string, unknown>;
+        for (const key of ["content", "details", "structuredContent", "usage"] as const) {
+          if (key in record) overrides[key] = record[key];
+        }
+        if (typeof record.isError === "boolean") overrides.isError = record.isError;
+        if (typeof record.terminate === "boolean") overrides.terminate = record.terminate;
+      };
       if (!isEmissionTool(name)) {
         const args = input.call.input ?? input.call.args ?? {};
         const argsDigest = stableHash(JSON.stringify(args));
@@ -1460,7 +1470,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         );
       }
       for (const fn of afterToolCalls) {
-        await fn(
+        capture(await fn(
           {
             type: "tool_execution_end",
             toolCallId: input.call.id,
@@ -1469,7 +1479,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
             isError: input.isError,
           },
           toolSignal ?? signal
-        );
+        ));
       }
       const endEvent = {
         type: "tool_execution_end" as const,
@@ -1481,6 +1491,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       for (const slot of [...wrapRegistry.snapshot()].reverse()) {
         await slot.value?.(endEvent, toolSignal ?? signal);
       }
+      return overrides;
     };
 
     const pipelineRegistry = createToolRegistry();
