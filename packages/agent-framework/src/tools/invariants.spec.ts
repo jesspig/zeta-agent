@@ -64,7 +64,9 @@ function legacyValidate(tool: ToolDescriptor, input: unknown): void {
     throw new Error("TOOL_INPUT_NOT_OBJECT");
   }
   for (const key of Object.keys(input as Record<string, unknown>)) {
-    if (!tool.inputSchema.includes(key)) throw new Error(`TOOL_INPUT_EXTRA_FIELD: ${key}`);
+    if (Array.isArray(tool.inputSchema) && !tool.inputSchema.includes(key)) {
+      throw new Error(`TOOL_INPUT_EXTRA_FIELD: ${key}`);
+    }
   }
 }
 
@@ -152,7 +154,9 @@ async function legacyRunCall(
   const durationMs = Math.max(0, clock() - startedAt);
   if (output === undefined || output === null) return withFlag(legacyError(call, "TOOL_OUTPUT_MISSING", durationMs));
   if (typeof output === "object") {
-    const extra = Object.keys(output as Record<string, unknown>).find((key) => !tool.outputSchema.includes(key));
+    const extra = Object.keys(output as Record<string, unknown>).find(
+      (key) => tool.outputSchema !== undefined && !tool.outputSchema.includes(key)
+    );
     if (extra !== undefined) return withFlag(legacyError(call, "TOOL_OUTPUT_EXTRA_FIELD", durationMs));
   }
   return withFlag({ callId: call.id, tool: call.tool, output, isError: false, durationMs });

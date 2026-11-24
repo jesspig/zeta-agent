@@ -25,6 +25,10 @@
   "dependencies": {
     "@zeta-agent/framework": "workspace:*"
   },
+  "devDependencies": {
+    "@zeta-agent/cordis": "workspace:*",
+    "@zeta-agent/events": "workspace:*"
+  },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",
     "typecheck": "tsc --noEmit -p tsconfig.json",

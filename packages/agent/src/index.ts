@@ -1,5 +1,7 @@
 export * from "./plugins/effects/durable";
 export * from "./plugins/permissions/guard";
+export * from "./plugins/permissions/policy";
+export * from "./plugins/permissions/approval";
 export * from "./plugins/mcp";
 export * from "./facade";
 export * from "./extensions/loader";
