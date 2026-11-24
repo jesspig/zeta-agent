@@ -3,8 +3,9 @@ export interface FitnessEvaluator {
 }
 
 // 真实 evaluator 由 fitness 子路径一并提供；默认装配仍只暴露 NOOP seam。
-export { attainmentAuc, createRewardEvaluator, evaluateFitness } from "./fitness.evaluator";
+export { assertBudgetIdentity, attainmentAuc, createRewardEvaluator, evaluateFitness } from "./fitness.evaluator";
 export type {
+  BudgetIdentityTrace,
   FitnessEvaluation,
   FitnessEvaluatorConfig,
   FitnessPoint,

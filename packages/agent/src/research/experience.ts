@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, extname } from "node:path";
 
 export interface ExperienceEntry {
   readonly id: string;
@@ -76,10 +76,97 @@ function assertNoLeakage(value: unknown): void {
   }
 }
 
+/** 语义级 tripwire 的 marker：只针对判分产物，不拦合法 fitness 分数。 */
+export const GRADER_VERDICT_MARKERS: readonly string[] = Object.freeze([
+  "verdict",
+  "rubric",
+  "graderScore",
+  "grader score",
+  "groundTruth",
+  "expectedOutput",
+  "testPassRate",
+  "pass_rate",
+  "passed_count",
+  "test_pass_rate",
+  "judgeFinding",
+  "judge finding",
+  "deterministicEvalSummary",
+  "deterministic_eval_summary",
+  "deterministic_eval_result",
+]);
+
+const MARKER_SCAN_SUFFIXES = new Set([
+  "",
+  ".md",
+  ".txt",
+  ".json",
+  ".csv",
+  ".tsv",
+  ".yaml",
+  ".yml",
+  ".html",
+  ".htm",
+  ".log",
+  ".py",
+  ".ts",
+  ".js",
+  ".sh",
+  ".xml",
+  ".ini",
+  ".toml",
+  ".patch",
+  ".diff",
+]);
+
+/** 文件名 + 正文双扫；命中正文给出偏移与上下文，便于定位注入读路径。 */
+export function assertNoGraderVerdicts(
+  tree: Readonly<Record<string, unknown>>,
+  markers: readonly string[] = GRADER_VERDICT_MARKERS
+): true {
+  if (tree === null || typeof tree !== "object" || Array.isArray(tree)) {
+    throw new Error("INVALID_EVIDENCE_TREE");
+  }
+  for (const rel of Object.keys(tree).sort()) {
+    const loweredRel = rel.toLowerCase();
+    for (const marker of markers) {
+      const lowered = marker.toLowerCase();
+      if (loweredRel.includes(lowered)) {
+        throw new Error(`LEAKAGE_TRIPWIRE: ${rel} matched ${marker} in NAME`);
+      }
+    }
+    if (!MARKER_SCAN_SUFFIXES.has(extname(rel).toLowerCase())) continue;
+    const body = tree[rel];
+    const text = typeof body === "string" ? body : stableStringify(body);
+    const loweredBody = text.toLowerCase();
+    for (const marker of markers) {
+      const lowered = marker.toLowerCase();
+      const at = loweredBody.indexOf(lowered);
+      if (at < 0) continue;
+      const context = text.slice(Math.max(0, at - 60), at + 120);
+      throw new Error(
+        `LEAKAGE_TRIPWIRE: ${rel} contains ${marker} at offset ${at} (${JSON.stringify(context)})`
+      );
+    }
+  }
+  return true;
+}
+
+function entryEvidence(entry: ExperienceEntry): Record<string, unknown> {
+  const tree: Record<string, unknown> = { [`${entry.id}.json`]: entry };
+  for (const [key, value] of Object.entries(entry)) {
+    if (typeof value === "string") tree[`${entry.id}/${key}.txt`] = value;
+    else if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
+      tree[`${entry.id}/${key}.txt`] = value.join("\n");
+    }
+  }
+  return tree;
+}
+
 function assertEntry(entry: ExperienceEntry): void {
   if (entry === null || typeof entry !== "object") throw new Error("INVALID_ENTRY");
   if (typeof entry.id !== "string" || entry.id.length === 0) throw new Error("INVALID_ENTRY_ID");
   assertNoLeakage(entry);
+  assertNoGraderVerdicts(entryEvidence(entry));
 }
 
 function stableStringify(value: unknown): string {
