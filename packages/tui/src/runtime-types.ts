@@ -85,6 +85,8 @@ export interface RuntimeTuiOptions {
   readonly keyBindings?: readonly KeyBinding[];
   /** TUI 审批 UI 通道；与 agent 的 ApprovalChannel/broker 同一路径。 */
   readonly approvalUi?: ApprovalUiChannel;
+  /** 开启 Debug HUD：帧中输出 event-loop/cpu/rss/p99 指标。 */
+  readonly debugHud?: { readonly contextLimit?: number };
 }
 
 export interface RuntimeTuiHandle {

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack, type JSX } from "solid-js";
 import { TextAttributes } from "@opentui/core";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import type { AgentMessage } from "@zeta-agent/agent";
@@ -18,6 +18,14 @@ import { parseMarkdown } from "../markdown-blocks";
 import { extractMarkdownLinks } from "../osc";
 import { useOsc } from "../osc-context";
 import { useTheme } from "../theme-context";
+import {
+  captureScrollAnchor,
+  createVariableLayout,
+  isAtBottom,
+  restoreScrollFromAnchor,
+  type ScrollAnchor,
+} from "../virtual";
+import { estimateTextHeight, VirtualList } from "./virtual-list";
 
 
 export interface TranscriptResources {
@@ -36,6 +44,15 @@ export interface TranscriptProps {
   readonly resetKey?: number;
   /** 宿主注入的提示行（追加在时间线末尾）。 */
   readonly notices?: readonly TimelineNoticeEntry[];
+  /** 测试/观测 seam：每个真正实例化的时间线条目回调一次。 */
+  readonly onRenderEntry?: (entry: TimelineEntry, index: number) => void;
+}
+
+/** 长会话行高估计：条目文本 + 容器边距；上限防止单个巨型工具输出撑爆窗口计算。 */
+export function estimateEntryHeight(entry: TimelineEntry, width: number): number {
+  const text = entry.kind === "tool" ? `${entry.name} ${JSON.stringify(entry.args ?? {})}` : JSON.stringify(entry);
+  const chrome = entry.kind === "user" || entry.kind === "tool" ? 3 : 1;
+  return estimateTextHeight(text, width) + chrome;
 }
 
 /** 一行样式化文本：run → span，保留主题 token 与粗斜体属性。 */
@@ -263,6 +280,18 @@ export function Transcript(props: TranscriptProps) {
 
   useKeyboard((key) => {
     if (key.eventType === "release") return;
+    if (key.name === "pageup" || (key.ctrl && key.name === "up")) {
+      key.preventDefault();
+      key.stopPropagation();
+      moveScroll(-Math.max(1, viewport() - 2));
+      return;
+    }
+    if (key.name === "pagedown" || (key.ctrl && key.name === "down")) {
+      key.preventDefault();
+      key.stopPropagation();
+      moveScroll(Math.max(1, viewport() - 2));
+      return;
+    }
     if (key.ctrl && key.name === "o") {
       key.preventDefault();
       key.stopPropagation();
@@ -279,6 +308,46 @@ export function Transcript(props: TranscriptProps) {
   const entries = createMemo(() => state().entries);
   const hasConversation = createMemo(() => entries().length > 0);
   const width = createMemo(() => Math.max(20, dimensions().width));
+  const viewport = createMemo(() => Math.max(1, dimensions().height));
+  const keys = createMemo(() => entries().map((entry) => entry.id));
+  const layout = createMemo(() =>
+    createVariableLayout(entries().length, (index) => estimateEntryHeight(entries()[index]!, width())),
+  );
+  const maxScroll = createMemo(() => Math.max(0, layout().totalHeight - viewport()));
+  const virtualized = createMemo(() => layout().totalHeight > viewport() * 2);
+  const [scrollTop, setScrollTop] = createSignal(0);
+  const [followBottom, setFollowBottom] = createSignal(true);
+
+  let previousKeys: readonly string[] = [];
+  let previousAnchor: ScrollAnchor | undefined;
+  createEffect(() => {
+    const currentKeys = keys();
+    const currentLayout = layout();
+    const height = viewport();
+    const top = untrack(() => scrollTop());
+    const following = untrack(() => followBottom());
+    let next = 0;
+    // 短会话走完整渲染：滚动偏移恒为 0，保持既有逐条布局与帧快照。
+    if (currentKeys.length > 0 && currentLayout.totalHeight > height * 2) {
+      next = top;
+      if (following || previousKeys.length === 0) {
+        next = Math.max(0, currentLayout.totalHeight - height);
+      } else if (previousAnchor !== undefined) {
+        next = restoreScrollFromAnchor(currentLayout, currentKeys, previousAnchor, height, top);
+      }
+      next = Math.min(maxScroll(), next);
+    }
+    if (next !== top) setScrollTop(next);
+    previousAnchor = captureScrollAnchor(currentLayout, currentKeys, next);
+    previousKeys = currentKeys;
+    setFollowBottom(isAtBottom(currentLayout, next, height));
+  });
+
+  const moveScroll = (delta: number): void => {
+    const next = Math.max(0, Math.min(maxScroll(), untrack(() => scrollTop()) + delta));
+    setScrollTop(next);
+    setFollowBottom(isAtBottom(layout(), next, viewport()));
+  };
 
   const renderEntry = (entry: TimelineEntry): JSX.Element => {
     if (entry.kind === "user") return <UserMessage entry={entry} />;
@@ -296,7 +365,17 @@ export function Transcript(props: TranscriptProps) {
         <Show when={!hasConversation()}>
           <StartupHeader resources={props.resources} />
         </Show>
-        <For each={entries()}>{(entry) => renderEntry(entry)}</For>
+        <VirtualList
+          items={entries()}
+          estimateHeight={(entry, index) => estimateEntryHeight(entries()[index] ?? entry, width())}
+          viewportHeight={viewport()}
+          scrollTop={scrollTop()}
+          overscan={2}
+          enabled={virtualized()}
+          onRenderItem={props.onRenderEntry}
+        >
+          {(entry) => renderEntry(entry)}
+        </VirtualList>
         <For each={props.notices ?? []}>{(notice) => <Notice entry={notice} />}</For>
       </box>
     </scrollbox>

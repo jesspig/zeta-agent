@@ -5,7 +5,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import { createApprovalUiChannel, ApprovalOverlay } from "./approval-ui";
 import type { ApprovalUiChannel } from "./approval-ui";
 import type { BackendSize, RendererBackend } from "./backend";
-import { createRuntimeKeymap, resolveKittyCombo } from "./keymap";
+import { createRuntimeKeymap, isImeCompositionKey, resolveKittyCombo } from "./keymap";
 import { ConnectDialog } from "./components/connect-dialog";
 import { ModelPicker } from "./components/model-picker";
 import { ConfirmOverlay } from "./components/overlay";
@@ -33,6 +33,8 @@ import { ViewportLayout } from "./components/layout-view";
 import type { RuntimeMessage, RuntimeModelOption, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 import type { SlashCommand } from "./slash";
 import type { TuiThemeName } from "./runtime-types";
+import { createMetricsSampler, renderDebugHud } from "./debug-hud";
+import { contextBudget } from "./hud";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions, RuntimeResources, RuntimeModelOption } from "./runtime-types";
 
@@ -319,7 +321,7 @@ export function ZetaApp(props: ZetaAppProps) {
   const keymap = createRuntimeKeymap({ bindings: props.keyBindings });
 
   useKeyboard((key) => {
-    if (key.eventType === "release") return;
+    if (key.eventType === "release" || isImeCompositionKey(key)) return;
 
     // 与目标终端 UI 一致：Ctrl+C 清空输入；空输入下 500ms 内二次按下退出。
     if (key.ctrl && key.name === "c") {
@@ -581,12 +583,31 @@ async function renderTuiWithBackend(
   });
   let destroyed = false;
 
+  const sampler = createMetricsSampler();
+  const hudText = options.debugHud === undefined ? undefined : (): string =>
+    renderDebugHud(
+      contextBudget(messages.length, options.debugHud?.contextLimit ?? 100),
+      sampler.snapshot(),
+    );
+  let lastTick = performance.now();
+  const lagTimer: ReturnType<typeof setInterval> | undefined =
+    options.debugHud === undefined
+      ? undefined
+      : setInterval(() => {
+          const now = performance.now();
+          sampler.sample({ eventLoopLagMs: Math.max(0, now - lastTick - 50) });
+          lastTick = now;
+        }, 50);
+
   const renderFrame = (): void => {
+    const started = performance.now();
     backend.render({
       width: size.width,
       height: size.height,
       lines: messages.map(messageLine),
+      ...(hudText === undefined ? {} : { hud: hudText() }),
     });
+    sampler.sample({ frameMs: performance.now() - started });
   };
 
   await backend.mount({
@@ -606,6 +627,7 @@ async function renderTuiWithBackend(
       return;
     }
     if (event.key.eventType === "release" || event.key.defaultPrevented) return;
+    if (isImeCompositionKey(event.key)) return;
     const action = keymap.resolve(resolveKittyCombo(event.key))?.action;
     if (action === undefined) return;
     if (action === "exit") {
@@ -655,6 +677,7 @@ async function renderTuiWithBackend(
     async destroy() {
       if (destroyed) return;
       destroyed = true;
+      if (lagTimer !== undefined) clearInterval(lagTimer);
       offEvent();
       backend.destroy();
       resolveClosed();

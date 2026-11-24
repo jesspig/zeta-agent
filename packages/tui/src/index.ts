@@ -8,6 +8,8 @@ export * from "./tool-view";
 export * from "./markdown-blocks";
 export * from "./virtual";
 export * from "./hud";
+export * from "./debug-hud";
+export * from "./pty";
 export * from "./telemetry-types";
 export { detectGitBranch, createUsageTracker, usageMetrics } from "./usage";
 export type { SubmitMode } from "./components/editor";

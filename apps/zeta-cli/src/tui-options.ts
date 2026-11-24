@@ -18,6 +18,8 @@ export interface TuiHostOptions {
   readonly onAbort?: () => void;
   readonly onSubmitError?: (error: unknown) => void;
   readonly telemetry?: AgentUsageTelemetry;
+  /** 开启 Debug HUD（event-loop/cpu/rss/p99）。 */
+  readonly debugHud?: RuntimeTuiOptions["debugHud"];
 }
 
 /** 把 agent 事件源与命令处理器封装为 CLI→TUI 共用的 options 契约（FR-12）。 */
@@ -53,5 +55,6 @@ export function buildTuiOptions(
     provider: host.provider,
     resources: host.resources,
     telemetry: host.telemetry,
+    debugHud: host.debugHud,
   };
 }

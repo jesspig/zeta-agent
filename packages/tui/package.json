@@ -10,6 +10,8 @@
     "./signal": "./src/signal.ts",
     "./virtual": "./src/virtual.ts",
     "./hud": "./src/hud.ts",
+    "./debug-hud": "./src/debug-hud.ts",
+    "./pty": "./src/pty.ts",
     "./frame-state": "./src/frame-state.ts",
     "./backend": "./src/backend.ts",
     "./runtime": "./src/runtime.tsx",

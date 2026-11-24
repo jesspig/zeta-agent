@@ -124,6 +124,26 @@ test("renderTui({backend}) 真实接管：mount/render/key/resize/clipboard/dest
   expect(backend.destroyed).toBe(true);
 });
 
+test("renderTui 可输出含 event-loop/cpu/rss/p99 的 Debug HUD", async () => {
+  const backend = new RecordingBackend();
+  const handle = await renderTui({
+    backend,
+    messages: Array.from({ length: 5 }, (_, index) => ({ role: "assistant", content: `m${index}` })),
+    debugHud: { contextLimit: 100 },
+  });
+  try {
+    const hud = backend.frames.at(-1)?.hud;
+    expect(hud).toBeDefined();
+    expect(hud).toContain("EVENT p99=");
+    expect(hud).toContain("FRAME p99=");
+    expect(hud).toContain("CPU");
+    expect(hud).toContain("RSS");
+    expect(hud).toContain("N=");
+  } finally {
+    await handle.destroy();
+  }
+});
+
 test("renderTui 自定义后端：release/已阻止默认行为的按键不触发动作", async () => {
   const backend = new RecordingBackend();
   let exited = false;

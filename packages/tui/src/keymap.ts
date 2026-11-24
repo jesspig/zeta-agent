@@ -82,6 +82,15 @@ export function resolveKittyCombo(key: KeyComboInput): string {
   return normalizeKeyCombo(key);
 }
 
+export interface KeyWithComposition extends KeyComboInput {
+  readonly isComposing?: boolean;
+}
+
+/** IME 组合期间忽略快捷键，避免拼音候选中的 ctrl+d/esc 被当成宿主命令（三平台一致）。 */
+export function isImeCompositionKey(key: KeyWithComposition): boolean {
+  return key.isComposing === true && key.name !== "process";
+}
+
 const LAYER_PRIORITY: Record<KeyLayer, number> = {
   tui: 0,
   app: 1,
