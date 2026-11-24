@@ -100,7 +100,7 @@ describe("T-14 runLoop 11 步流水线", () => {
 
     expect(streamCount).toBe(1);
     // 首轮的 prepareNextTurn?.(undefined) 是 A6 #4 兼容调用，不属 step1：无探针、不轮询、不发 turn_start。
-    expect(prepareArgs).toEqual([undefined]);
+    expect(prepareArgs).toEqual([]);
     expect(entered).not.toContain("prepareNextTurn");
     expect(turnStarts).toEqual([0]); // 仅进入 runLoop 前那一次
     expect(entered.slice(0, -1)).toEqual(
@@ -133,9 +133,8 @@ describe("T-14 runLoop 11 步流水线", () => {
     await runLoop(runtime);
 
     expect(streamCount).toBe(2);
-    expect(prepareArgs).toHaveLength(2);
-    expect(prepareArgs[0]).toBeUndefined(); // 首轮兼容调用
-    expect(prepareArgs[1]).toEqual({ message: { role: "assistant", content: "r1" }, toolResults: [] });
+    expect(prepareArgs).toHaveLength(1);
+    expect(prepareArgs[0]).toEqual({ message: { role: "assistant", content: "r1" }, toolResults: [] });
     expect(entered.filter((step) => step === "prepareNextTurn")).toHaveLength(1); // 仅次轮进入 step1
     expect(turnStarts).toEqual([0, 1]); // 首轮前置 emit + 次轮 step1 emit
   });
