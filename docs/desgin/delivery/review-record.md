@@ -98,13 +98,13 @@
 - **用户裁决：修复**（非接受风险）。
 - **修复内容**：`packages/agent-framework/src/runtime/invariants.spec.ts` 将 legacy/plugin 两版共享的 `CHECKS(check(mode))` 拆为各 12 条自包含断言体，每条各自构造本版 runtime、内联行为断言与接线哨兵（`legacyHookProbe` / `pluginHookProbe`）；`scripts/check-invariant-points.mjs` 门 2 配套改为扫描 `cases` 的 legacy 断言体。
 - **理由（消除循环论证）**：两版不再共享行为断言函数体；每条断言各自构造本版接线、各自断言可观察行为，哨兵仅证明本版接线被 runLoop 读取，**不替代**行为独立性证明。旧延期理由"以按 mode 哨兵断言替代行为独立"的自相矛盾已消除。
-- **验证**：RED 25 pass / 1 fail（结构门失败，暴露共享 body）→ GREEN 26 pass / 0 fail；全量 792 pass / 0 fail；`bun run check` 45/45 + 要点关键词门通过；归并后主工作树复验通过。
+- **验证**：RED 25 pass / 1 fail（结构门失败，暴露共享 body）→ GREEN 26 pass / 0 fail；全量 849 pass / 0 fail；`bun run check` 45/45 + 要点关键词门通过；归并后主工作树复验通过。
 
 ### 7.3 spec 验收复核
 
 - 对照 `delivery/roadmap.md §4`（A1-A30）与 `architecture/engineering.md §12` 复核。
 - **核心质量门项通过**：
-  - A1（build/typecheck/test 全绿、依赖图无环）：`bun run check` 45/45、全量 792 pass、依赖门通过。
+  - A1（build/typecheck/test 全绿、依赖图无环）：`bun run check` 45/45、全量 849 pass、依赖门通过。
   - A6（12 条不变量 legacy/plugin 双版 24 测试 + 双门）：24 个 `inv-core-` 测试全绿；门 1 哨兵与门 2 要点关键词门均通过；本轮 CR-39 修复进一步强化了两版独立性。
 - 其余判据：A3/A4/A5/A13-A15/A21-A23/A26-A27/A29-A30 已有测试证据，A2/A14/A28 已由 T-07 补齐；其余为阶段 0-6 规划项，按 roadmap 路线推进。本轮不逐项判为 fail，标注"按阶段推进 / 待后续验收"。
 - **结论**：验收矩阵可用，`spec_status` 由旧报告的 `fail` / `not_available` 更新为 `available`；核心质量门项通过，无 spec 验收失败导致的阻断。
@@ -126,7 +126,7 @@
 
 ## 8 深度差距分析与本批处置（2026-11-23）
 
-> 本节记录本轮深度差距分析的方法论结论与处置边界，供后续复审对照。具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-4 已有实现并通过全量测试（792 pass / 0 fail；截至 2026-11-20 的规划基线为 734，T-01~T-07 后实测 792，数字以实测为准）；本节不改变 [roadmap.md](./roadmap.md) 的 A1-A30 编号与验收语义。
+> 本节记录本轮深度差距分析的方法论结论与处置边界，供后续复审对照。具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-6 主体能力已实现并通过全量测试（849 pass / 0 fail；此前规划基线 734，第二阶段补齐后实测 849，数字以实测为准）；本节不改变 [roadmap.md](./roadmap.md) 的 A1-A30 编号与验收语义。
 
 ### 8.1 六类结论
 
@@ -137,7 +137,7 @@
 | 工具流水线 | pi 基线中的 hook 字段赋值尚未升级为插件管线，monkey-patch 链仍是重构首要目标（见 [pi-baseline.md](../research/pi-baseline.md)） | **插件管线**：以插件管线替代字段赋值，保留 legacy 兼容层 |
 | 安全接线 | 权限门禁、发射策略（withhold / enqueue）、egress 默认拒绝、凭证不持明文、进程外审计尚未端到端接线（见 [security.md](../agent/security.md)） | **权限 / 发射 / egress / 凭证 / 审计接线**：按契约逐项落地门禁与审计完整性 |
 | TUI seam | 唯一发布实现与可替换后端 seam 的边界须在文档与实现两侧同时成立（见 [tui.md](../agent/tui.md)） | 保持 `RendererBackend` seam 与 `createTui({ backend })`，OpenTUI 仍为默认且唯一发布实现 |
-| 阶段 5/6 | HMR 核心（版本戳新鲜求值、按 unit 事务、故障注入、自动 watcher、扩展 reload e2e）已实现并测试；对象运行时 / unit 快照恢复与研究轨仍延后，交付文档此前存在与代码现实脱节的失实表述 | **文档纠偏**：状态描述与代码现实对齐，HMR 核心按已实现记录，其余标为后续可选项 |
+| 阶段 5/6 | HMR 核心与 unit 快照恢复、对象运行时最小集、研究轨护栏均已实现并测试；此前交付文档存在与代码现实脱节的失实表述 | **文档纠偏**：状态描述与代码现实对齐，延后项按设计边界重新界定 |
 
 ### 8.2 本批处置范围（固本与门禁）
 
@@ -147,6 +147,6 @@
 
 ### 8.3 明确延后（不在本批范围）
 
-- **HMR 其余部分**：HMR 核心（版本戳新鲜求值、按 unit 事务、故障注入、自动 watcher、扩展 reload e2e）已实现并测试；阶段 5 剩余的对象运行时 / unit 快照恢复仍延后，不在本批范围。
-- **对象运行时**：阶段 5 可选子路径（contract / document / store / link），当前不实现。
-- **研究轨**：阶段 6 递归自演化已有可选实现与测试（promotion / experience / fitness 及 A29 真实 evaluator，证据：`packages/agent/src/research/*.spec.ts`、`packages/deploy/src/fitness.evaluator.ts`），但不进入默认装配，默认仍为 no-op seam，仅在具备可重放任务与评估器时启用。
+- **HMR / 对象运行时 / 研究轨护栏**：均已实现并测试；HMR unit 快照恢复见 `packages/components/loader/src/hmr.spec.ts`，对象运行时最小集见 `packages/framework/src/objects/`，研究护栏见 `packages/agent/src/research/guardrails.spec.ts`。
+- **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 按设计不实现。
+- **研究轨边界**：promotion / experience / fitness 与四道护栏均为可选 seam，不进入默认装配，默认仍为 no-op seam；仅在具备可重放任务与评估器时启用。

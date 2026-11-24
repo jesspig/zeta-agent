@@ -41,6 +41,47 @@ function finiteOrThrow(value: unknown, label: string): number {
   return value;
 }
 
+/** 单条 replay trace 的预算账本：预算、执行序、合法性判定与观测最佳。 */
+export interface BudgetIdentityTrace {
+  readonly budget: number;
+  readonly order: readonly string[];
+  readonly isLegal: (id: string) => boolean;
+  readonly best: number;
+  readonly runBest: number;
+}
+
+/**
+ * SE-H11/A17 可选护栏：对齐预算恒等式。
+ * 重复 id 先于计数检查，因为重复恰好能伪装成账面上的满足。
+ */
+export function assertBudgetIdentity(trace: unknown): true {
+  if (!isRecord(trace)) throw new Error("INVALID_BUDGET_IDENTITY_TRACE");
+  const budget = finiteOrThrow(trace.budget, "budget");
+  const best = finiteOrThrow(trace.best, "best");
+  const runBest = finiteOrThrow(trace.runBest, "runBest");
+  if (!Number.isInteger(budget) || budget < 0) throw new Error("INVALID_FITNESS_FIELD: budget");
+  if (!Array.isArray(trace.order)) throw new Error("INVALID_BUDGET_ORDER");
+  if (typeof trace.isLegal !== "function") throw new Error("INVALID_IS_LEGAL");
+  const isLegal = trace.isLegal as (id: string) => boolean;
+
+  const seen = new Set<string>();
+  for (const id of trace.order) {
+    if (typeof id !== "string" || id.length === 0) throw new Error("INVALID_BUDGET_ORDER_ID");
+    if (seen.has(id)) throw new Error(`BUDGET_DUPLICATE_ID: ${id}`);
+    seen.add(id);
+  }
+  if (budget !== trace.order.length) {
+    throw new Error(`BUDGET_IDENTITY_MISMATCH: budget=${budget} order=${trace.order.length}`);
+  }
+  for (const id of trace.order) {
+    if (!isLegal(id)) throw new Error(`BUDGET_ILLEGAL_ACTION: ${id}`);
+  }
+  if (best > runBest + 1e-9) {
+    throw new Error(`BUDGET_RUNBEST_VIOLATION: best=${best} runBest=${runBest}`);
+  }
+  return true;
+}
+
 /** 预算↔成绩曲线的归一化面积（观察等价的梯形近似，结果落在 0..1）。 */
 export function attainmentAuc(points: readonly FitnessPoint[], runBest: number, minEvalForAuc: number): number {
   const usable = points

@@ -146,5 +146,5 @@ flowchart TB
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ✅ 阶段 0-4 已有实现并通过全量测试（792 pass / 0 fail）；HMR 核心（版本戳新鲜求值、按 unit 事务、故障注入、自动 watcher、扩展 reload e2e）已实现并测试（证据：`packages/components/loader/src/hmr.spec.ts`、`hmr.auto.spec.ts`、`packages/agent/src/extensions/hot-reload.e2e.spec.ts`）；阶段 5 其余（对象运行时 / unit 快照恢复）仍延后，阶段 6（递归自演化研究轨）仍为后续可选项，按阶段边界推进，不作已完成声明。
+- ✅ 阶段 0-6 主体能力已实现并通过全量测试（849 pass / 0 fail）：HMR 核心与 unit 快照恢复、对象运行时最小集（contract/document/store/link/delta）、MCP 插件、进程外审计 sink、严格 realm 事件隔离、研究轨四道护栏（digest / 预算恒等式 / 观察等价 / 语义 tripwire）。研究护栏与 fitness 默认仍为 no-op seam、不进默认装配；对象运行时的 IPC/WS/SQLite/rollout 按设计不实现。证据：`packages/components/loader/src/hmr.spec.ts`、`packages/framework/src/objects/`、`packages/agent/src/plugins/mcp/`、`packages/components/security/src/audit.socket.spec.ts`、`packages/agent/src/research/guardrails.spec.ts`。
 - ⏳ 当前差距与下一批处置见执行文档（不在版本库内）；交付节奏与验收判据以 [delivery/roadmap.md](./delivery/roadmap.md) 为准。
