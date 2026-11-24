@@ -95,6 +95,7 @@ import { createProviderStreamFn } from "./providers/dispatch";
 import { builtinIdsForProfile, resolveAssemblyProfile, type AssemblyProfile } from "./assembly/builtins";
 import { createAssemblyManifest, type CapabilityDiagnostic } from "./assembly/manifest";
 import { diagnoseCapabilities, executableToolNames } from "./assembly/profile";
+import type { SessionStore } from "./session/store";
 
 export type {
   AgentEvent,
@@ -436,6 +437,8 @@ export interface AgentOptions {
   readonly auditEndpoint?: string;
   /** @deprecated facade 不再自行写无签名旁路文件；落盘由 daemon 独占。 */
   readonly auditDir?: string;
+  /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
+  readonly sessionStore?: SessionStore;
 }
 
 export interface Agent extends PluginApiSurface {
@@ -477,6 +480,7 @@ export interface Agent extends PluginApiSurface {
   closeAudit(): Promise<void>;
   /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
+  readonly sessionStore: SessionStore | undefined;
 }
 
 function streamErrorMessage(error: unknown): string {
@@ -486,6 +490,14 @@ function streamErrorMessage(error: unknown): string {
 
 export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
+  const sessionStore = options.sessionStore;
+  if (sessionStore !== undefined) {
+    // agent_end 只含本次 newMessages；事件流 await listener，故 prompt resolve 前消息已落盘。
+    stream.subscribe(async (event) => {
+      if (event.type !== "agent_end") return;
+      for (const item of event.messages) await sessionStore.append(item);
+    });
+  }
   const baseStreamFn = options.streamFn;
   let reasoningEffort: string | undefined = options.reasoningEffort;
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
@@ -1306,6 +1318,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
     // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
+    sessionStore,
     abort() {
       aborted = true;
       activeRun?.controller.abort();

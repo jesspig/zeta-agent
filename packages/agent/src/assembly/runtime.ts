@@ -8,6 +8,9 @@ import {
 } from "@zeta-agent/security";
 import { createAgent, type Agent, type AgentOptions, type AgentStreamFn } from "../facade";
 import { createResourceRegistry, type ResourceRegistry } from "../resources/registry";
+import { createJsonlSessionStore } from "../session/jsonl-store";
+import { createSqliteSessionStore } from "../session/sqlite-store";
+import type { SessionStore } from "../session/store";
 import { resolveAssemblyProfile, type AssemblyProfile } from "./builtins";
 import {
   createAssemblyManifest,
@@ -27,6 +30,11 @@ export interface DefaultRuntimeOptions {
   readonly agentRoot?: string;
   readonly projectRoot?: string;
   readonly sessionId?: string;
+  /** 显式注入 SessionStore；与 sessionStorePath 二选一。 */
+  readonly sessionStore?: SessionStore;
+  /** 按路径创建正式后端；不传时保持 T-10 的纯内存会话零回归。 */
+  readonly sessionStorePath?: string;
+  readonly sessionStoreBackend?: "jsonl" | "sqlite";
   readonly permissionGate?: AgentOptions["permissionGate"];
   readonly approvalChannel?: AgentOptions["approvalChannel"];
   readonly egressPolicy?: AgentOptions["egressPolicy"];
@@ -38,6 +46,7 @@ export interface DefaultRuntime {
   readonly protocol: RuntimeProtocol;
   readonly profile: AssemblyProfile;
   readonly resources: ResourceRegistry;
+  readonly sessionStore: SessionStore | undefined;
   readonly services: Readonly<Record<string, unknown>>;
   readonly rootFiber: ContextFiber;
   dispose(): Promise<void>;
@@ -80,6 +89,16 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     diagnostics,
   });
 
+  const sessionId = options.sessionId ?? `zeta-${process.pid}`;
+  const ownsSessionStore = options.sessionStore === undefined && options.sessionStorePath !== undefined;
+  const sessionStore =
+    options.sessionStore ??
+    (options.sessionStorePath === undefined
+      ? undefined
+      : options.sessionStoreBackend === "sqlite"
+        ? createSqliteSessionStore({ path: options.sessionStorePath, sessionId })
+        : createJsonlSessionStore({ path: options.sessionStorePath, sessionId }));
+
   const agent = createAgent({
     streamFn: options.streamFn,
     allowedDirectories,
@@ -92,9 +111,9 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     permissionGate: options.permissionGate,
     approvalChannel: options.approvalChannel,
     egressPolicy: options.egressPolicy,
+    sessionStore,
   });
 
-  const sessionId = options.sessionId ?? `zeta-${process.pid}`;
   const protocol = createRuntimeProtocol(agent, sessionId);
 
   // root fiber 持有运行时生命周期；dispose 是唯一的逆操作。
@@ -117,6 +136,7 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     services[name] = {
       state: () => agent.state,
       reset: () => agent.reset(),
+      ...(sessionStore === undefined ? {} : { store: sessionStore }),
     };
   }
 
@@ -126,10 +146,12 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     protocol,
     profile,
     resources,
+    sessionStore,
     services,
     rootFiber,
     async dispose() {
       await ctx.dispose();
+      if (ownsSessionStore) sessionStore?.close();
       securityBackend.dispose();
     },
   };
