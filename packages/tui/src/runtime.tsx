@@ -1,7 +1,11 @@
 import { CliRenderer } from "@opentui/core";
-import { render as openTuiRender, useKeyboard, useTerminalDimensions } from "@opentui/solid";
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { createKeymap } from "./keymap";
+import { render as openTuiRender, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
+import { encodeControlFrame, type ControlAction } from "@zeta-agent/agent";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createApprovalUiChannel, ApprovalOverlay } from "./approval-ui";
+import type { ApprovalUiChannel } from "./approval-ui";
+import type { BackendSize, RendererBackend } from "./backend";
+import { createRuntimeKeymap, isImeCompositionKey, resolveKittyCombo } from "./keymap";
 import { ConnectDialog } from "./components/connect-dialog";
 import { ModelPicker } from "./components/model-picker";
 import { ConfirmOverlay } from "./components/overlay";
@@ -19,8 +23,8 @@ import {
   ThemeSelector,
   type SelectOption,
 } from "./components/selectors/selectors";
-import { useZetaSlots, type ZetaNativeSlots } from "./slots-native";
-import type { SolidPlugin } from "./slots-native";
+import { createReactiveSlotHost } from "./slots-reactive";
+import type { ZetaNativeSlots, SolidPlugin } from "./slots-native";
 import { resolveDualMode } from "./dual-mode";
 import { createAgentSignals, type AgentSignals, type EventSource } from "./signal";
 import { Transcript, type TranscriptResources } from "./components/transcript";
@@ -29,6 +33,8 @@ import { ViewportLayout } from "./components/layout-view";
 import type { RuntimeMessage, RuntimeModelOption, RuntimeTuiHandle, RuntimeTuiOptions } from "./runtime-types";
 import type { SlashCommand } from "./slash";
 import type { TuiThemeName } from "./runtime-types";
+import { createMetricsSampler, renderDebugHud } from "./debug-hud";
+import { contextBudget } from "./hud";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions, RuntimeResources, RuntimeModelOption } from "./runtime-types";
 
@@ -134,6 +140,10 @@ export interface ZetaAppProps {
   readonly onNewSession?: () => void | Promise<void>;
   /** 真实遥测：token/成本来自 usage 事件，分支/会话由宿主提供。 */
   readonly telemetry?: AgentUsageTelemetry;
+  /** user/app/TUI 三层自定义键位。 */
+  readonly keyBindings?: readonly import("./keymap").KeyBinding[];
+  /** 与 headless/RPC 共享的审批 UI 通道。 */
+  readonly approvalUi?: ApprovalUiChannel;
 }
 
 /** 根界面：视口（对话）+ 停靠区（编辑器/footer）+ 覆盖层。 */
@@ -149,7 +159,12 @@ export function ZetaApp(props: ZetaAppProps) {
   const [resetKey, setResetKey] = createSignal(0);
   type SelectorKind = "model" | "theme" | "settings" | "connect";
   const [selectorOpen, setSelectorOpen] = createSignal<SelectorKind | undefined>(undefined);
-  const { BoundSlot } = useZetaSlots(props.plugins);
+  const slotHost = createReactiveSlotHost<ZetaNativeSlots>(useRenderer());
+  const BoundSlot = slotHost.BoundSlot;
+  createEffect(() => {
+    slotHost.apply(props.plugins ?? []);
+  });
+  onCleanup(() => slotHost.dispose());
   const [status, setStatus] = createSignal<"idle" | "streaming" | "tool">("idle");
   const [editorText, setEditorText] = createSignal("");
   let lastCtrlC = 0;
@@ -303,21 +318,10 @@ export function ZetaApp(props: ZetaAppProps) {
     return (await props.onSubmit(value, mode)) !== false;
   };
 
-  const keymap = createKeymap();
-  keymap.register({ combo: "escape", action: "abort", layer: "app" });
-  keymap.register({ combo: "ctrl+d", action: "exit", layer: "app" });
-  keymap.register({ combo: "ctrl+l", action: "model-selector", layer: "app" });
-  // Ctrl+K 归编辑器 kill-line 使用；连接改由 /connect 命令打开，避免快捷键冲突。
-  keymap.register({ combo: "ctrl+g", action: "confirm", layer: "app" });
-  keymap.register({ combo: "ctrl+p", action: "palette", layer: "app" });
-  keymap.register({ combo: "ctrl+o", action: "toggle-tools", layer: "tui" });
-  keymap.register({ combo: "ctrl+t", action: "toggle-thinking", layer: "tui" });
-  keymap.register({ combo: "meta+return", action: "follow-up", layer: "tui" });
-  keymap.register({ combo: "option+return", action: "follow-up", layer: "tui" });
-  keymap.register({ combo: "ctrl+shift+c", action: "copy-selection", layer: "tui" });
+  const keymap = createRuntimeKeymap({ bindings: props.keyBindings });
 
   useKeyboard((key) => {
-    if (key.eventType === "release") return;
+    if (key.eventType === "release" || isImeCompositionKey(key)) return;
 
     // 与目标终端 UI 一致：Ctrl+C 清空输入；空输入下 500ms 内二次按下退出。
     if (key.ctrl && key.name === "c") {
@@ -334,8 +338,7 @@ export function ZetaApp(props: ZetaAppProps) {
         lastCtrlC = 0;
       }
     }
-    const combo = key.ctrl ? `ctrl+${key.name}` : key.name;
-    const action = keymap.resolve(combo)?.action;
+    const action = keymap.resolve(resolveKittyCombo(key))?.action;
     if (action === "exit") {
       if (editorText().trim().length === 0) {
         key.preventDefault();
@@ -530,6 +533,9 @@ export function ZetaApp(props: ZetaAppProps) {
           onCancel={() => setOverlayOpen(false)}
         />
       </Show>
+      <Show when={props.approvalUi !== undefined}>
+        {(channel: () => ApprovalUiChannel) => <ApprovalOverlay channel={channel()} />}
+      </Show>
       <Show when={helpOpen()}>
         <HelpOverlay onClose={() => setHelpOpen(false)} />
       </Show>
@@ -555,7 +561,132 @@ export function createTuiSubmitHandler(options: RuntimeTuiOptions) {
   };
 }
 
+const CONTROL_ACTIONS: ReadonlySet<string> = new Set<ControlAction>([
+  "prompt", "continue", "steer", "followUp", "abort", "reset",
+]);
+
+/** 注入 backend 时由它接管完整生命周期：不再创建默认原生渲染器。 */
+async function renderTuiWithBackend(
+  options: RuntimeTuiOptions,
+  backend: RendererBackend,
+): Promise<RuntimeTuiHandle> {
+  const keymap = createRuntimeKeymap({ bindings: options.keyBindings });
+  const approvalUi = options.approvalUi ?? createApprovalUiChannel();
+  let size: BackendSize = {
+    width: process.stdout.columns || 80,
+    height: process.stdout.rows || 24,
+  };
+  const messages: RuntimeMessage[] = [...(options.messages ?? [])];
+  let resolveClosed: () => void = () => {};
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  let destroyed = false;
+
+  const sampler = createMetricsSampler();
+  const hudText = options.debugHud === undefined ? undefined : (): string =>
+    renderDebugHud(
+      contextBudget(messages.length, options.debugHud?.contextLimit ?? 100),
+      sampler.snapshot(),
+    );
+  let lastTick = performance.now();
+  const lagTimer: ReturnType<typeof setInterval> | undefined =
+    options.debugHud === undefined
+      ? undefined
+      : setInterval(() => {
+          const now = performance.now();
+          sampler.sample({ eventLoopLagMs: Math.max(0, now - lastTick - 50) });
+          lastTick = now;
+        }, 50);
+
+  const renderFrame = (): void => {
+    const started = performance.now();
+    backend.render({
+      width: size.width,
+      height: size.height,
+      lines: messages.map(messageLine),
+      ...(hudText === undefined ? {} : { hud: hudText() }),
+    });
+    sampler.sample({ frameMs: performance.now() - started });
+  };
+
+  await backend.mount({
+    ...size,
+    screenMode: resolveDualMode(options.mode).screenMode,
+    useKittyKeyboard: true,
+  });
+  const offEvent = backend.event((event) => {
+    if (destroyed) return;
+    if (event.type === "resize") {
+      size = event.size;
+      renderFrame();
+      return;
+    }
+    if (event.type === "paste") {
+      void options.onSubmit?.(event.text);
+      return;
+    }
+    if (event.key.eventType === "release" || event.key.defaultPrevented) return;
+    if (isImeCompositionKey(event.key)) return;
+    const action = keymap.resolve(resolveKittyCombo(event.key))?.action;
+    if (action === undefined) return;
+    if (action === "exit") {
+      event.key.preventDefault();
+      event.key.stopPropagation();
+      options.onExit?.();
+      resolveClosed();
+      return;
+    }
+    if (action === "confirm") {
+      event.key.preventDefault();
+      if (approvalUi.pending() !== undefined) approvalUi.respond("allowed-once");
+      return;
+    }
+    if (action === "copy-selection") {
+      event.key.preventDefault();
+      backend.clipboard.copy(messages.map((message) => String(message.content)).join("\n"));
+      return;
+    }
+    if (CONTROL_ACTIONS.has(action)) {
+      event.key.preventDefault();
+      const controlAction = action as ControlAction;
+      if (options.protocol !== undefined) {
+        void options.protocol.control.dispatch(encodeControlFrame({ action: controlAction }));
+      } else if (controlAction === "abort") {
+        options.onAbort?.();
+      }
+    }
+  });
+  renderFrame();
+
+  return {
+    approvalUi,
+    appendMessage(message) {
+      messages.push(message);
+      renderFrame();
+    },
+    setModels() {},
+    setModelOptions() {},
+    setModel() {},
+    waitForExit() {
+      return closed;
+    },
+    getSignals() {
+      return undefined;
+    },
+    async destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      if (lagTimer !== undefined) clearInterval(lagTimer);
+      offEvent();
+      backend.destroy();
+      resolveClosed();
+    },
+  };
+}
+
 export async function renderTui(options: RuntimeTuiOptions = {}): Promise<RuntimeTuiHandle> {
+  if (options.backend !== undefined) return renderTuiWithBackend(options, options.backend);
   const screenMode = resolveDualMode(options.mode).screenMode;
   const renderer = new CliRenderer(
     process.stdin,
@@ -625,6 +756,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     : undefined;
 
   const onSubmit = createTuiSubmitHandler(options);
+  const approvalUi = options.approvalUi ?? createApprovalUiChannel();
 
   const cleanup = (): void => {
     if (destroyed) return;
@@ -680,6 +812,8 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
             resources={options.resources}
             theme={options.theme}
             telemetry={telemetry()}
+            keyBindings={options.keyBindings}
+            approvalUi={approvalUi}
             onExit={() => {
               options.onExit?.();
               exit();
@@ -697,6 +831,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   }
 
   return {
+    approvalUi,
     appendMessage(message) {
       push(message);
     },

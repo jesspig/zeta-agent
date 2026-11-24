@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test";
 import type { FrameState } from "./frame-state";
-import type { Frame, RendererBackend, TestHandle, TestRenderOptions } from "./backend";
+import {
+  createBackendKeyEvent,
+  type BackendEvent,
+  type Frame,
+  type RendererBackend,
+  type TestHandle,
+  type TestRenderOptions,
+} from "./backend";
 
 function contentFrame(frame: FrameState): string {
   const body = [...frame.lines];
@@ -14,8 +21,48 @@ function contentFrame(frame: FrameState): string {
 }
 
 class FakeBackend implements RendererBackend {
+  private destroyed = false;
+  private mounted = false;
+  private readonly listeners = new Set<(event: BackendEvent) => void>();
+  private lastClipboard = "";
+  readonly clipboard = {
+    copy: (text: string) => {
+      this.assertAlive();
+      this.lastClipboard = text;
+    },
+  };
+
+  private assertAlive(): void {
+    if (this.destroyed) throw new Error("FakeBackend: already destroyed");
+  }
+
   render(frame: FrameState): Frame {
+    this.assertAlive();
     return { snapshot: contentFrame(frame) };
+  }
+  mount(): void {
+    this.assertAlive();
+    if (this.mounted) throw new Error("FakeBackend: already mounted");
+    this.mounted = true;
+  }
+  input(key: ReturnType<typeof createBackendKeyEvent>): boolean {
+    this.assertAlive();
+    if (!this.mounted) throw new Error("FakeBackend: not mounted");
+    if (key.defaultPrevented) return false;
+    for (const listener of [...this.listeners]) listener({ type: "key", key });
+    return this.listeners.size > 0;
+  }
+  event(listener: (event: BackendEvent) => void): () => void {
+    this.assertAlive();
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  resize(size: { width: number; height: number }): void {
+    this.assertAlive();
+    for (const listener of [...this.listeners]) listener({ type: "resize", size });
+  }
+  clipboardText(): string {
+    return this.lastClipboard;
   }
   async testRender(app: () => FrameState, opts: TestRenderOptions): Promise<TestHandle> {
     let current = contentFrame(app());
@@ -34,7 +81,11 @@ class FakeBackend implements RendererBackend {
       },
     };
   }
-  destroy(): void {}
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.listeners.clear();
+  }
 }
 
 export function backendContractTests(name: string, factory: () => RendererBackend): void {
@@ -77,6 +128,28 @@ export function backendContractTests(name: string, factory: () => RendererBacken
       backend.destroy();
       backend.destroy();
     }).not.toThrow();
+  });
+
+  test(`${name}: mount/input/event/resize/clipboard/destroy 完整生命周期`, async () => {
+    const backend = factory();
+    const seen: BackendEvent[] = [];
+    const off = backend.event((event) => seen.push(event));
+    await backend.mount({ width: 20, height: 6, screenMode: "alternate-screen", useKittyKeyboard: true });
+    const consumed = backend.input(createBackendKeyEvent({ name: "c", ctrl: true }));
+    expect(consumed).toBe(true);
+    backend.resize({ width: 30, height: 9 });
+    backend.clipboard.copy("clip");
+    expect(seen.map((event) => event.type)).toEqual(["key", "resize"]);
+    off();
+    backend.destroy();
+  });
+
+  test(`${name}: destroy 后 mount/input/resize 拒绝继续接管`, async () => {
+    const backend = factory();
+    backend.destroy();
+    expect(() => backend.mount({ width: 10, height: 2 })).toThrow(/destroy/i);
+    expect(() => backend.input(createBackendKeyEvent({ name: "a" }))).toThrow(/destroy/i);
+    expect(() => backend.resize({ width: 10, height: 2 })).toThrow(/destroy/i);
   });
 }
 
