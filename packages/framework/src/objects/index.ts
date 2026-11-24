@@ -63,14 +63,45 @@ export type {
   ReloadReport,
 } from "./host";
 
-export { openStore } from "./store";
-export type { CommitContext, Store, Table } from "./store";
+export { openSqliteStore, openStore } from "./store";
+export type {
+  CommitContext,
+  CommitRecord,
+  CommitWriteView,
+  RecoveryReport,
+  SqliteStore,
+  SqliteStoreOptions,
+  Store,
+  StoreFaults,
+  StoreOptions,
+  Table,
+} from "./store";
 
 export { defineDocument, openDocument, transact as transactDocuments } from "./document";
 export type { DocumentDef, DocumentHandle, DocumentSpec, Tx } from "./document";
 
-export { memoryLinkPair } from "./link";
-export type { Link } from "./link";
+export {
+  BackpressureError,
+  createJsonCodec,
+  ipcLinkPair,
+  memoryLinkPair,
+  PeerClosedError,
+  wsLinkPair,
+} from "./link";
+export type { Codec, Link, LinkOptions, Receipt, RichLink, WireFrame, WsLinkOptions } from "./link";
 
-export { adopt, applyImmutable, prepare, track } from "./delta";
-export type { Delta, DeltaOp, PathSegment, PendingDelta, Tracker } from "./delta";
+export { createRollout } from "./rollout";
+export type {
+  RolloutController,
+  RolloutHost,
+  RolloutOptions,
+  RolloutPhase,
+  RolloutReport,
+  WorkLease,
+} from "./rollout";
+
+export { createJobRunner, derive, liveQuery, nativeWatch } from "./jobs";
+export type { Derived, JobContext, JobHandler, JobOptions, JobRecord, JobRunner, JobStatus, LiveQuery } from "./jobs";
+
+export { adopt, applyImmutable, baseline, prepare, StaleDeltaError, track } from "./delta";
+export type { Baseline, BaselineOptions, Delta, DeltaOp, PathSegment, PendingDelta, StaleReason, Tracker } from "./delta";

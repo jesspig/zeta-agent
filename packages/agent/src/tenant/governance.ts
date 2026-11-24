@@ -5,6 +5,9 @@ import {
   type Context,
   type Disposer,
   type Host,
+  type JobRunner,
+  type RolloutController,
+  type Store,
 } from "@zeta-agent/framework";
 import {
   createPrincipalResolver,
@@ -26,6 +29,10 @@ export interface TenantScope {
   readonly context: Context;
   /** 对象 host 复用本租户 context（T-05 fiber）与 principal/realm（T-13）。 */
   readonly objectHost: Host;
+  /** 每租户独立对象数据面：持久化、作业与跨 host rollout 不共享状态。 */
+  readonly objectStore: Store | undefined;
+  readonly objectJobs: JobRunner | undefined;
+  readonly objectRollout: RolloutController | undefined;
   readonly quota: QuotaService;
   readonly sessionStore: SessionStore | undefined;
   readonly durableEffects: DurableEffects | undefined;
@@ -50,6 +57,9 @@ export interface TenantGovernanceOptions {
   readonly createDurableEffects?: (principal: Principal) => DurableEffects | undefined;
   readonly createStreamFn?: (principal: Principal) => AgentStreamFn | undefined;
   readonly createExperienceStore?: (principal: Principal) => ExperienceStore;
+  readonly createObjectStore?: (principal: Principal) => Store | undefined;
+  readonly createObjectJobs?: (principal: Principal) => JobRunner | undefined;
+  readonly createObjectRollout?: (principal: Principal) => RolloutController | undefined;
 }
 
 export interface TenantGovernance {
@@ -65,6 +75,9 @@ let contextSeed = 0;
 
 async function disposeScope(scope: TenantScope): Promise<void> {
   scope.sessionStore?.close();
+  await scope.objectJobs?.close();
+  await scope.objectStore?.close();
+  await scope.objectRollout?.close();
   await scope.objectHost.close();
   await scope.context.dispose();
 }
@@ -93,11 +106,17 @@ export function createTenantGovernance(options: TenantGovernanceOptions = {}): T
     const durableEffects = options.createDurableEffects?.(principal);
     const streamFn = options.createStreamFn?.(principal);
     const research = options.createExperienceStore?.(principal) ?? createExperienceStore();
+    const objectStore = options.createObjectStore?.(principal);
+    const objectJobs = options.createObjectJobs?.(principal);
+    const objectRollout = options.createObjectRollout?.(principal);
     return {
       principal,
       realm: principal.realm,
       context,
       objectHost,
+      objectStore,
+      objectJobs,
+      objectRollout,
       quota,
       sessionStore,
       durableEffects,

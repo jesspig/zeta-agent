@@ -18,6 +18,8 @@ export interface Delta {
   readonly seq: number;
   readonly ops: readonly DeltaOp[];
   readonly baseFingerprint: string;
+  /** 产生该 delta 的代码/进程代次；跨代次消息必须被拒。 */
+  readonly generation?: number;
 }
 
 export interface PendingDelta {
@@ -108,7 +110,7 @@ export function prepare(tracker: Tracker): PendingDelta {
   return Object.freeze(pending);
 }
 
-export function adopt(pending: PendingDelta): Delta {
+export function adopt(pending: PendingDelta, generation?: number): Delta {
   if (typeof pending !== "object" || pending === null || !PENDINGS.has(pending)) {
     throw new Error("INVALID_PENDING_DELTA");
   }
@@ -123,6 +125,7 @@ export function adopt(pending: PendingDelta): Delta {
     seq: (deltaSeq += 1),
     ops,
     baseFingerprint: pending.baseFingerprint,
+    ...(generation === undefined ? {} : { generation }),
   } as Delta;
   DELTAS.add(delta);
   return Object.freeze(delta);
@@ -177,4 +180,62 @@ export function applyImmutable<T>(root: T, delta: Delta): T {
     }
   }
   return current as T;
+}
+
+export type StaleReason = "FINGERPRINT" | "SEQ" | "GENERATION";
+
+/** 副本应用了不属于当前权威基线的 delta：FAILED，不覆写本地状态。 */
+export class StaleDeltaError extends Error {
+  readonly kind = "STALE" as const;
+  readonly reason: StaleReason;
+
+  constructor(reason: StaleReason, message: string) {
+    super(message);
+    this.name = "StaleDeltaError";
+    this.reason = reason;
+  }
+}
+
+export interface BaselineOptions {
+  readonly seq?: number;
+  readonly generation?: number;
+}
+
+/** 权威基线：值 + 指纹 + 全局 seq + 代次；只接受严格其后继且指纹/代次一致。 */
+export interface Baseline<T> {
+  readonly value: T;
+  readonly fingerprint: string;
+  readonly seq: number;
+  readonly generation?: number;
+  apply(delta: Delta, expectedGeneration?: number): Baseline<T>;
+}
+
+function makeBaseline<T>(value: T, fingerprint: string, seq: number, generation?: number): Baseline<T> {
+  return Object.freeze({
+    value,
+    fingerprint,
+    seq,
+    ...(generation === undefined ? {} : { generation }),
+    apply(next: Delta, expectedGeneration?: number): Baseline<T> {
+      if (typeof next !== "object" || next === null || !DELTAS.has(next)) {
+        throw new Error("INVALID_DELTA");
+      }
+      if (next.seq <= seq) {
+        throw new StaleDeltaError("SEQ", `delta seq ${next.seq} 不晚于当前 seq ${seq}`);
+      }
+      if (next.baseFingerprint !== fingerprint) {
+        throw new StaleDeltaError("FINGERPRINT", "delta 基线指纹不等于当前权威指纹");
+      }
+      const expected = expectedGeneration ?? generation;
+      if (expected !== undefined && next.generation !== expected) {
+        throw new StaleDeltaError("GENERATION", `delta 代次 ${next.generation} 不是当前代次 ${expected}`);
+      }
+      const applied = applyImmutable(value, next) as T;
+      return makeBaseline(applied, hashValue(applied), next.seq, generation);
+    },
+  });
+}
+
+export function baseline<T>(value: T, options: BaselineOptions = {}): Baseline<T> {
+  return makeBaseline(clone(value), hashValue(value), options.seq ?? 0, options.generation);
 }
