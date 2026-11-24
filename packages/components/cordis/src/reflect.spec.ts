@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { CoeffectKey } from "@zeta-agent/framework";
+import type { CoeffectKey } from "./types";
 import {
   CAPABILITY_EXPIRED,
   UNDECLARED_ACCESS,

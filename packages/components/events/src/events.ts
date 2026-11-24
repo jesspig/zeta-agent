@@ -1,4 +1,4 @@
-import type { Disposer } from "@zeta-agent/framework";
+import type { Disposer } from "@zeta-agent/cordis/types";
 import type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener } from "./types";
 
 export type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener } from "./types";

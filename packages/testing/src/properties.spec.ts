@@ -19,7 +19,7 @@ import {
   createEffectBridge,
   setActiveEffectBridge,
   type EffectMeta,
-} from "../../components/observability/src/index";
+} from "@zeta-agent/observability";
 
 const SEEDS = [0x1a2b3c4d, 0x5eed1234, 0x0badf00d, 0x12345678, 0xdecafbad, 0x9e3779b9] as const;
 
@@ -209,7 +209,7 @@ function createChurnHarness() {
       await fiber.refresh();
     },
     async detach(uid: string): Promise<void> {
-      gates.get(uid)!.remove();
+      await gates.get(uid)!.remove();
       await fibers.get(uid)!.refresh();
     },
   };
@@ -259,7 +259,7 @@ function createCascadeHarness(depth: number) {
       }
     },
     async detachAll(): Promise<void> {
-      system.fibers.get("gate")!.remove();
+      await system.fibers.get("gate")!.remove();
       const pending = Array.from({ length: depth }, (_, index) =>
         system.fibers.get(`level-${index}`)!.refresh()
       );

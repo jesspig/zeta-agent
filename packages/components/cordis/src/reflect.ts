@@ -1,12 +1,19 @@
-import type { CoeffectKey, Disposer, Impl, View } from "@zeta-agent/framework";
+import type { CoeffectKey, Disposer, Impl, LifecycleState, View } from "./types";
 
 export const STORE = Symbol("@@store");
 export const ISOLATE = Symbol("@@isolate");
 export const INTERCEPT = Symbol("@@intercept");
+export const REALM = Symbol("@@realm");
+export const RESOLVE = Symbol("@@resolve");
+export const FIBER = Symbol("@@fiber");
 
 export const UNDECLARED_ACCESS = "UNDECLARED_ACCESS";
 export const INACTIVE_ACCESS = "INACTIVE_ACCESS";
 export const CAPABILITY_EXPIRED = "CAPABILITY_EXPIRED";
+
+export interface CommittedViewOwner {
+  readonly state: LifecycleState;
+}
 
 export interface ReflectNode {
   readonly uid: string;
@@ -17,6 +24,9 @@ export interface ReflectNode {
   readonly [STORE]: Map<symbol, unknown>;
   readonly [ISOLATE]: Map<symbol, symbol>;
   readonly [INTERCEPT]: Map<symbol, (value: unknown) => unknown>;
+  [REALM]: symbol;
+  [RESOLVE]?: (key: CoeffectKey<any>, realm: symbol) => Impl | undefined;
+  [FIBER]?: CommittedViewOwner;
 }
 
 export function createNode(
@@ -35,7 +45,23 @@ export function createNode(
     [STORE]: new Map(),
     [ISOLATE]: new Map(),
     [INTERCEPT]: new Map(),
+    [REALM]: Symbol(`realm:${uid}`),
   };
+}
+
+export function bindRealm(node: ReflectNode, realm: symbol): void {
+  node[REALM] = realm;
+}
+
+export function bindResolver(
+  node: ReflectNode,
+  resolver: ReflectNode[typeof RESOLVE]
+): void {
+  node[RESOLVE] = resolver;
+}
+
+export function bindFiber(node: ReflectNode, owner: CommittedViewOwner): void {
+  node[FIBER] = owner;
 }
 
 export function commit(
@@ -64,6 +90,7 @@ export function isolate(
 ): ReflectNode {
   const derived = createNode(`${node.uid}:${realm.toString()}`, node, [key]);
   derived[ISOLATE].set(key.symbol, realm);
+  bindRealm(derived, realm);
   return derived;
 }
 
@@ -74,6 +101,7 @@ export function intercept(
 ): ReflectNode {
   const derived = createNode(`${node.uid}:intercept`, node, [key]);
   derived[INTERCEPT].set(key.symbol, transform);
+  bindRealm(derived, node[REALM]);
   return derived;
 }
 
@@ -95,31 +123,46 @@ function findKey(node: ReflectNode, symbol: symbol): CoeffectKey<any> | undefine
   return undefined;
 }
 
+function readImpl(impl: Impl | undefined): { found: boolean; value?: unknown } {
+  if (!impl) return { found: false };
+  if (impl.check && !impl.check()) throw new Error(CAPABILITY_EXPIRED);
+  return { found: true, value: impl.value };
+}
+
 export function get(node: ReflectNode, key: CoeffectKey<any>): unknown {
   const chain = chainOf(node);
   const declared = chain.some((item) => item.declared.has(key.symbol) || item.keys.has(key.symbol));
-  if (!declared) throw new Error(UNDECLARED_ACCESS);
-
-  let value: unknown;
-  let found = false;
-  for (const item of chain) {
-    if (item[STORE].has(key.symbol)) {
-      value = item[STORE].get(key.symbol);
-      found = true;
-      break;
+  const owner = chain.find((item) => item[FIBER])?.[FIBER];
+  let provided: { found: boolean; value?: unknown } | undefined;
+  if (!owner) {
+    for (const item of chain) {
+      if (!item[RESOLVE]) continue;
+      provided = readImpl(item[RESOLVE](key, node[REALM]));
+      if (provided.found) break;
     }
-    if (item[ISOLATE].has(key.symbol)) break;
-    for (const [candidate, impl] of item.committed) {
-      if (candidate.symbol !== key.symbol) continue;
-      if (impl.check && !impl.check()) throw new Error(CAPABILITY_EXPIRED);
-      value = impl.value;
-      found = true;
-      break;
-    }
-    if (found) break;
   }
-  if (!found) throw new Error(INACTIVE_ACCESS);
+  if (!declared && !provided?.found) throw new Error(UNDECLARED_ACCESS);
 
+  if (owner) {
+    if (!("committed" in owner.state)) throw new Error(INACTIVE_ACCESS);
+    const resolved = readImpl(owner.state.committed.get(key));
+    if (!resolved.found) throw new Error(INACTIVE_ACCESS);
+    return applyInterceptors(chain, key, resolved.value);
+  }
+  if (provided?.found) return applyInterceptors(chain, key, provided.value);
+
+  // 低层 reflect 调用方仍可直接使用 commit/set；生产 Context 始终绑定 resolver。
+  for (const item of chain) {
+    if (item[STORE].has(key.symbol)) return applyInterceptors(chain, key, item[STORE].get(key.symbol));
+    if (item[ISOLATE].has(key.symbol)) break;
+    const resolved = readImpl(item.committed.get(key));
+    if (resolved.found) return applyInterceptors(chain, key, resolved.value);
+  }
+  throw new Error(INACTIVE_ACCESS);
+}
+
+function applyInterceptors(chain: ReflectNode[], key: CoeffectKey<any>, initial: unknown): unknown {
+  let value = initial;
   for (const item of [...chain].reverse()) {
     const transform = item[INTERCEPT].get(key.symbol);
     if (transform) value = transform(value);
@@ -143,7 +186,6 @@ export function createProxy<T extends object>(node: ReflectNode): T {
     get: (target, property) => {
       if (typeof property !== "symbol") return Reflect.get(target, property);
       const found = findKey(node, property);
-      // Proxy 是 capability 门禁：未声明（未提交/未 set）的 symbol 访问一律拒绝。
       if (!found) throw new Error(UNDECLARED_ACCESS);
       return get(node, found);
     },

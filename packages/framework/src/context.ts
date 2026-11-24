@@ -7,26 +7,29 @@ import type {
   FiberContext,
   LifecycleState,
   OperationSet,
+  ProvideOptions,
+  EffectObserver,
 } from "./types";
-// facade 只做装配：复用 cordis 组件的 EffectHost / ReflectNode / FiberSystem，不重写核心语义。
-// 使用相对路径而非包名，避免 facade -> cordis -> facade 的 workspace 依赖环。
+// facade 只做装配：核心语义与类型归 cordis，公开 API 由本包重导出。
 import {
   createEffectHost,
   effect as runEffect,
   NOOP,
   type EffectHost,
-} from "../../components/cordis/src/effect";
+} from "@zeta-agent/cordis/effect";
 import {
-  commit as reflectCommit,
+  bindFiber,
+  bindRealm,
+  bindResolver,
   createNode,
   createProxy,
   get as reflectGet,
   intercept as reflectIntercept,
   isolate as reflectIsolate,
-  set as reflectSet,
+  ISOLATE,
   type ReflectNode,
-} from "../../components/cordis/src/reflect";
-import { FiberSystem, type Fiber, type FiberSpec } from "../../components/cordis/src/fiber";
+} from "@zeta-agent/cordis/reflect";
+import { FiberSystem, type Fiber, type FiberSpec } from "@zeta-agent/cordis/fiber";
 
 /** defineKey 的可选元数据（operations 为观察等价所需操作，commutative 为 provider 的义务）。 */
 export interface KeyOptions<T> {
@@ -182,7 +185,6 @@ interface Internals {
   readonly node: ReflectNode;
   readonly system: FiberSystem;
   readonly pending: Set<Promise<unknown>>;
-  readonly providers: Map<symbol, Fiber>;
   /** 事件监听器按 realm 分桶：事件名 → realm → 监听器集合，避免派生 context 共享监听表。 */
   readonly listeners: Map<string, Map<symbol, Set<(payload: unknown) => void>>>;
   readonly intercepted: Map<symbol, unknown>;
@@ -191,8 +193,8 @@ interface Internals {
   /** accepts 校验用的版本注册表：provider fiber 在 use 装配时登记其声明版本。 */
   readonly providerVersions: Map<symbol, { uid: string; version?: string }>;
   readonly uidSeed: { value: number };
-  /** 派生 context（isolate/intercept/组件 fiber）不自动注册 provider fiber。 */
-  readonly registerProvider: boolean;
+  readonly observer?: EffectObserver;
+  readonly owner?: Fiber;
 }
 
 function track(internals: Internals, promise: Promise<unknown>): void {
@@ -206,10 +208,15 @@ function track(internals: Internals, promise: Promise<unknown>): void {
 function makeContext(
   base: Internals,
   node: ReflectNode = base.node,
-  registerProvider = base.registerProvider,
-  realm = base.realm
+  realm = base.realm,
+  owner?: Fiber
 ): Context {
-  const internals: Internals = { ...base, node, registerProvider, realm };
+  const host = owner?.host ?? (
+    node === base.node && realm === base.realm
+      ? base.host
+      : createEffectHost(`${base.host.uid}:ctx:${++base.uidSeed.value}`, base.observer)
+  );
+  const internals: Internals = { ...base, host, node, realm, owner };
 
   const effect = (callback: EffectCallback, label?: string): Disposer =>
     runEffect(internals.host, () => callback(context), label);
@@ -219,64 +226,60 @@ function makeContext(
   /** Proxy 门禁入口：symbol 属性访问走 committed view 解析并强制声明检查。 */
   const proxy = <T extends object>(): T => createProxy<T>(internals.node);
 
-  const set = <T>(key: CoeffectKey<T>, value: T): Disposer => reflectSet(internals.node, key, value);
-
-  const provide = <T>(key: CoeffectKey<T>, value: T): Disposer => {
-    const restore = reflectSet(internals.node, key, value);
-    // G04：production 也写入 node.committed，使 ctx.get 的 committed 分支真正可达；
-    // G02：check 由 provider 撤销态注入，撤销后读取抛 CAPABILITY_EXPIRED。
-    let revoked = false;
-    let dependents = new Set<string>();
-    let fiber: Fiber | undefined;
-
-    if (internals.registerProvider) {
-      const previous = internals.providers.get(key.symbol);
-      if (previous) previous.remove();
-      const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
-      fiber = internals.system.create({
-        uid,
-        inject: [],
-        provide: [key],
-        apply: () => NOOP,
-      });
-      internals.providers.set(key.symbol, fiber);
-      // G03：committed Impl.dependents 与 provider fiber 的 dependents 共享载体。
-      dependents = fiber.committedDependents;
-      track(internals, fiber.refresh());
+  const provideValue = <T>(
+    key: CoeffectKey<T>,
+    value: T,
+    options: ProvideOptions | undefined,
+    keepTombstone: boolean
+  ): Disposer => {
+    for (let cursor: ReflectNode | null = internals.node; cursor; cursor = cursor.parent) {
+      cursor.keys.set(key.symbol, key);
+      if (cursor[ISOLATE].has(key.symbol)) break;
     }
-
-    reflectCommit(internals.node, key, value, key.symbol, () => !revoked, dependents);
-
+    if (internals.owner) return internals.owner.provide(key, value, options);
+    const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
+    const fiber = internals.system.create({
+      uid,
+      inject: [],
+      provide: [key],
+      realm,
+      autoProvide: false,
+      apply: () => NOOP,
+    });
+    const releaseValue = fiber.provide(key, value, options);
+    const ready = fiber.refresh();
+    track(internals, ready);
     let armed = true;
     return () => {
       if (!armed) return;
       armed = false;
-      revoked = true;
-      restore();
-      if (fiber && internals.providers.get(key.symbol) === fiber) {
-        fiber.remove();
-        internals.providers.delete(key.symbol);
-      }
+      releaseValue();
+      void fiber.remove();
+      if (!keepTombstone) internals.system.forget(key, realm);
     };
   };
 
+  const provide = <T>(key: CoeffectKey<T>, value: T, options?: ProvideOptions): Disposer =>
+    provideValue(key, value, options, true);
+
+  const set = <T>(key: CoeffectKey<T>, value: T): Disposer => provideValue(key, value, undefined, false);
+
   const isolate = <T>(key: CoeffectKey<T>, realm?: symbol): FiberContext => {
     const nextRealm = realm ?? Symbol(key.symbol.description ?? key.name);
-    return makeContext(internals, reflectIsolate(internals.node, key, nextRealm), false, nextRealm);
+    return makeContext(internals, reflectIsolate(internals.node, key, nextRealm), nextRealm);
   };
 
   const intercept = <T>(key: CoeffectKey<T>, metadata: unknown): FiberContext => {
     internals.intercepted.set(key.symbol, metadata);
     const transform: (value: unknown) => unknown =
       typeof metadata === "function" ? (metadata as (value: unknown) => unknown) : (value) => value;
-    return makeContext(internals, reflectIntercept(internals.node, key, transform), false);
+    return makeContext(internals, reflectIntercept(internals.node, key, transform), realm);
   };
 
   const use = <P>(component: Component<P>, config?: P): ContextFiber => {
     const uid = `fiber:${++internals.uidSeed.value}`;
     const fiberNode = createNode(uid, internals.node, [...component.inject, ...component.provide]);
-    const fiberCtx = makeContext(internals, fiberNode, false);
-    // 版本注册表在装配期登记；accepts 在 apply 时校验（此时 provider 已进入 ACTIVE）。
+    bindRealm(fiberNode, realm);
     for (const key of component.provide) {
       internals.providerVersions.set(key.symbol, { uid, version: component.version });
     }
@@ -285,7 +288,9 @@ function makeContext(
       inject: component.inject,
       provide: component.provide,
       config,
-      // config 通过 FiberSpec 下发，Component.apply 收到的是调用方传入的配置。
+      realm,
+      parent: internals.owner,
+      autoProvide: false,
       apply: (_host, appliedConfig) => {
         if (component.accepts !== undefined) {
           for (const key of component.inject) {
@@ -304,6 +309,8 @@ function makeContext(
       },
     };
     const fiber = internals.system.create(spec);
+    bindFiber(fiberNode, fiber);
+    const fiberCtx = makeContext(internals, fiberNode, realm, fiber);
     const ready = fiber.refresh();
     track(internals, ready);
     return {
@@ -319,7 +326,7 @@ function makeContext(
             internals.providerVersions.delete(key.symbol);
           }
         }
-        fiber.remove();
+        void fiber.remove();
       },
     };
   };
@@ -344,24 +351,27 @@ function makeContext(
   };
 
   const notify = async (keys?: readonly CoeffectKey<any>[]): Promise<void> => {
-    // 先排空在途的 provide/use 装载，保证通知看到稳定的 provider 集合。
     await Promise.all([...internals.pending].map((promise) => promise.catch(() => undefined)));
-    const wanted = keys === undefined ? null : new Set(keys.map((key) => key.symbol));
-    const targets = [...internals.system.fibers.values()].filter(
-      (fiber) =>
-        fiber.spec.inject.length > 0 &&
-        (wanted === null || fiber.spec.inject.some((key) => wanted.has(key.symbol)))
-    );
-    await Promise.all(targets.map((fiber) => fiber.refresh()));
+    internals.system.notify(keys, keys === undefined || internals.node.parent === null ? undefined : realm);
+    await internals.system.drain();
   };
 
   const dispose: Disposer = async () => {
-    for (const fiber of [...internals.system.fibers.values()]) fiber.remove();
-    internals.providers.clear();
-    // 只清理本 realm 的监听，其他 realm（如 root 或兄弟租户）不受影响。
+    const fibers = [...internals.system.fibers.values()].filter(
+      (fiber) => internals.node.parent === null || fiber.realm === realm
+    );
+    const results = await Promise.allSettled([
+      ...fibers.map((fiber) => fiber.remove()),
+      internals.host.dispose(),
+    ]);
     for (const realms of internals.listeners.values()) realms.delete(internals.realm);
     internals.pending.clear();
-    await internals.host.dispose();
+    const errors = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .flatMap((result) =>
+        result.reason instanceof AggregateError ? result.reason.errors : [result.reason]
+      );
+    if (errors.length > 0) throw new AggregateError(errors, "context dispose teardown 失败");
   };
 
   const context: Context = {
@@ -385,20 +395,24 @@ function makeContext(
 let contextSeed = 0;
 
 /** 创建一个可装配的运行时上下文（facade 唯一入口）。 */
-export function createContext(options: { uid?: string } = {}): Context {
+export function createContext(options: { uid?: string; observer?: EffectObserver } = {}): Context {
   const uid = options.uid ?? `ctx:${++contextSeed}`;
+  const realm = Symbol(`realm:${uid}`);
+  const node = createNode(uid, null, []);
+  const system = new FiberSystem(options.observer);
+  bindRealm(node, realm);
+  bindResolver(node, (key, requestedRealm) => system.committedFor(key, requestedRealm));
   return makeContext({
-    host: createEffectHost(uid),
-    node: createNode(uid, null, []),
-    system: new FiberSystem(),
+    host: createEffectHost(uid, options.observer),
+    node,
+    system,
     pending: new Set(),
-    providers: new Map(),
     listeners: new Map(),
     intercepted: new Map(),
-    realm: Symbol(`realm:${uid}`),
+    realm,
     providerVersions: new Map(),
     uidSeed: { value: 0 },
-    registerProvider: true,
+    ...(options.observer ? { observer: options.observer } : {}),
   });
 }
 

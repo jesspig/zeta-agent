@@ -205,7 +205,10 @@ describe("framework facade 运行时", () => {
       version: "1.0",
       inject: [],
       provide: [svc],
-      apply: () => () => {},
+      apply: (ctx) => {
+        ctx.provide(svc, "service");
+        return () => {};
+      },
     });
     const applied: string[] = [];
     const consumer = (accepted: string) =>
@@ -251,7 +254,10 @@ describe("framework facade 运行时", () => {
         version: "3",
         inject: [],
         provide: [svc],
-        apply: () => () => {},
+        apply: (ctx) => {
+          ctx.provide(svc, "service");
+          return () => {};
+        },
       })
     );
     const applied: string[] = [];
