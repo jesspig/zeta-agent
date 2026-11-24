@@ -14,11 +14,35 @@ export function oscCopySelection(text: string): string {
   return `\x1b]52;c;${encoded}\x1b\\`;
 }
 
+const OSC_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
+const OSC_SAFE_SCHEMES = new Set(["http:", "https:"]);
+const OSC_PARAM_KEY = /^[a-zA-Z0-9_-]+$/;
+
+function normalizeHyperlinkUri(uri: string): string {
+  if (typeof uri !== "string" || uri.length === 0 || OSC_CONTROL_CHARS.test(uri)) {
+    throw new Error("INVALID_OSC_URI");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    throw new Error("INVALID_OSC_URI");
+  }
+  if (!OSC_SAFE_SCHEMES.has(parsed.protocol)) throw new Error("INVALID_OSC_URI");
+  return encodeURI(uri);
+}
+
 /** OSC 8：超链接；params 为可选的 key=value 参数（如 id）。 */
 export function oscHyperlink(uri: string, params: Readonly<Record<string, string>> = {}): string {
-  const entries = Object.entries(params).map(([key, value]) => `${key}=${value}`);
+  const safeUri = normalizeHyperlinkUri(uri);
+  const entries = Object.entries(params).map(([key, value]) => {
+    if (!OSC_PARAM_KEY.test(key) || typeof value !== "string" || OSC_CONTROL_CHARS.test(value)) {
+      throw new Error("INVALID_OSC_PARAMS");
+    }
+    return `${key}=${encodeURIComponent(value)}`;
+  });
   const prefix = entries.length > 0 ? `${entries.join(":")}:` : "";
-  return `\x1b]8;;${prefix}${uri}\x1b\\`;
+  return `\x1b]8;;${prefix}${safeUri}\x1b\\`;
 }
 
 /** 提取 Markdown 内联链接 URL，供产线渲染时触发 OSC 8 超链接。 */
@@ -75,7 +99,10 @@ export interface OscReporter {
 }
 
 /** OSC 上报封装：写入函数可注入以便 spy，native 不可用时传入 no-op。 */
-export function createOscReporter(write: (sequence: string) => void): OscReporter {
+export function createOscReporter(
+  write: (sequence: string) => void,
+  onError: (error: unknown) => void = () => {},
+): OscReporter {
   return {
     reportProgress(percent) {
       write(oscSequence("progress", Math.max(0, Math.min(100, percent))));
@@ -90,7 +117,11 @@ export function createOscReporter(write: (sequence: string) => void): OscReporte
       write(oscCopySelection(text));
     },
     link(uri, params) {
-      write(oscHyperlink(uri, params));
+      try {
+        write(oscHyperlink(uri, params));
+      } catch (error) {
+        onError(error);
+      }
     },
   };
 }
