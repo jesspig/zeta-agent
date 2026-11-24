@@ -72,13 +72,16 @@ import {
 } from "@zeta-agent/observability";
 import {
   createEgressPolicy,
+  createLocalSafeBackend,
+  createProfileBackend,
   createSocketAuditSink,
-  createUnconnectedBackend,
   isCriticalLayerDegraded,
   isEgressAllowed,
+  resolveStructuredBackend,
   verifyAuditChain,
   type AuditRecord,
   type AuditSink,
+  type BackendProfile,
   type SocketAuditSink,
   type CredentialVault,
   type EgressPolicy,
@@ -86,6 +89,7 @@ import {
   type ExecutionBackend,
   type FinalizedState,
   type SecretBroker,
+  type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import { createProviderStreamFn } from "./providers/dispatch";
 
@@ -136,6 +140,7 @@ const DEFAULT_EMISSION_TOOLS: readonly string[] = Object.freeze([
 function builtinTools(options: {
   readonly securityBackend: ExecutionBackend;
   readonly allowedDirectories: readonly string[];
+  readonly structuredBackend?: StructuredExecutionBackend;
 }): ToolDefinition[] {
   return [...builtinToolDefinitions(options)];
 }
@@ -254,10 +259,14 @@ export interface AgentStreamRequest {
 
 export type AgentStreamFn = (request: AgentStreamRequest) => AsyncIterable<AgentStreamChunk>;
 
-function defaultSecurityBackend(): ExecutionBackend {
-  // 未接入真实隔离执行器：能力声明为 unsupported，能力探测即失败关闭。
-  // 不再把"未执行"伪装成 active 并报告成功。
-  return createUnconnectedBackend({ name: "facade-default-placeholder" });
+function defaultSecurityBackend(
+  allowedDirectories: readonly string[],
+  profile: BackendProfile
+): ExecutionBackend {
+  // local-safe 是真实的结构化文件边界；进程隔离层保持 unsupported 并失败关闭。
+  // 其他 profile 未接真实执行器时明确声明 unsupported/degraded，绝不伪装 active。
+  if (profile === "local-safe") return createLocalSafeBackend({ allowedDirectories });
+  return createProfileBackend(profile, { allowedDirectories });
 }
 
 function defaultLoggerOptions(): LoggerOptions {
@@ -353,6 +362,10 @@ export interface AgentOptions {
   readonly loopHooks?: CoreLoopHooks;
   readonly includeBuiltins?: boolean;
   readonly securityBackend?: ExecutionBackend;
+  /** 后端档位：local-safe（默认，真实结构化文件边界）或沙箱档位（未接线时失败关闭）。 */
+  readonly backendProfile?: BackendProfile;
+  /** 显式注入结构化后端；优先于 securityBackend 的兼容解析。 */
+  readonly structuredBackend?: StructuredExecutionBackend;
   readonly observability?: LoggerOptions;
   readonly effectBridge?: EffectBridge;
   readonly coreContext?: CoreContextLike;
@@ -469,7 +482,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
   const includeBuiltins = options.includeBuiltins !== false;
   const plugins = options.plugins ?? [];
-  const securityBackend = options.securityBackend ?? defaultSecurityBackend();
+  const allowedDirectories = options.allowedDirectories ?? [];
+  const backendProfile = options.backendProfile ?? "local-safe";
+  const securityBackend =
+    options.securityBackend ?? defaultSecurityBackend(allowedDirectories, backendProfile);
+  const structuredBackend =
+    options.structuredBackend ?? resolveStructuredBackend(securityBackend, allowedDirectories);
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
   const confirmChannel = options.confirmChannel;
@@ -478,7 +496,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
   let approvalSeq = 0;
   let runToolSeq = 0;
   const nextApprovalId = (): string => `approval-${++approvalSeq}`;
-  const allowedDirectories = options.allowedDirectories ?? [];
   const emissionPolicy = options.emissionPolicy ?? "withhold";
   const baseEmissionTools = options.emissionTools ?? (emissionPolicy === "direct" ? [] : DEFAULT_EMISSION_TOOLS);
   const pluginEmissionRefs = new Map<string, number>();
@@ -604,7 +621,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   const toolDefinitions = includeBuiltins
-    ? builtinTools({ securityBackend, allowedDirectories })
+    ? builtinTools({ securityBackend, allowedDirectories, structuredBackend })
     : [];
   const contributions: PluginContribution[] = includeBuiltins
     ? toolDefinitions.map((tool) => ({ kind: "tool", tool }))

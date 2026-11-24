@@ -120,11 +120,11 @@ describe("T-09 createAgent PluginApiSurface 装配", () => {
     const agent = facade.createAgent();
     const probed = agent.capabilities();
 
-    // 默认占位后端未接真实执行器，能力声明为 unsupported（与实际一致）。
+    // 默认 local-safe 后端提供真实结构化文件边界，但不把宿主进程执行伪装成隔离 active。
     expect(probed).toEqual({
       isolation: "unsupported",
       seccomp: "unsupported",
-      fsConfinement: "unsupported",
+      fsConfinement: "active",
       auditSink: "unsupported",
       egressDefaultDeny: "unsupported",
     });
