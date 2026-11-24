@@ -92,6 +92,9 @@ import {
   type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import { createProviderStreamFn } from "./providers/dispatch";
+import { builtinIdsForProfile, resolveAssemblyProfile, type AssemblyProfile } from "./assembly/builtins";
+import { createAssemblyManifest, type CapabilityDiagnostic } from "./assembly/manifest";
+import { diagnoseCapabilities, executableToolNames } from "./assembly/profile";
 
 export type {
   AgentEvent,
@@ -113,14 +116,8 @@ export type {
 } from "@zeta-agent/agent-framework";
 export { defineCompatExtension, defineDurableExtension } from "@zeta-agent/agent-framework";
 
-export const DEFAULT_ASSEMBLY: readonly string[] = Object.freeze([
-  "builtin:read",
-  "builtin:bash",
-  "builtin:edit",
-  "builtin:write",
-  "skills:registry",
-  "session:store",
-]);
+/** 默认装配清单来自真实 BUILTIN_PLUGINS 注册表，不再手写 skills/session/mode。 */
+export const DEFAULT_ASSEMBLY: readonly string[] = builtinIdsForProfile("local-safe");
 
 export function listAssembly(): readonly string[] {
   return [...DEFAULT_ASSEMBLY];
@@ -364,6 +361,13 @@ export interface AgentOptions {
   readonly securityBackend?: ExecutionBackend;
   /** 后端档位：local-safe（默认，真实结构化文件边界）或沙箱档位（未接线时失败关闭）。 */
   readonly backendProfile?: BackendProfile;
+  /** 产品 profile：local-safe 默认收敛，local-full 显式 opt-in；只控制暴露范围，不伪造能力。 */
+  readonly assemblyProfile?: AssemblyProfile;
+  /**
+   * 本 agent 实际安装的服务名；由统一装配 manifest 注入。
+   * 缺省时按 assemblyProfile 从注册表派生，避免 facade 与 manifest 手写清单漂移。
+   */
+  readonly services?: readonly string[];
   /** 显式注入结构化后端；优先于 securityBackend 的兼容解析。 */
   readonly structuredBackend?: StructuredExecutionBackend;
   readonly observability?: LoggerOptions;
@@ -456,6 +460,11 @@ export interface Agent extends PluginApiSurface {
   readonly toolNames: readonly string[];
   readonly toolDefinitions: readonly ToolDefinition[];
   readonly assembly: readonly string[];
+  readonly assemblyProfile: AssemblyProfile;
+  /** 能力诊断：每个 builtin 工具/后端操作/关键层的真实状态。 */
+  readonly capabilityDiagnostics: readonly CapabilityDiagnostic[];
+  /** 最终 active registry 中可供模型选择的工具名（可执行或显式注入）。 */
+  readonly activeToolNames: readonly string[];
   readonly reasoningEffort: string | undefined;
   setReasoningEffort(effort: string | undefined): void;
   /** 发射回执快照：durableEffects 的真实回执 + egress 拒绝的失败回执。 */
@@ -488,6 +497,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
     options.securityBackend ?? defaultSecurityBackend(allowedDirectories, backendProfile);
   const structuredBackend =
     options.structuredBackend ?? resolveStructuredBackend(securityBackend, allowedDirectories);
+  const assemblyProfile = resolveAssemblyProfile(options.assemblyProfile);
+  const capabilityDiagnostics = diagnoseCapabilities(
+    assemblyProfile,
+    securityBackend.capabilities(),
+    structuredBackend.operations
+  );
   const permissionGate = options.permissionGate;
   const permissionStage = options.permissionStage ?? "plan";
   const confirmChannel = options.confirmChannel;
@@ -626,11 +641,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const contributions: PluginContribution[] = includeBuiltins
     ? toolDefinitions.map((tool) => ({ kind: "tool", tool }))
     : [];
-  contributions.push({ kind: "service", name: "skills:registry" });
-  contributions.push({ kind: "service", name: "session:store" });
+  // 服务清单由统一装配 manifest 注入；缺省时仍从注册表派生，保持 SDK/CLI 一致。
+  const defaultManifest = createAssemblyManifest({ profile: assemblyProfile });
+  const serviceNames = options.services ?? [...defaultManifest.services, ...defaultManifest.session];
+  for (const name of serviceNames) contributions.push({ kind: "service", name });
   for (const plugin of plugins) contributions.push(...plugin.contributions);
 
-  const assembly = includeBuiltins ? listAssembly() : [];
+  const assembly = includeBuiltins ? builtinIdsForProfile(assemblyProfile) : [];
 
   const toolNamesForPrompt = toolDefinitions.map((tool) => tool.name);
   function resolveSystemPrompt(): string {
@@ -722,6 +739,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     for (const name of pluginTools.keys()) names.add(name);
     for (const name of declaredLoadout.keys()) names.add(name);
     return [...names];
+  }
+
+  /** 最终 active registry：能力不支持的 builtin 被排除，显式注入的插件工具默认可执行。 */
+  function activeToolNamesSnapshot(): readonly string[] {
+    return executableToolNames(toolNamesSnapshot(), capabilityDiagnostics);
   }
 
   /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
@@ -828,6 +850,22 @@ export function createAgent(options: AgentOptions = {}): Agent {
       description: tool.description,
       parameters: tool.parameters,
     };
+  }
+
+  /** provider schema 从最终 active registry 生成，未支持工具不进入模型可见面。 */
+  function providerToolSchemas(): AgentToolSchema[] {
+    const active = new Set(activeToolNamesSnapshot());
+    const schemas: AgentToolSchema[] = [];
+    for (const tool of toolDefinitions) {
+      if (active.has(tool.name)) schemas.push(toToolSchema(tool));
+    }
+    const addPluginTool = (tool: PluginTool): void => {
+      if (!active.has(tool.name)) return;
+      schemas.push({ name: tool.name, description: tool.name, parameters: [] });
+    };
+    for (const entry of pluginTools.values()) addPluginTool(entry.tool);
+    for (const tool of declaredLoadout.values()) addPluginTool(tool);
+    return schemas;
   }
 
   /** 把已拼接的文本投影为 message_update 所需的流式部分快照。 */
@@ -1128,7 +1166,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
             const enriched: AgentStreamRequest = {
               ...base,
               messages: base.messages ?? [],
-              tools: base.tools ?? toolDefinitions.map(toToolSchema),
+              tools: base.tools ?? providerToolSchemas(),
               ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
               signal,
             } as AgentStreamRequest;
@@ -1369,6 +1407,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     toolDefinitions,
     assembly,
+    assemblyProfile,
+    capabilityDiagnostics,
+    get activeToolNames() {
+      return activeToolNamesSnapshot();
+    },
     get reasoningEffort() {
       return reasoningEffort;
     },

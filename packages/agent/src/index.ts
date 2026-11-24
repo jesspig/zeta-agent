@@ -4,6 +4,7 @@ export * from "./plugins/permissions/policy";
 export * from "./plugins/permissions/approval";
 export * from "./plugins/mcp";
 export * from "./facade";
+export * from "./assembly";
 export * from "./extensions/loader";
 export * from "./extensions/replaceable";
 export * from "./commands/registry";

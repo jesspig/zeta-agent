@@ -16,15 +16,17 @@ describe("T-25 agent facade and plugin assembly", () => {
     const assembly = facade.listAssembly();
 
     expect(assembly).toEqual(facade.DEFAULT_ASSEMBLY);
-    expect(assembly).toContain("builtin:read");
-    expect(assembly).toContain("builtin:bash");
-    expect(assembly).toContain("builtin:edit");
-    expect(assembly).toContain("builtin:write");
+    for (const name of ["read", "bash", "powershell", "write", "edit", "ls", "grep", "find"]) {
+      expect(assembly).toContain(`builtin:${name}`);
+    }
     expect(assembly).toContain("skills:registry");
     expect(assembly).toContain("session:store");
+    for (const mode of ["interactive", "print", "json", "rpc"]) {
+      expect(assembly).toContain(`mode:${mode}`);
+    }
 
     for (const id of assembly) {
-      expect(id).toMatch(/^(builtin|skills|session):/);
+      expect(id).toMatch(/^(builtin|skills|session|mode|service):/);
       expect(id).not.toMatch(/seam|research|evolution|rsi|evidence|fitness|experience|strategy/i);
     }
   });

@@ -8,6 +8,8 @@ describe("CLI 参数解析", () => {
       prompt: undefined,
       help: false,
       version: false,
+      profile: "local-safe",
+      capabilities: false,
     });
   });
 
@@ -17,6 +19,8 @@ describe("CLI 参数解析", () => {
       prompt: "hello world",
       help: false,
       version: false,
+      profile: "local-safe",
+      capabilities: false,
     });
   });
 

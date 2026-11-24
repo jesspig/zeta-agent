@@ -2,8 +2,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  createAgent,
   createCommandRegistry,
+  createDefaultRuntime,
   createOpenAiStreamFn,
   decorateModels,
   fetchModelIds,
@@ -11,6 +11,7 @@ import {
   parseCommand,
   type Agent,
   type AgentStreamFn,
+  type DefaultRuntime,
 } from "@zeta-agent/agent";
 import type {
   RuntimeMessage,
@@ -100,6 +101,7 @@ interface Connection {
 }
 
 interface AgentBundle {
+  readonly runtime: DefaultRuntime;
   readonly agent: Agent;
   readonly model: string;
   /** 已配置时才有模型；未配置 API/Key 时为空（不显示任何模型）。 */
@@ -112,7 +114,8 @@ interface AgentBundle {
   connect(baseUrl: string, apiKey: string): void;
 }
 
-function makeAgent(): AgentBundle {
+/** 统一 loader：config → 默认装配（含 root fiber）→ 返回共享运行时句柄。 */
+async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
   const resolution = resolveModelConfig(process.env);
   let connection: Connection | undefined =
     resolution.kind === "configured"
@@ -125,12 +128,14 @@ function makeAgent(): AgentBundle {
     }
     return echoStream()(request);
   };
-  const agent = createAgent({
+  const runtime = await createDefaultRuntime({
     streamFn,
     allowedDirectories: [process.cwd()],
+    profile: args.profile,
   });
   return {
-    agent,
+    runtime,
+    agent: runtime.agent,
     get model() {
       return modelName;
     },
@@ -203,9 +208,8 @@ export function createSteerRunner(deps: {
   };
 }
 
-async function runTui(args: CliArgs): Promise<number> {
+async function runTui(args: CliArgs, bundle: AgentBundle): Promise<number> {
   const { detectGitBranch, renderTui } = await loadInteractiveTui();
-  const bundle = makeAgent();
   const agent = bundle.agent;
 
   if (!process.stdin.isTTY) {
@@ -391,8 +395,8 @@ async function readStdinFrames(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function runHeadless(args: CliArgs): Promise<number> {
-  const { agent, missing } = makeAgent();
+async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> {
+  const { agent, missing } = bundle;
   if (missing.length > 0) {
     process.stderr.write(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo\n`);
   }
@@ -400,6 +404,7 @@ async function runHeadless(args: CliArgs): Promise<number> {
   const stdinText = mode === "rpc" && !process.stdin.isTTY ? await readStdinFrames() : "";
   const opts = {
     prompt: args.prompt,
+    protocol: bundle.runtime.protocol,
     lines: mode === "rpc"
       ? collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
       : args.prompt !== undefined ? [args.prompt] : [],
@@ -432,7 +437,31 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 
   mkdirSync(resolveDataDir(), { recursive: true });
-  return args.mode === "tui" ? runTui(args) : runHeadless(args);
+
+  // 统一流水线：parse（上）→ config → loader → root fiber → mode。
+  // 能力诊断只走到 loader 为止，不加载 TUI、不发模型请求。
+  const bundle = await makeRuntime(args);
+  try {
+    if (args.capabilities) {
+      const manifest = bundle.runtime.manifest;
+      process.stdout.write(
+        JSON.stringify({
+          profile: manifest.profile,
+          plugins: manifest.plugins,
+          tools: manifest.tools,
+          services: manifest.services,
+          session: manifest.session,
+          modes: manifest.modes,
+          resources: manifest.resources,
+          diagnostics: manifest.diagnostics,
+        }) + "\n"
+      );
+      return 0;
+    }
+    return args.mode === "tui" ? await runTui(args, bundle) : await runHeadless(args, bundle);
+  } finally {
+    await bundle.runtime.dispose();
+  }
 }
 
 if (import.meta.main) {
