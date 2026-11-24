@@ -1,5 +1,10 @@
 import { join } from "node:path";
 import { createContext, defineComponent, type ContextFiber } from "@zeta-agent/framework";
+import {
+  createPluginHotReloader,
+  discoverHotReloadUnits,
+  type PluginHotReloader,
+} from "../plugins/hot-reload";
 import type { PrincipalInput } from "@zeta-agent/capabilities";
 import {
   createLocalSafeBackend,
@@ -49,6 +54,8 @@ export interface DefaultRuntimeOptions {
   /** 外部持有的治理器；不传但提供 principalInput 时按 tokensPerTenant 内部创建。 */
   readonly tenantGovernance?: TenantGovernance;
   readonly tokensPerTenant?: number;
+  /** 插件热重载目录；提供后用同一 ctx/root fiber 装配真实文件 watcher。 */
+  readonly hotReloadDirs?: readonly string[];
 }
 
 export interface DefaultRuntime {
@@ -62,6 +69,7 @@ export interface DefaultRuntime {
   readonly rootFiber: ContextFiber;
   readonly tenantScope: TenantScope | undefined;
   readonly governance: TenantGovernance | undefined;
+  readonly hotReload: PluginHotReloader | undefined;
   dispose(): Promise<void>;
 }
 
@@ -151,6 +159,22 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
   );
   await rootFiber.ready;
 
+  const hotReloadUnits =
+    options.hotReloadDirs === undefined || options.hotReloadDirs.length === 0
+      ? []
+      : discoverHotReloadUnits(options.hotReloadDirs);
+  const hotReload =
+    hotReloadUnits.length === 0
+      ? undefined
+      : createPluginHotReloader({
+          ctx,
+          parent: rootFiber,
+          root: options.hotReloadDirs![0],
+          units: hotReloadUnits,
+          auto: true,
+        });
+  if (hotReload !== undefined) await hotReload.install(hotReloadUnits);
+
   const services: Record<string, unknown> = {};
   for (const name of manifest.services) {
     services[name] = resources;
@@ -174,7 +198,9 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     rootFiber,
     tenantScope,
     governance,
+    hotReload,
     async dispose() {
+      await hotReload?.close();
       await ctx.dispose();
       if (ownsSessionStore) sessionStore?.close();
       // 外部注入的 governance 由调用方持有；只回收本 runtime 创建的治理器。
