@@ -1,4 +1,11 @@
-import { createContext, type CoeffectKey, type Context, type Disposer } from "@zeta-agent/framework";
+import {
+  createContext,
+  createHost,
+  type CoeffectKey,
+  type Context,
+  type Disposer,
+  type Host,
+} from "@zeta-agent/framework";
 import {
   createPrincipalResolver,
   createQuotaService,
@@ -17,6 +24,8 @@ export interface TenantScope {
   readonly principal: Principal;
   readonly realm: symbol;
   readonly context: Context;
+  /** 对象 host 复用本租户 context（T-05 fiber）与 principal/realm（T-13）。 */
+  readonly objectHost: Host;
   readonly quota: QuotaService;
   readonly sessionStore: SessionStore | undefined;
   readonly durableEffects: DurableEffects | undefined;
@@ -56,6 +65,7 @@ let contextSeed = 0;
 
 async function disposeScope(scope: TenantScope): Promise<void> {
   scope.sessionStore?.close();
+  await scope.objectHost.close();
   await scope.context.dispose();
 }
 
@@ -70,6 +80,11 @@ export function createTenantGovernance(options: TenantGovernanceOptions = {}): T
       uid: `tenant:${principal.spaceId}:${++contextSeed}`,
       realm: principal.realm,
     });
+    const objectHost = createHost({
+      context,
+      principal: { userId: principal.userId, spaceId: principal.spaceId, realm: principal.realm },
+      realm: principal.realm,
+    });
     const quota = createQuotaService({
       tokens: options.tokensPerTenant ?? 100,
       ...(options.toolCosts === undefined ? {} : { toolCosts: options.toolCosts }),
@@ -82,6 +97,7 @@ export function createTenantGovernance(options: TenantGovernanceOptions = {}): T
       principal,
       realm: principal.realm,
       context,
+      objectHost,
       quota,
       sessionStore,
       durableEffects,

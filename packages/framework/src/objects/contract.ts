@@ -117,3 +117,43 @@ export function acceptVersion(contract: Contract<any, any>, offeredVersion: stri
     `contract "${contract.name}" 不接受版本 ${offeredVersion}`
   );
 }
+
+export interface EvolutionSpec<P, M> {
+  readonly version: string;
+  readonly params?: P;
+  readonly members?: M;
+  readonly accepts?: Record<string, string>;
+  readonly name?: string;
+}
+
+/**
+ * 结构化演进：保留契约身份名，产生新版本并继承 accepts。
+ * 旧版本中映射到旧 version 的条目被改写给新 version，旧 version 本身也加入映射；
+ * 指纹因 version/params/members 变化而更新，错版本消费者仍走 FAILED 而不吃错数据。
+ */
+export function evolveContract<P, M>(
+  from: Contract<P, M>,
+  spec: EvolutionSpec<P, M>
+): Contract<P, M> {
+  assertContract(from);
+  if (typeof spec.version !== "string" || spec.version.length === 0) {
+    throw new ContractError("VERSION_MISMATCH", "evolution 需要非空 version");
+  }
+  const accepts: Record<string, string> = {};
+  for (const [offered, target] of Object.entries(from.accepts)) {
+    accepts[offered] = target === from.version ? spec.version : target;
+  }
+  accepts[from.version] = spec.version;
+  for (const [offered, target] of Object.entries(spec.accepts ?? {})) {
+    accepts[offered] = target;
+  }
+  return defineContract({
+    name: spec.name ?? from.name,
+    version: spec.version,
+    params: spec.params ?? from.params,
+    members: spec.members ?? from.members,
+    accepts,
+  });
+}
+
+export const evolve = evolveContract;
