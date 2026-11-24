@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CoeffectKey } from "./types";
+import type { Context } from "./index";
 import {
   contribute,
   createContext,
@@ -377,5 +378,121 @@ describe("A28 多租户 realm 隔离", () => {
     a.release();
     b.release();
     await ctx.dispose();
+  });
+});
+
+describe("A28 严格 realm 事件隔离", () => {
+  const evKeyA = defineKey<string>("@zeta-agent/context-test", "strict-realm-a");
+  const evKeyB = defineKey<string>("@zeta-agent/context-test", "strict-realm-b");
+
+  test("两个 isolate 派生 context 的同名事件互不可达", async () => {
+    const root: Context = createContext({ uid: "strict-root-1" });
+    const a = root.isolate(evKeyA, Symbol("strict-a")) as Context;
+    const b = root.isolate(evKeyB, Symbol("strict-b")) as Context;
+    const seenA: unknown[] = [];
+    const seenB: unknown[] = [];
+
+    a.on("strict-event", (p) => seenA.push(p));
+    b.on("strict-event", (p) => seenB.push(p));
+    a.emit("strict-event", "from-a");
+    expect(seenA).toEqual(["from-a"]);
+    expect(seenB).toEqual([]);
+    b.emit("strict-event", "from-b");
+    expect(seenA).toEqual(["from-a"]);
+    expect(seenB).toEqual(["from-b"]);
+    await root.dispose();
+  });
+
+  test("显式相同 realm 的派生 context 之间事件互通", async () => {
+    const root: Context = createContext({ uid: "strict-root-2" });
+    const realm = Symbol("shared-realm");
+    const a = root.isolate(evKeyA, realm) as Context;
+    const b = root.isolate(evKeyB, realm) as Context;
+    const seen: unknown[] = [];
+
+    a.on("shared-event", (p) => seen.push(p));
+    b.on("shared-event", (p) => seen.push(p));
+    a.emit("shared-event", 1);
+    b.emit("shared-event", 2);
+    // 同 realm 下两个派生 context 互通：每次 emit 都被两个监听器各收到一次。
+    expect(seen).toEqual([1, 1, 2, 2]);
+    await root.dispose();
+  });
+
+  test("root 与派生 realm 的事件方向性：互不串扰", async () => {
+    const root: Context = createContext({ uid: "strict-root-3" });
+    const child = root.isolate(evKeyA, Symbol("child-realm")) as Context;
+    const rootSeen: unknown[] = [];
+    const childSeen: unknown[] = [];
+
+    root.on("dir-event", (p) => rootSeen.push(p));
+    child.on("dir-event", (p) => childSeen.push(p));
+    root.emit("dir-event", "root");
+    child.emit("dir-event", "child");
+    expect(rootSeen).toEqual(["root"]);
+    expect(childSeen).toEqual(["child"]);
+    await root.dispose();
+  });
+
+  test("on 返回的 disposer 幂等且只移除自己的监听", async () => {
+    const root: Context = createContext({ uid: "strict-root-4" });
+    const a = root.isolate(evKeyA, Symbol("disp-a")) as Context;
+    const seen: string[] = [];
+
+    const stopA = a.on("disp-event", (p) => seen.push(`a:${String(p)}`));
+    a.on("disp-event", (p) => seen.push(`a2:${String(p)}`));
+    stopA();
+    stopA();
+    a.emit("disp-event", "x");
+    expect(seen).toEqual(["a2:x"]);
+    await root.dispose();
+  });
+
+  test("派生 context dispose 只清理本 realm 监听", async () => {
+    const root: Context = createContext({ uid: "strict-root-5" });
+    const a = root.isolate(evKeyA, Symbol("clean-realm")) as Context;
+    const rootSeen: unknown[] = [];
+    const aSeen: unknown[] = [];
+
+    root.on("clean-event", (p) => rootSeen.push(p));
+    a.on("clean-event", (p) => aSeen.push(p));
+    await a.dispose();
+    a.emit("clean-event", "after");
+    root.emit("clean-event", "root-alive");
+    expect(aSeen).toEqual([]);
+    expect(rootSeen).toEqual(["root-alive"]);
+    await root.dispose();
+  });
+
+  test("intercept 派生 context 继承父 realm，事件互通", async () => {
+    const root: Context = createContext({ uid: "strict-root-6" });
+    const child = root.intercept(evKeyA, (v: unknown) => v) as Context;
+    const seen: unknown[] = [];
+
+    root.on("intercept-event", (p) => seen.push(p));
+    child.on("intercept-event", (p) => seen.push(p));
+    root.emit("intercept-event", 1);
+    expect(seen).toEqual([1, 1]);
+    await root.dispose();
+  });
+
+  test("realm 资源隔离与事件隔离组合不串", async () => {
+    const root: Context = createContext({ uid: "strict-root-7" });
+    const res = defineKey<string>("@zeta-agent/context-test", "strict-resource");
+    const a = root.isolate(res, Symbol("combo-a")) as Context;
+    const b = root.isolate(res, Symbol("combo-b")) as Context;
+    const seenA: unknown[] = [];
+    const seenB: unknown[] = [];
+
+    a.on("combo-event", (p) => seenA.push(p));
+    b.on("combo-event", (p) => seenB.push(p));
+    a.set(res, "a-resource");
+    b.set(res, "b-resource");
+    a.emit("combo-event", "a");
+    expect(a.get(res)).toBe("a-resource");
+    expect(b.get(res)).toBe("b-resource");
+    expect(seenA).toEqual(["a"]);
+    expect(seenB).toEqual([]);
+    await root.dispose();
   });
 });
