@@ -19,6 +19,8 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/deploy": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
         "@zeta-agent/tui": "workspace:*",
       },
     },
@@ -46,6 +48,10 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/framework": "workspace:*",
+      },
+      "devDependencies": {
+        "@zeta-agent/cordis": "workspace:*",
+        "@zeta-agent/events": "workspace:*",
       },
     },
     "packages/components": {
@@ -106,6 +112,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/components": "workspace:*",
         "@zeta-agent/framework": "workspace:*",
       },
     },

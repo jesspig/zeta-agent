@@ -13,6 +13,13 @@ import {
   type AgentStreamFn,
   type DefaultRuntime,
 } from "@zeta-agent/agent";
+import {
+  assertStartupArtifact,
+  createStdoutWriter,
+  hostTarget,
+  isCompiledExecutable,
+  type DeployHandle,
+} from "@zeta-agent/deploy";
 import type {
   RuntimeMessage,
   RuntimeTuiHandle,
@@ -21,6 +28,11 @@ import type {
 } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
+import { runDaemonMode } from "./daemon";
+import { runRemoteMode } from "./remote";
+import { createDeferredTelemetry, withFirstFrame } from "./deferred-telemetry";
+import { EMBEDDED_ASSETS, EMBEDDED_MANIFEST } from "./embedded-assets.generated";
+import { createProbeHandle, handleProbeFrame } from "./probes";
 import { resolveDataDir } from "./runtime";
 import { buildTuiOptions } from "./tui-options";
 
@@ -33,7 +45,9 @@ const HELP = [
   "  zeta \"提示词\"              TUI 内直接提交一条提示词",
   "  zeta --headless \"提示词\"   headless 打印模式（无需 TTY）",
   "  zeta --json \"提示词\"       headless JSON 事件流",
-  "  zeta --rpc <帧>            headless RPC 帧",
+  "  zeta --rpc <帧>            headless RPC 帧（探针帧：{\"type\":\"probe\",\"probe\":\"readiness\"}）",
+  "  zeta --daemon --token <t>   启动控制面 daemon（HTTP + IPC + 自动重启）",
+  "  zeta --remote --endpoint <url> --token <t> <帧>  经远程 SDK 调用控制面",
   "  zeta --watch <目录>        监视插件目录，文件变更不重启生效（可重复）",
   "  zeta --help                显示帮助",
   "  zeta --version             显示版本",
@@ -104,6 +118,7 @@ interface Connection {
 interface AgentBundle {
   readonly runtime: DefaultRuntime;
   readonly agent: Agent;
+  readonly probes: DeployHandle;
   readonly model: string;
   /** 已配置时才有模型；未配置 API/Key 时为空（不显示任何模型）。 */
   readonly models: readonly string[];
@@ -135,9 +150,11 @@ export async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
     profile: args.profile,
     hotReloadDirs: args.watchDirs,
   });
+  const probes = createProbeHandle(runtime, { target: hostTarget() ?? "linux-x64", profile: args.profile });
   return {
     runtime,
     agent: runtime.agent,
+    probes,
     get model() {
       return modelName;
     },
@@ -326,42 +343,51 @@ async function runTui(args: CliArgs, bundle: AgentBundle): Promise<number> {
     return true;
   };
 
-  tui = await renderTui({
-    ...buildTuiOptions(agent, VERSION, handleCommand, {
-      cwd: process.cwd(),
-      model: bundle.model,
-      models: bundle.models,
-      onModelChange: (model) => bundle.setModel(model),
-      onConnect: (url, key) => {
-        void applyConnection(url, key);
-      },
-      connection: {
-        url: bundle.connection?.baseUrl,
-        // 不把真实 key 传给对话框做回显（仅 URL 兜底）。
-      },
-      reasoningEffort: agent.reasoningEffort,
-      onEffortChange: (effort) => {
-        agent.setReasoningEffort(effort);
-        notice(`思考强度: ${effort}`);
-      },
-      commandCatalog: registry.list().map((command) => ({
-        name: command.name,
-        description: command.description,
-      })),
-      onCommand: handleCommand,
-      onSubmitError: (error) => notice(`发送失败：${(error as Error).message}`),
-      onAbort: () => agent.abort(),
-      // /new：清空真实会话上下文，使下一轮请求不再携带旧消息。
-      onNewSession: () => agent.reset(),
-      resources: { models: bundle.models.slice(0, 4) },
-      telemetry: {
-        cwd: process.cwd(),
-        branch: detectGitBranch(process.cwd()),
-        session: `zeta-${process.pid}`,
-        pricing: parseModelPrice(decorateModels([bundle.model])[0]?.price),
-      },
-    }),
-    messages: toRuntimeMessages(agent.state.messages),
+  const telemetry = createDeferredTelemetry(async () => {
+    const module = await import("./telemetry-heavy");
+    await module.activateTelemetry();
+  });
+
+  tui = await withFirstFrame({
+    render: () =>
+      renderTui({
+        ...buildTuiOptions(agent, VERSION, handleCommand, {
+          cwd: process.cwd(),
+          model: bundle.model,
+          models: bundle.models,
+          onModelChange: (model) => bundle.setModel(model),
+          onConnect: (url, key) => {
+            void applyConnection(url, key);
+          },
+          connection: {
+            url: bundle.connection?.baseUrl,
+            // 不把真实 key 传给对话框做回显（仅 URL 兜底）。
+          },
+          reasoningEffort: agent.reasoningEffort,
+          onEffortChange: (effort) => {
+            agent.setReasoningEffort(effort);
+            notice(`思考强度: ${effort}`);
+          },
+          commandCatalog: registry.list().map((command) => ({
+            name: command.name,
+            description: command.description,
+          })),
+          onCommand: handleCommand,
+          onSubmitError: (error) => notice(`发送失败：${(error as Error).message}`),
+          onAbort: () => agent.abort(),
+          // /new：清空真实会话上下文，使下一轮请求不再携带旧消息。
+          onNewSession: () => agent.reset(),
+          resources: { models: bundle.models.slice(0, 4) },
+          telemetry: {
+            cwd: process.cwd(),
+            branch: detectGitBranch(process.cwd()),
+            session: `zeta-${process.pid}`,
+            pricing: parseModelPrice(decorateModels([bundle.model])[0]?.price),
+          },
+        }),
+        messages: toRuntimeMessages(agent.state.messages),
+      }),
+    afterFirstFrame: () => telemetry.start(),
   });
 
   if (bundle.missing.length > 0) {
@@ -399,24 +425,43 @@ async function readStdinFrames(): Promise<string> {
 
 async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> {
   const { agent, missing } = bundle;
+  const writer = createStdoutWriter({
+    write: (chunk) => process.stdout.write(chunk) !== false,
+    diagnostic: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
+  });
   if (missing.length > 0) {
-    process.stderr.write(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo\n`);
+    writer.diagnostic(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo`);
   }
   const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
   const stdinText = mode === "rpc" && !process.stdin.isTTY ? await readStdinFrames() : "";
+  const controlLines: string[] = [];
+  for (const line of mode === "rpc"
+    ? collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
+    : args.prompt !== undefined ? [args.prompt] : []) {
+    const probe = handleProbeFrame(bundle.probes, line);
+    if (probe !== undefined) {
+      writer.write(probe + "\n");
+    } else {
+      controlLines.push(line);
+    }
+  }
   const opts = {
     prompt: args.prompt,
     protocol: bundle.runtime.protocol,
     lines: mode === "rpc"
-      ? collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
+      ? controlLines
       : args.prompt !== undefined ? [args.prompt] : [],
-    output: (line: string) => process.stdout.write(line + "\n"),
+    output: (line: string) => writer.write(line + "\n"),
   };
   try {
     return await MODES[mode].run(agent, opts);
   } catch (error) {
-    process.stderr.write(`zeta: ${(error as Error).message}\n`);
+    writer.diagnostic(`zeta: ${(error as Error).message}`);
     return 1;
+  } finally {
+    await writer.flush();
   }
 }
 
@@ -427,6 +472,13 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   } catch (error) {
     process.stderr.write(`${(error as Error).message}\n`);
     return 2;
+  }
+
+  try {
+    assertStartupArtifact(EMBEDDED_MANIFEST, EMBEDDED_ASSETS);
+  } catch (error) {
+    process.stderr.write(`zeta: 启动产物校验失败：${(error as Error).message}\n`);
+    return 3;
   }
 
   if (args.help) {
@@ -460,13 +512,23 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       );
       return 0;
     }
+    if (args.mode === "daemon") return runDaemonMode(args, bundle);
+    if (args.mode === "remote") {
+      const stdinText = process.stdin.isTTY === true ? "" : await readStdinFrames();
+      return runRemoteMode(
+        args,
+        collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
+      );
+    }
     return args.mode === "tui" ? await runTui(args, bundle) : await runHeadless(args, bundle);
   } finally {
     await bundle.runtime.dispose();
+    bundle.probes.stop();
   }
 }
 
-if (import.meta.main) {
+// Bun compile 的单文件产物里 import.meta.main 为 false，需用可执行文件路径判定。
+if (import.meta.main || isCompiledExecutable()) {
   const code = await main();
   process.exit(code);
 }

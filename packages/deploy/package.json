@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@zeta-agent/agent": "workspace:*",
+    "@zeta-agent/components": "workspace:*",
     "@zeta-agent/framework": "workspace:*"
   },
   "scripts": {

@@ -1,0 +1,9 @@
+{
+  "schema": "zeta-local-resources/1",
+  "prompts": [
+    { "id": "system:local", "encoding": "utf8", "path": "prompts/system.md" },
+    { "id": "skills:registry", "encoding": "utf8", "path": "skills/index.json" }
+  ],
+  "skills": [{ "id": "builtin:read", "source": "agent:assembly" }],
+  "schemaFiles": [{ "id": "config:schema", "encoding": "utf8", "path": "schema/config.json" }]
+}
