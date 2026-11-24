@@ -6,6 +6,8 @@
   "main": "./src/index.ts",
   "dependencies": {
     "@zeta-agent/agent": "workspace:*",
+    "@zeta-agent/deploy": "workspace:*",
+    "@zeta-agent/framework": "workspace:*",
     "@zeta-agent/tui": "workspace:*"
   },
   "scripts": {

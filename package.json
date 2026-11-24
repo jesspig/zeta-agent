@@ -17,7 +17,9 @@
     "test": "turbo run test",
     "check": "bun scripts/check-facade-exports.mjs && bun scripts/check-aggregate-exports.mjs && bun scripts/guard-architecture.mjs && bun scripts/check-invariant-points.mjs && bun scripts/check-core-dependencies.mjs && turbo run build typecheck test && bun scripts/check_docs_links.mjs && bun scripts/check-zero-regression.mjs && bun scripts/check-readme-closeout.mjs",
     "dev": "turbo run dev",
-    "zeta": "bun apps/zeta-cli/src/index.ts"
+    "zeta": "bun apps/zeta-cli/src/index.ts",
+    "build:local": "bun scripts/build-local.ts --all",
+    "smoke:local": "bun scripts/smoke-local.ts"
   },
   "packageManager": "bun@1.4.2",
   "devDependencies": {

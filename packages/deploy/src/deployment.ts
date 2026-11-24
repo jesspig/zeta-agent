@@ -1,11 +1,20 @@
 import type { Disposer } from "@zeta-agent/framework";
+import { computeConfigDigest } from "./canonical";
 import { assertTarget } from "./targets";
+import type { RuntimeProbeSource } from "./runtime-probes";
+
+export { computeConfigDigest } from "./canonical";
 
 export type DeployMode = "local" | "daemon" | "remote";
 
 export interface DeployConfig {
   readonly target: string;
   readonly [key: string]: unknown;
+}
+
+export interface StartOptions {
+  /** 提供后探针直接读取真实 AgentRuntime，不再使用本地占位状态。 */
+  readonly runtime?: RuntimeProbeSource;
 }
 
 export interface DeployHandle {
@@ -18,53 +27,15 @@ export interface DeployHandle {
   readonly stop: Disposer;
 }
 
-function stableStringify(value: unknown, seen: WeakSet<object> = new WeakSet()): string {
-  if (value === null) return "null";
-  if (value === undefined) return "undefined";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (value instanceof Date) return `Date(${value.toISOString()})`;
-  if (value instanceof Map) {
-    const entries = [...value.entries()]
-      .map(([k, v]) => `${stableStringify(k, seen)}=>${stableStringify(v, seen)}`)
-      .sort();
-    return `Map{${entries.join(",")}}`;
-  }
-  if (value instanceof Set) {
-    const items = [...value.values()].map((v) => stableStringify(v, seen)).sort();
-    return `Set{${items.join(",")}}`;
-  }
-  if (Array.isArray(value)) {
-    if (seen.has(value)) return "[Circular]";
-    seen.add(value);
-    return `[${value.map((v) => stableStringify(v, seen)).join(",")}]`;
-  }
-  if (typeof value === "object") {
-    if (seen.has(value)) return "{Circular}";
-    seen.add(value);
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key], seen)}`).join(",")}}`;
-  }
-  return JSON.stringify(String(value));
-}
-
-export function computeConfigDigest(config: Readonly<Record<string, unknown>>): string {
-  const text = stableStringify(config);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
-export function start(mode: DeployMode, config: DeployConfig): DeployHandle {
+export function start(mode: DeployMode, config: DeployConfig, options: StartOptions = {}): DeployHandle {
   if (mode !== "local" && mode !== "daemon" && mode !== "remote") {
     throw new Error(`INVALID_DEPLOY_MODE: ${mode}`);
   }
   assertTarget(config.target);
+  const runtime = options.runtime;
+  if (runtime !== undefined && runtime.target !== config.target) {
+    throw new Error(`RUNTIME_TARGET_MISMATCH: ${runtime.target} != ${config.target}`);
+  }
 
   let current: DeployConfig = { ...config };
   let ready = mode === "local";
@@ -72,14 +43,20 @@ export function start(mode: DeployMode, config: DeployConfig): DeployHandle {
 
   return {
     mode,
-    readiness: () => ready && alive,
-    liveness: () => alive,
-    configDigest: () => computeConfigDigest(current),
+    readiness: () => ready && alive && (runtime?.readiness() ?? true),
+    liveness: () => alive && (runtime?.liveness() ?? true),
+    configDigest: () =>
+      runtime === undefined
+        ? computeConfigDigest(current)
+        : computeConfigDigest({ deploy: current, runtime: runtime.configDigest() }),
     setReadiness(next) {
       ready = next === true;
     },
     updateConfig(next) {
       assertTarget(next.target);
+      if (runtime !== undefined && runtime.target !== next.target) {
+        throw new Error(`RUNTIME_TARGET_MISMATCH: ${runtime.target} != ${next.target}`);
+      }
       current = { ...next };
     },
     stop: () => {
