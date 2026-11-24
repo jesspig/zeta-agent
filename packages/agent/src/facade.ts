@@ -4,6 +4,9 @@ import {
   declareToolChanges,
   runLoop,
   AgentPluginManager,
+  createPluginRegistry,
+  createContributionHost,
+  DEFAULT_PLUGIN_REALM,
   createBudgetTracker,
   createCompactionListener,
   createMemoryWorkspaceStore,
@@ -37,6 +40,9 @@ import {
   type Inbox,
   type LoopRuntime,
   type PluginContribution,
+  type PluginMetadata,
+  type ContributionContext,
+  type ContributionExecutors,
   type PluginTool,
   type PrepareNextTurn,
   type PrepareRequest,
@@ -54,7 +60,15 @@ import {
   type ToolDescriptor,
   type ToolPublisher,
 } from "@zeta-agent/agent-framework";
-import type { Disposer } from "@zeta-agent/framework";
+import {
+  createPluginTransaction,
+  reviewExtension,
+  DEFAULT_EXTENSION_POLICY,
+  type Disposer,
+  type ExtensionPolicy,
+  type ExtensionSource,
+  type ExtensionReview,
+} from "@zeta-agent/framework";
 import type { PermissionGate } from "./plugins/permissions/guard";
 import {
   createApprovalBroker,
@@ -157,6 +171,40 @@ function builtinTools(options: {
   return [...builtinToolDefinitions(options)];
 }
 
+export interface WrapRegistrationOptions extends PluginMetadata {
+  readonly handler?: (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
+}
+
+export interface TaskRegistrationOptions extends PluginMetadata {
+  readonly handler?: () => void | Promise<void>;
+}
+
+/** 贡献在真实注册入口中的投影，供宿主观察与测试。 */
+export interface ContributionSnapshot {
+  readonly name: string;
+  readonly text: string | undefined;
+  readonly value: unknown;
+  readonly order: number;
+  readonly realm: symbol;
+  readonly replaceable: boolean;
+  readonly required: boolean;
+  readonly generation: number;
+}
+
+/** install() 原样 disposer 与审查结论一并留档。 */
+export interface PluginInstallation {
+  readonly plugin: AgentPlugin;
+  readonly generation: number;
+  readonly dispose: Disposer;
+  readonly realm: symbol;
+  readonly review: ExtensionReview;
+}
+
+export interface PluginReviewRecord {
+  readonly plugin: AgentPlugin;
+  readonly review: ExtensionReview;
+}
+
 export interface PluginApiSurface extends AgentPluginApi {
   /** 按 LIFO 撤销所有经 api 注册的贡献（含兼容门面贡献的 hook）。 */
   disposeAll(): void;
@@ -170,6 +218,14 @@ export interface PluginApiSurface extends AgentPluginApi {
    * 合并后由 facade 的 withhold/durable 路径统一派发，插件不另开副作用直通路径。
    */
   declareEmissionTools(names: readonly string[]): Disposer;
+  /** section 贡献进入系统提示词，按 order 排序、按 realm 隔离。 */
+  addSection(text: string, options?: PluginMetadata): Disposer;
+  /** wrap 贡献进入工具执行链，handler 在工具调用前后被调用。 */
+  addWrap(name: string, options?: WrapRegistrationOptions): Disposer;
+  /** task 贡献在 agent_start 作为后台作业执行，可按需手动 runTask。 */
+  addTask(name: string, options?: TaskRegistrationOptions): Disposer;
+  /** service 贡献进入服务注册表，可由 resolveService 解析。 */
+  addService(name: string, value?: unknown, options?: PluginMetadata): Disposer;
 }
 
 /** 插件间共享的轻量事件总线；按注册顺序同步派发。 */
@@ -371,6 +427,8 @@ export interface AgentOptions {
   readonly streamFn?: AgentStreamFn;
   readonly plugins?: readonly AgentPlugin[];
   readonly pluginManager?: AgentPluginManager;
+  /** 不可信扩展的来源/digest/capability 审查策略；缺省禁用不可信扩展。 */
+  readonly pluginPolicy?: ExtensionPolicy;
   readonly loopHooks?: CoreLoopHooks;
   readonly includeBuiltins?: boolean;
   readonly securityBackend?: ExecutionBackend;
@@ -531,6 +589,18 @@ export interface Agent extends PluginApiSurface {
   readonly compaction: AgentCompactionHandle | undefined;
   /** 本 agent 绑定的租户作用域；单租户调用方为 undefined。 */
   readonly tenantScope: TenantScope | undefined;
+  /** 通过审查并安装的插件：dispose 为 install() 原样返回的 disposer。 */
+  readonly pluginInstallations: readonly PluginInstallation[];
+  /** 全部候选插件的审查结论（含被禁用的）。 */
+  readonly pluginReviews: readonly PluginReviewRecord[];
+  readonly pluginSections: readonly ContributionSnapshot[];
+  readonly pluginWraps: readonly ContributionSnapshot[];
+  readonly pluginTasks: readonly ContributionSnapshot[];
+  readonly pluginServices: readonly ContributionSnapshot[];
+  readonly pluginGeneration: number;
+  resolveService(name: string, realm?: symbol): unknown;
+  runTask(name: string, realm?: symbol): Promise<void>;
+  providerToolSchemas(): readonly AgentToolSchema[];
 }
 
 function streamErrorMessage(error: unknown): string {
@@ -744,14 +814,23 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const toolDefinitions = includeBuiltins
     ? builtinTools({ securityBackend, allowedDirectories, structuredBackend })
     : [];
+  // 只有 builtin 工具走静态 contributions；插件与服务都经真实注册入口（安装事务 + registry）。
   const contributions: PluginContribution[] = includeBuiltins
     ? toolDefinitions.map((tool) => ({ kind: "tool", tool }))
     : [];
   // 服务清单由统一装配 manifest 注入；缺省时仍从注册表派生，保持 SDK/CLI 一致。
   const defaultManifest = createAssemblyManifest({ profile: assemblyProfile });
   const serviceNames = options.services ?? [...defaultManifest.services, ...defaultManifest.session];
-  for (const name of serviceNames) contributions.push({ kind: "service", name });
-  for (const plugin of plugins) contributions.push(...plugin.contributions);
+
+  /** 插件世代：staging 固定世代，commit 时过期项被丢弃；贡献记录各自世代。 */
+  const defaultRealm = tenantScope?.realm ?? DEFAULT_PLUGIN_REALM;
+  let pluginGeneration = 0;
+  const sectionRegistry = createPluginRegistry<{ readonly text: string }>();
+  const wrapRegistry = createPluginRegistry<NonNullable<WrapRegistrationOptions["handler"]>>();
+  const taskRegistry = createPluginRegistry<NonNullable<TaskRegistrationOptions["handler"]>>();
+  const serviceRegistry = createPluginRegistry<unknown>();
+  const pluginInstallations: PluginInstallation[] = [];
+  const pluginReviews: PluginReviewRecord[] = [];
 
   const assembly = includeBuiltins ? builtinIdsForProfile(assemblyProfile) : [];
 
@@ -775,6 +854,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
       "- Answer environment questions (cwd, platform, git status, etc.) from the Environment section or by calling tools.",
       "- Reply in the same language the user uses. Keep answers concise and concrete.",
     ].filter((line) => line.length > 0);
+    // section 贡献是真实提示词的一部分，按注册入口的 order 排序后追加。
+    const sections = sectionRegistry.snapshot().map((slot) => slot.value.text);
+    if (sections.length > 0) lines.push("", "Plugin sections:", ...sections);
     return lines.join("\n");
   }
 
@@ -799,7 +881,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
   let lastTurnHadNativeTools = false;
 
   // 插件 API 的可变注册集合。每个 add* 返回幂等 disposer；disposeAll 按 LIFO 撤销。
-  const pluginTools = new Map<string, { readonly tool: PluginTool; readonly dispose: () => void }>();
+  interface PluginToolEntry {
+    readonly tool: PluginTool;
+    readonly token: object;
+    readonly meta: ContributionContext;
+    readonly dispose: () => void;
+  }
+  const pluginTools = new Map<string, PluginToolEntry>();
   const declaredLoadout = new Map<string, PluginTool>();
   const converters: Converter[] = [];
   const contextTransforms: ContextTransform[] = [];
@@ -829,6 +917,191 @@ export function createAgent(options: AgentOptions = {}): Agent {
     });
   }
 
+  /** 同名工具替换：旧条目先撤销，新条目用身份 disposer 登记，旧 disposer 晚到不误删。 */
+  function registerToolEntry(tool: PluginTool, meta: Partial<ContributionContext> = {}): Disposer {
+    const name = tool.name;
+    if (typeof name !== "string" || name.length === 0) throw new Error("api.registerTool: name required");
+    const existing = pluginTools.get(name);
+    if (existing !== undefined) {
+      if (existing.meta.required || meta.required === true) throw new Error(`REQUIRED_ROOT_REPLACED: ${name}`);
+      if (!existing.meta.replaceable) throw new Error(`REPLACE_REJECTED: ${name}`);
+      existing.dispose();
+    }
+    const token = {};
+    const entryMeta: ContributionContext = {
+      realm: meta.realm ?? defaultRealm,
+      order: meta.order ?? 100,
+      generation: meta.generation ?? pluginGeneration,
+      replaceable: meta.replaceable ?? true,
+      required: meta.required ?? false,
+      source: meta.source,
+      ...(meta.digest === undefined ? {} : { digest: meta.digest }),
+      ...(meta.capabilities === undefined ? {} : { capabilities: meta.capabilities }),
+      trusted: meta.trusted ?? false,
+    };
+    const dispose = addDisposer(() => {
+      if (pluginTools.get(name)?.token === token) pluginTools.delete(name);
+    });
+    pluginTools.set(name, { tool, token, meta: entryMeta, dispose });
+    return dispose;
+  }
+
+  let sectionSequence = 0;
+  const installationContributionDisposers = new Map<PluginInstallation, Disposer[]>();
+  const contributionExecutors: ContributionExecutors = {
+    tool: (item, ctx) => registerToolEntry(item.tool, ctx),
+    hook: (item, ctx) =>
+      stream.subscribe((event) => {
+        if (event.type === item.event) item.handler(event);
+      }),
+    section: (item, ctx) =>
+      sectionRegistry.register({
+        name: `section:${String(ctx.realm.description ?? "realm")}:${sectionSequence++}`,
+        value: { text: item.text },
+        realm: ctx.realm,
+        order: ctx.order,
+        replaceable: ctx.replaceable,
+        required: ctx.required,
+        source: ctx.source,
+      }),
+    wrap: (item, ctx) =>
+      wrapRegistry.register({
+        name: item.name,
+        value: item.handler ?? (() => undefined),
+        realm: ctx.realm,
+        order: ctx.order,
+        replaceable: ctx.replaceable,
+        required: ctx.required,
+        source: ctx.source,
+      }),
+    task: (item, ctx) =>
+      taskRegistry.register({
+        name: item.name,
+        value: item.handler ?? (() => undefined),
+        realm: ctx.realm,
+        order: ctx.order,
+        replaceable: ctx.replaceable,
+        required: ctx.required,
+        source: ctx.source,
+      }),
+    service: (item, ctx) =>
+      serviceRegistry.register({
+        name: item.name,
+        value: item.value,
+        realm: ctx.realm,
+        order: ctx.order,
+        replaceable: ctx.replaceable,
+        required: ctx.required,
+        source: ctx.source,
+      }),
+  };
+  const contributionHost = createContributionHost(contributionExecutors, {
+    defaultRealm,
+    generation: () => pluginGeneration,
+  });
+
+  // 装配清单中的 builtin 服务走同一注册入口；显式 require 且不可替换。
+  if (includeBuiltins) {
+    for (const name of serviceNames) {
+      addDisposer(contributionHost.apply(
+        { kind: "service", name, value: undefined },
+        { realm: defaultRealm, order: 0, replaceable: false, required: true, source: "builtin", trusted: true }
+      ));
+    }
+  }
+
+  /** staging → validate → commit；失败即 discard，install() 原样 disposer 逐插件留档。 */
+  const pluginPolicy = options.pluginPolicy ?? DEFAULT_EXTENSION_POLICY;
+  const stage = createPluginTransaction<AgentPlugin>({ generation: () => pluginGeneration });
+  const stagedInputs = [];
+  for (const plugin of plugins) {
+    // 宿主显式传入的插件对象按贡献内容生成 digest；标记外部来源的插件必须自带 digest。
+    const hostDigest = plugin.source === undefined
+      ? `host:${stableHash(JSON.stringify({
+          name: plugin.name,
+          version: plugin.version,
+          contributions: plugin.contributions.map((item) =>
+            `${item.kind}:${"name" in item ? String(item.name) : "text" in item ? String(item.text) : ""}`),
+        }))}`
+      : undefined;
+    const source: ExtensionSource = {
+      origin: (plugin.source as ExtensionSource["origin"]) ?? "user",
+      digest: plugin.digest ?? hostDigest,
+      ...(plugin.capabilities === undefined ? {} : { capabilities: plugin.capabilities }),
+      // 宿主显式传入且未标记来源的插件视为可信；标记外部来源但未 trusted 的由策略裁决。
+      trusted: plugin.trusted ?? (plugin.source === undefined),
+    };
+    const review = reviewExtension(source, pluginPolicy);
+    pluginReviews.push({ plugin, review });
+    if (review.decision === "denied") continue;
+    stagedInputs.push({
+      item: plugin,
+      meta: {
+        name: plugin.name,
+        realm: plugin.realm ?? defaultRealm,
+        order: plugin.order ?? 100,
+        replaceable: plugin.replaceable ?? true,
+        required: plugin.required ?? false,
+        source: plugin.source,
+        digest: plugin.digest,
+        capabilities: plugin.capabilities,
+        trusted: review.decision === "allowed",
+      },
+    });
+  }
+  stage.stage(stagedInputs);
+  const validationIssues = stage.validate();
+  if (validationIssues.length > 0) {
+    throw new Error(`PLUGIN_VALIDATION_FAILED: ${validationIssues.map((issue) => issue.reason).join(",")}`);
+  }
+  const installResult = stage.commit({
+    install: (entry) => {
+      pluginGeneration += 1;
+      return entry.item.install();
+    },
+    apply: (entry, record) => {
+      const generation = pluginGeneration;
+      const installation: PluginInstallation = {
+        plugin: entry.item,
+        generation,
+        dispose: record.dispose,
+        realm: entry.realm ?? defaultRealm,
+        review: pluginReviews.find((item) => item.plugin === entry.item)?.review
+          ?? { decision: "allowed", reason: "TRUSTED", source: { origin: "user", trusted: true } },
+      };
+      pluginInstallations.push(installation);
+      const contributionDisposers: Disposer[] = [];
+      installationContributionDisposers.set(installation, contributionDisposers);
+      addDisposer(record.dispose);
+      for (const item of entry.item.contributions) {
+        // 沙箱扩展只保留提示词/事件观察能力；工具、任务、服务与 wrap 一概不授予。
+        if (!entry.trusted && item.kind !== "section" && item.kind !== "hook") continue;
+        const stop = contributionHost.apply(item, {
+          realm: item.realm ?? entry.realm ?? defaultRealm,
+          order: item.order ?? entry.order,
+          replaceable: item.replaceable ?? entry.replaceable,
+          required: item.required ?? entry.required,
+          source: item.source ?? entry.source,
+          digest: item.digest ?? entry.digest,
+          capabilities: item.capabilities ?? entry.capabilities,
+          trusted: item.trusted ?? entry.trusted,
+          generation,
+        });
+        const tracked = addDisposer(stop);
+        contributionDisposers.push(tracked);
+      }
+    },
+    unapply: (_entry, record) => {
+      const index = pluginInstallations.findIndex((item) => item.dispose === record.dispose);
+      const installation = index >= 0 ? pluginInstallations[index] : undefined;
+      if (installation === undefined) return;
+      for (const stop of installationContributionDisposers.get(installation) ?? []) stop();
+      installationContributionDisposers.delete(installation);
+      pluginInstallations.splice(index, 1);
+    },
+  });
+  if (installResult.error !== undefined) throw installResult.error;
+
   function activeStreamFn(): AgentStreamFn | undefined {
     const provider = streamFnProviders[streamFnProviders.length - 1];
     if (provider !== undefined) {
@@ -849,7 +1122,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   /** 最终 active registry：能力不支持的 builtin 被排除，显式注入的插件工具默认可执行。 */
   function activeToolNamesSnapshot(): readonly string[] {
-    return executableToolNames(toolNamesSnapshot(), capabilityDiagnostics);
+    // 显式注入的插件工具默认可执行；builtin 仍受真实能力诊断约束。
+    const pluginNames = new Set([...pluginTools.keys(), ...declaredLoadout.keys()]);
+    const builtins = toolDefinitions.map((tool) => tool.name).filter((name) => !pluginNames.has(name));
+    return [...executableToolNames(builtins, capabilityDiagnostics), ...pluginNames];
   }
 
   /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
@@ -857,15 +1133,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   const api: PluginApiSurface = {
     registerTool(tool) {
-      const name = tool.name;
-      if (typeof name !== "string" || name.length === 0) throw new Error("api.registerTool: name required");
-      const existing = pluginTools.get(name);
-      existing?.dispose();
-      const dispose = addDisposer(() => {
-        pluginTools.delete(name);
-      });
-      pluginTools.set(name, { tool, dispose });
-      return dispose;
+      return registerToolEntry(tool);
     },
     onEvent(handler) {
       return addDisposer(stream.subscribe(handler));
@@ -928,8 +1196,36 @@ export function createAgent(options: AgentOptions = {}): Agent {
         recomputeEmissionTools();
       });
     },
+    addSection(text, options = {}) {
+      return addDisposer(contributionHost.apply(
+        { kind: "section", text },
+        { ...options, realm: options.realm ?? defaultRealm }
+      ));
+    },
+    addWrap(name, options = {}) {
+      const { handler, ...meta } = options;
+      return addDisposer(contributionHost.apply(
+        { kind: "wrap", name, ...(handler === undefined ? {} : { handler }) },
+        { ...meta, realm: meta.realm ?? defaultRealm }
+      ));
+    },
+    addTask(name, options = {}) {
+      const { handler, ...meta } = options;
+      return addDisposer(contributionHost.apply(
+        { kind: "task", name, ...(handler === undefined ? {} : { handler }) },
+        { ...meta, realm: meta.realm ?? defaultRealm }
+      ));
+    },
+    addService(name, value, options = {}) {
+      return addDisposer(contributionHost.apply(
+        { kind: "service", name, value },
+        { ...options, realm: options.realm ?? defaultRealm }
+      ));
+    },
     disposeAll() {
       pluginManager.disposeAll();
+      pluginInstallations.length = 0;
+      installationContributionDisposers.clear();
     },
   };
 
@@ -961,17 +1257,18 @@ export function createAgent(options: AgentOptions = {}): Agent {
   /** provider schema 从最终 active registry 生成，未支持工具不进入模型可见面。 */
   function providerToolSchemas(): AgentToolSchema[] {
     const active = new Set(activeToolNamesSnapshot());
-    const schemas: AgentToolSchema[] = [];
+    // 同名后到者覆盖先到者：插件替换 builtin 后 schema 不再出现旧条目。
+    const schemas = new Map<string, AgentToolSchema>();
     for (const tool of toolDefinitions) {
-      if (active.has(tool.name)) schemas.push(toToolSchema(tool));
+      if (active.has(tool.name)) schemas.set(tool.name, toToolSchema(tool));
     }
     const addPluginTool = (tool: PluginTool): void => {
       if (!active.has(tool.name)) return;
-      schemas.push({ name: tool.name, description: tool.name, parameters: [] });
+      schemas.set(tool.name, { name: tool.name, description: tool.name, parameters: [] });
     };
     for (const entry of pluginTools.values()) addPluginTool(entry.tool);
     for (const tool of declaredLoadout.values()) addPluginTool(tool);
-    return schemas;
+    return [...schemas.values()];
   }
 
   /** 把已拼接的文本投影为 message_update 所需的流式部分快照。 */
@@ -1006,6 +1303,14 @@ export function createAgent(options: AgentOptions = {}): Agent {
     activeSignal = signal;
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" }, signal);
+    // task 贡献作为后台作业在轮首执行（失败不影响主流程，由 hook chain 归一化）。
+    for (const slot of taskRegistry.snapshot()) {
+      try {
+        await slot.value?.();
+      } catch (error) {
+        fiberLogger.warn(`plugin task ${slot.name} failed: ${String(error)}`);
+      }
+    }
 
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
     for (const source of steeringSources) {
@@ -1131,6 +1436,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
           toolSignal ?? signal
         );
       }
+      // wrap 贡献形成按 order 排序的环绕链，工具调用前依次执行。
+      for (const slot of wrapRegistry.snapshot()) {
+        await slot.value?.(
+          { type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args },
+          toolSignal ?? signal
+        );
+      }
       return {};
     };
 
@@ -1158,6 +1470,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
           },
           toolSignal ?? signal
         );
+      }
+      const endEvent = {
+        type: "tool_execution_end" as const,
+        toolCallId: input.call.id,
+        toolName: name,
+        result: input.output,
+        isError: input.isError,
+      };
+      for (const slot of [...wrapRegistry.snapshot()].reverse()) {
+        await slot.value?.(endEvent, toolSignal ?? signal);
       }
     };
 
@@ -1410,6 +1732,28 @@ export function createAgent(options: AgentOptions = {}): Agent {
     return stream.getState().messages;
   }
 
+  function toSnapshots<T>(registry: {
+    snapshot(): readonly {
+      readonly name: string;
+      readonly value: T;
+      readonly realm: symbol;
+      readonly order: number;
+      readonly replaceable: boolean;
+      readonly required: boolean;
+    }[];
+  }, textOf?: (value: T) => string | undefined): ContributionSnapshot[] {
+    return registry.snapshot().map((slot) => ({
+      name: slot.name,
+      text: textOf?.(slot.value),
+      value: slot.value,
+      order: slot.order,
+      realm: slot.realm,
+      replaceable: slot.replaceable,
+      required: slot.required,
+      generation: pluginGeneration,
+    }));
+  }
+
   return {
     prompt(text, signal) {
       if (typeof text !== "string") return Promise.reject(new Error("prompt: expected a string"));
@@ -1544,6 +1888,30 @@ export function createAgent(options: AgentOptions = {}): Agent {
     get activeToolNames() {
       return activeToolNamesSnapshot();
     },
+    pluginInstallations,
+    pluginReviews,
+    get pluginSections() {
+      return toSnapshots(sectionRegistry, (value) => value.text);
+    },
+    get pluginWraps() {
+      return toSnapshots(wrapRegistry);
+    },
+    get pluginTasks() {
+      return toSnapshots(taskRegistry);
+    },
+    get pluginServices() {
+      return toSnapshots(serviceRegistry);
+    },
+    get pluginGeneration() {
+      return pluginGeneration;
+    },
+    resolveService(name, realm) {
+      return serviceRegistry.resolve(name, realm);
+    },
+    async runTask(name, realm) {
+      await taskRegistry.resolve(name, realm)?.();
+    },
+    providerToolSchemas,
     get reasoningEffort() {
       return reasoningEffort;
     },

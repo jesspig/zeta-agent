@@ -6,15 +6,31 @@ export interface PluginTool<P = never> {
   readonly execute: (input: P, signal?: AbortSignal) => unknown | Promise<unknown>;
 }
 
-export type PluginContribution =
-  | { readonly kind: "tool"; readonly tool: PluginTool }
-  | { readonly kind: "hook"; readonly event: string; readonly handler: (event: AgentEvent) => void }
-  | { readonly kind: "section"; readonly text: string }
-  | { readonly kind: "wrap"; readonly name: string }
-  | { readonly kind: "task"; readonly name: string }
-  | { readonly kind: "service"; readonly name: string };
+/** 贡献元数据：来源/摘要/能力供审查，order/realm/replaceable 接入真实注册入口。 */
+export interface PluginMetadata {
+  readonly order?: number;
+  readonly realm?: symbol;
+  readonly replaceable?: boolean;
+  readonly required?: boolean;
+  readonly source?: string;
+  readonly digest?: string;
+  readonly capabilities?: readonly string[];
+  readonly trusted?: boolean;
+}
 
-export interface AgentPlugin {
+export type PluginContribution =
+  | ({ readonly kind: "tool"; readonly tool: PluginTool } & PluginMetadata)
+  | ({ readonly kind: "hook"; readonly event: string; readonly handler: (event: AgentEvent) => void } & PluginMetadata)
+  | ({ readonly kind: "section"; readonly text: string } & PluginMetadata)
+  | ({
+      readonly kind: "wrap";
+      readonly name: string;
+      readonly handler?: (event: AgentEvent, signal?: AbortSignal) => void | Promise<void>;
+    } & PluginMetadata)
+  | ({ readonly kind: "task"; readonly name: string; readonly handler?: () => void | Promise<void> } & PluginMetadata)
+  | ({ readonly kind: "service"; readonly name: string; readonly value?: unknown } & PluginMetadata);
+
+export interface AgentPlugin extends PluginMetadata {
   readonly kind: "AgentPlugin";
   readonly name: string;
   readonly version?: string;

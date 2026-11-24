@@ -1,5 +1,6 @@
 export * from "./types";
 export * from "./objects";
+export * from "./loader";
 
 export {
   contribute,
