@@ -15,6 +15,7 @@ import {
 } from "@zeta-agent/agent";
 import {
   assertStartupArtifact,
+  createStdoutWriter,
   hostTarget,
   isCompiledExecutable,
   type DeployHandle,
@@ -27,6 +28,8 @@ import type {
 } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
 import { resolveModelConfig } from "./config";
+import { runDaemonMode } from "./daemon";
+import { runRemoteMode } from "./remote";
 import { createDeferredTelemetry, withFirstFrame } from "./deferred-telemetry";
 import { EMBEDDED_ASSETS, EMBEDDED_MANIFEST } from "./embedded-assets.generated";
 import { createProbeHandle, handleProbeFrame } from "./probes";
@@ -43,6 +46,8 @@ const HELP = [
   "  zeta --headless \"提示词\"   headless 打印模式（无需 TTY）",
   "  zeta --json \"提示词\"       headless JSON 事件流",
   "  zeta --rpc <帧>            headless RPC 帧（探针帧：{\"type\":\"probe\",\"probe\":\"readiness\"}）",
+  "  zeta --daemon --token <t>   启动控制面 daemon（HTTP + IPC + 自动重启）",
+  "  zeta --remote --endpoint <url> --token <t> <帧>  经远程 SDK 调用控制面",
   "  zeta --watch <目录>        监视插件目录，文件变更不重启生效（可重复）",
   "  zeta --help                显示帮助",
   "  zeta --version             显示版本",
@@ -420,8 +425,14 @@ async function readStdinFrames(): Promise<string> {
 
 async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> {
   const { agent, missing } = bundle;
+  const writer = createStdoutWriter({
+    write: (chunk) => process.stdout.write(chunk) !== false,
+    diagnostic: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
+  });
   if (missing.length > 0) {
-    process.stderr.write(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo\n`);
+    writer.diagnostic(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo`);
   }
   const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
   const stdinText = mode === "rpc" && !process.stdin.isTTY ? await readStdinFrames() : "";
@@ -431,7 +442,7 @@ async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> 
     : args.prompt !== undefined ? [args.prompt] : []) {
     const probe = handleProbeFrame(bundle.probes, line);
     if (probe !== undefined) {
-      process.stdout.write(probe + "\n");
+      writer.write(probe + "\n");
     } else {
       controlLines.push(line);
     }
@@ -442,13 +453,15 @@ async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> 
     lines: mode === "rpc"
       ? controlLines
       : args.prompt !== undefined ? [args.prompt] : [],
-    output: (line: string) => process.stdout.write(line + "\n"),
+    output: (line: string) => writer.write(line + "\n"),
   };
   try {
     return await MODES[mode].run(agent, opts);
   } catch (error) {
-    process.stderr.write(`zeta: ${(error as Error).message}\n`);
+    writer.diagnostic(`zeta: ${(error as Error).message}`);
     return 1;
+  } finally {
+    await writer.flush();
   }
 }
 
@@ -498,6 +511,14 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         }) + "\n"
       );
       return 0;
+    }
+    if (args.mode === "daemon") return runDaemonMode(args, bundle);
+    if (args.mode === "remote") {
+      const stdinText = process.stdin.isTTY === true ? "" : await readStdinFrames();
+      return runRemoteMode(
+        args,
+        collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
+      );
     }
     return args.mode === "tui" ? await runTui(args, bundle) : await runHeadless(args, bundle);
   } finally {

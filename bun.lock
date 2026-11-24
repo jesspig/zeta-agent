@@ -112,6 +112,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/agent": "workspace:*",
+        "@zeta-agent/components": "workspace:*",
         "@zeta-agent/framework": "workspace:*",
       },
     },

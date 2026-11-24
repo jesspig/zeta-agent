@@ -1,6 +1,6 @@
 import { resolveAssemblyProfile, type AssemblyProfile } from "@zeta-agent/agent";
 
-export type CliMode = "tui" | "headless" | "json" | "rpc";
+export type CliMode = "tui" | "headless" | "json" | "rpc" | "daemon" | "remote";
 
 export interface CliArgs {
   readonly mode: CliMode;
@@ -13,6 +13,10 @@ export interface CliArgs {
   readonly capabilities: boolean;
   /** 插件热重载目录；可重复指定，变更后不重启进程即生效。 */
   readonly watchDirs: readonly string[];
+  /** daemon/remote 控制面令牌；缺省时由 ZETA_DAEMON_TOKEN 提供。 */
+  readonly token?: string;
+  /** remote 模式的 daemon HTTP 端点。 */
+  readonly endpoint?: string;
 }
 
 const MODE_FLAGS: Readonly<Record<string, CliMode>> = {
@@ -20,6 +24,8 @@ const MODE_FLAGS: Readonly<Record<string, CliMode>> = {
   "--print": "headless",
   "--json": "json",
   "--rpc": "rpc",
+  "--daemon": "daemon",
+  "--remote": "remote",
 };
 
 export function parseArgs(argv: readonly string[]): CliArgs {
@@ -28,6 +34,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   let version = false;
   let capabilities = false;
   let profile: string | undefined;
+  let token: string | undefined;
+  let endpoint: string | undefined;
   const watchDirs: string[] = [];
   const promptParts: string[] = [];
 
@@ -59,6 +67,16 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       index += 1;
       continue;
     }
+    if (arg === "--token" || arg === "--endpoint") {
+      const value = argv[index + 1];
+      if (typeof value !== "string" || value.startsWith("--")) {
+        throw new Error(arg === "--token" ? "TOKEN_VALUE_REQUIRED" : "ENDPOINT_VALUE_REQUIRED");
+      }
+      if (arg === "--token") token = value;
+      else endpoint = value;
+      index += 1;
+      continue;
+    }
     if (Object.prototype.hasOwnProperty.call(MODE_FLAGS, arg)) {
       mode = MODE_FLAGS[arg] as CliMode;
       continue;
@@ -77,5 +95,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     profile: resolveAssemblyProfile(profile),
     capabilities,
     watchDirs,
+    ...(token === undefined ? {} : { token }),
+    ...(endpoint === undefined ? {} : { endpoint }),
   };
 }
