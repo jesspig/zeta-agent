@@ -13,7 +13,7 @@ const root = resolve(here, "../../..");
  */
 test("plain bun 运行路径解析到 solid-js 客户端构建（preload 生效）", () => {
   const probe = resolve(here, "__fixtures__/solid-build-probe.ts");
-  const result = spawnSync(process.execPath, [probe], {
+  const result = spawnSync(process.execPath, ["--preload", "@opentui/solid/preload", probe], {
     cwd: root,
     encoding: "utf8",
   });
@@ -23,7 +23,7 @@ test("plain bun 运行路径解析到 solid-js 客户端构建（preload 生效�
 
 test("plain bun 运行路径可渲染真实 TUI 组件（无 server build 崩溃）", () => {
   const entry = resolve(here, "__fixtures__/runtime-preload-probe.tsx");
-  const result = spawnSync(process.execPath, [entry], {
+  const result = spawnSync(process.execPath, ["--preload", "@opentui/solid/preload", entry], {
     cwd: root,
     encoding: "utf8",
   });

@@ -26,9 +26,10 @@ export interface EditorHandle {
 export type SubmitMode = "steer" | "follow-up";
 
 export function resolveSubmitMode(
-  key: Pick<KeyEvent, "name"> & Partial<Pick<KeyEvent, "meta" | "option">>,
+  key: Pick<KeyEvent, "name"> & Partial<Pick<KeyEvent, "meta" | "option" | "shift">>,
 ): SubmitMode | null {
   if (key.name !== "return" && key.name !== "enter") return null;
+  if (key.shift) return null;
   return key.meta || key.option ? "follow-up" : "steer";
 }
 
@@ -162,9 +163,11 @@ export function createEditorState() {
 }
 
 export interface ZetaEditorProps {
-  readonly onSubmit: (text: string, mode?: SubmitMode) => void | Promise<void>;
+  readonly onSubmit?: (text: string, mode?: SubmitMode) => boolean | void | Promise<boolean | void>;
   /** 区分 steer / follow-up 的提交入口；缺省时两种模式都回落到 onSubmit。 */
-  readonly onSubmitWithMode?: (text: string, mode: SubmitMode) => void | Promise<void>;
+  readonly onSubmitWithMode?: (text: string, mode: SubmitMode) => boolean | void | Promise<boolean | void>;
+  /** 宿主拒绝或提交失败时保留草稿，并把错误交给宿主展示。 */
+  readonly onSubmitError?: (error: unknown) => void;
   readonly placeholder?: string;
   /** 斜杠命令候选来源；缺省时不显示候选列表。 */
   readonly commands?: readonly SlashCommand[];
@@ -240,6 +243,7 @@ export function ZetaEditor(props: ZetaEditorProps) {
   const ring = killRing();
   const undo = undoStack();
   let area: TextAreaLike | null = null;
+  let submitting = false;
   const [text, setText] = createSignal("");
   const [selected, setSelected] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -286,18 +290,25 @@ export function ZetaEditor(props: ZetaEditorProps) {
     }
   };
 
-  const submitWithMode = (mode: SubmitMode, overrideText?: string): void => {
+  const submitWithMode = async (mode: SubmitMode, overrideText?: string): Promise<void> => {
+    if (submitting) return;
     const value = (overrideText ?? area?.plainText ?? text()).trim();
     if (value.length === 0) return;
-    // 让状态机持有当前文本，submitWithMode 据此入队（follow-up）或记账（steer）。
-    editorState.setValue(value);
-    editorState.submitWithMode(mode);
-    if (props.onSubmitWithMode !== undefined) void props.onSubmitWithMode(value, mode);
-    else void props.onSubmit?.(value);
-    setAreaText("");
+    const handler = props.onSubmitWithMode ?? props.onSubmit;
+    if (handler === undefined) return;
+    submitting = true;
+    try {
+      const accepted = await handler(value, mode);
+      if (accepted === false) return;
+      editorState.setValue(value);
+      editorState.submitWithMode(mode);
+      setAreaText("");
+    } catch (error) {
+      props.onSubmitError?.(error);
+    } finally {
+      submitting = false;
+    }
   };
-
-  const submit = (): void => submitWithMode("steer");
 
   const applySelected = (submitAfter: boolean): boolean => {
     const items = filtered();
@@ -519,10 +530,11 @@ export function ZetaEditor(props: ZetaEditorProps) {
           cursorColor={theme.color("accent")}
           backgroundColor="transparent"
           focusedBackgroundColor="transparent"
-          keyBindings={[{ name: "return", action: "submit" }]}
-          onSubmit={() => {
-            submit();
-          }}
+          keyBindings={[
+            { name: "return", shift: true, action: "newline" },
+            { name: "return", action: "submit" },
+          ]}
+          onSubmit={() => {}}
           onContentChange={() => {
             syncText(area?.plainText ?? "");
           }}

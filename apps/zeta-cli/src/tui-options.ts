@@ -14,8 +14,9 @@ export interface TuiHostOptions {
   readonly onNewSession?: () => void | Promise<void>;
   readonly resources?: RuntimeResources;
   readonly commandCatalog?: RuntimeTuiOptions["commandCatalog"];
-  readonly onCommand?: (text: string) => void | Promise<void>;
+  readonly onCommand?: (text: string) => boolean | void | Promise<boolean | void>;
   readonly onAbort?: () => void;
+  readonly onSubmitError?: (error: unknown) => void;
   readonly telemetry?: AgentUsageTelemetry;
 }
 
@@ -23,7 +24,7 @@ export interface TuiHostOptions {
 export function buildTuiOptions(
   agent: Agent,
   version: string,
-  handleCommand: (text: string, mode?: SubmitMode) => void | Promise<void>,
+  handleCommand: (text: string, mode?: SubmitMode) => boolean | void | Promise<boolean | void>,
   host: TuiHostOptions = {},
 ): RuntimeTuiOptions {
   return {
@@ -32,6 +33,7 @@ export function buildTuiOptions(
     commands: (text) => handleCommand(text),
     onCommand: host.onCommand,
     onAbort: host.onAbort,
+    onSubmitError: host.onSubmitError,
     commandCatalog: host.commandCatalog,
     commandList: [
       { id: "help", title: "显示帮助" },
