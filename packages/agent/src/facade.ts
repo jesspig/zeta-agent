@@ -1,5 +1,3 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   createEventStream,
   createInbox,
@@ -56,12 +54,14 @@ import {
 } from "@zeta-agent/observability";
 import {
   createEgressPolicy,
+  createSocketAuditSink,
   createUnconnectedBackend,
   isCriticalLayerDegraded,
   isEgressAllowed,
   verifyAuditChain,
   type AuditRecord,
   type AuditSink,
+  type SocketAuditSink,
   type CredentialVault,
   type EgressPolicy,
   type EgressTarget,
@@ -269,7 +269,7 @@ export interface AgentProviderConfig {
 export interface AuditFinalization {
   readonly configured: boolean;
   readonly finalized: FinalizedState | "not-configured";
-  /** 仅当注入 auditDir 时给出落盘文件路径。 */
+  /** 保留字段以兼容旧调用方；facade 不再自行写旁路文件，socket 模式永远不设置。 */
   readonly path?: string;
   readonly entries: number;
   readonly verified: boolean;
@@ -342,7 +342,14 @@ export interface AgentOptions {
   readonly secretBroker?: SecretBroker;
   /** 可选审计链：仅注入时为拒绝/发射/工具执行写 AuditRecord。 */
   readonly auditSink?: AuditSink;
-  /** 可选审计落盘目录：配合 finalizeAudit(revision) 写带完整性标记的链文件。 */
+  /**
+   * 审计传输形态：默认 "memory" 保持零回归；"socket" 走进程外 daemon（仅含端点，不含密钥）。
+   * 仅当未注入 auditSink 时生效。
+   */
+  readonly auditTransport?: "memory" | "socket";
+  /** socket 模式的本地端点（unix:路径 或 tcp:host:port），绝不传签名密钥。 */
+  readonly auditEndpoint?: string;
+  /** @deprecated facade 不再自行写无签名旁路文件；落盘由 daemon 独占。 */
   readonly auditDir?: string;
 }
 
@@ -372,8 +379,12 @@ export interface Agent extends PluginApiSurface {
   setReasoningEffort(effort: string | undefined): void;
   /** 发射回执快照：durableEffects 的真实回执 + egress 拒绝的失败回执。 */
   emissionReceipts(): readonly Receipt[];
-  /** 把审计链与 finalized(revision) 结果写入 auditDir（若注入），返回可校验的完整性信息。 */
+  /** 内存/注入 sink 的同步封存；socket 模式抛错，须改用 finalizeAuditAsync。 */
   finalizeAudit(revision: number): AuditFinalization;
+  /** socket 模式：由 daemon 封存标记并跨进程校验；非 socket 模式等价 finalizeAudit。 */
+  finalizeAuditAsync(revision: number): Promise<AuditFinalization>;
+  /** 关闭与审计 daemon 的连接；非 socket 模式为空操作。 */
+  closeAudit(): Promise<void>;
   /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
 }
@@ -406,8 +417,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const egressPolicy = options.egressPolicy ?? createEgressPolicy();
   const credentialVault = options.credentialVault;
   const secretBroker = options.secretBroker;
-  const auditSink = options.auditSink;
-  const auditDir = options.auditDir;
+  const auditTransport = options.auditTransport ?? "memory";
+  const auditEndpoint = options.auditEndpoint;
+  if (auditTransport === "socket" && (typeof auditEndpoint !== "string" || auditEndpoint.length === 0)) {
+    throw new Error("AUDIT_ENDPOINT_REQUIRED");
+  }
+  const socketSink: SocketAuditSink | undefined =
+    auditTransport === "socket" && options.auditSink === undefined
+      ? createSocketAuditSink({ endpoint: auditEndpoint! })
+      : undefined;
+  if (socketSink !== undefined) void socketSink.ready().catch(() => {});
+  const auditSink: AuditSink | undefined = options.auditSink ?? socketSink;
   /** egress 拒绝等未进入 durableEffects 的失败回执，供调用方观测。 */
   const failedEmissionReceipts: Receipt[] = [];
 
@@ -444,6 +464,14 @@ export function createAgent(options: AgentOptions = {}): Agent {
     };
     auditSink.append(record);
   }
+
+  function localFinalization(revision: number): AuditFinalization {
+    if (auditSink === undefined) return { configured: false, finalized: "not-configured", entries: 0, verified: false };
+    const finalized = auditSink.finalized(revision);
+    const entries = auditSink.entries;
+    return { configured: true, finalized, entries: entries.length, verified: verifyAuditChain(entries, stableHash) };
+  }
+
   const toolDefinitions = includeBuiltins
     ? builtinTools({ securityBackend, allowedDirectories })
     : [];
@@ -1043,31 +1071,23 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return [...(durableEffects?.receipts() ?? []), ...failedEmissionReceipts];
     },
     finalizeAudit(revision) {
-      if (auditSink === undefined) {
-        return { configured: false, finalized: "not-configured", entries: 0, verified: false };
-      }
-      const finalized = auditSink.finalized(revision);
-      const entries = auditSink.entries;
-      const verified = verifyAuditChain(entries, stableHash);
-      if (auditDir === undefined) {
-        return { configured: true, finalized, entries: entries.length, verified };
-      }
-      mkdirSync(auditDir, { recursive: true });
-      const path = join(auditDir, `audit-final-${revision}.json`);
-      const payload = {
-        schema: "zeta-audit-chain/v1",
-        revision,
-        finalized,
-        entries,
-        integrity: {
-          marker: "AUDIT_CHAIN_SEALED_V1",
-          seq: entries.length,
-          head: entries.length > 0 ? entries[entries.length - 1]!.hash : "0",
-          verified,
-        },
+      if (socketSink !== undefined) throw new Error("AUDIT_SOCKET_REQUIRES_ASYNC_FINALIZE");
+      return localFinalization(revision);
+    },
+    async finalizeAuditAsync(revision) {
+      if (socketSink === undefined) return localFinalization(revision);
+      const state = socketSink.finalized(revision);
+      const sealed = await socketSink.finalizeRemote(revision, state);
+      const result = await socketSink.verifyRemote(revision);
+      return {
+        configured: true,
+        finalized: result.finalized ?? state,
+        entries: result.entries,
+        verified: result.ok && sealed.ok,
       };
-      writeFileSync(path, JSON.stringify(payload, null, 2), "utf8");
-      return { configured: true, finalized, path, entries: entries.length, verified };
+    },
+    async closeAudit() {
+      if (socketSink !== undefined) await socketSink.close();
     },
     createProviderStreamFn(config, fetchImpl) {
       return createProviderStreamFn(

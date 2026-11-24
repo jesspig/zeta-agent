@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AgentStreamChunk, AgentStreamRequest } from "./facade";
@@ -258,7 +258,7 @@ describe("T-06 安全组件接入真实工具/provider 路径（系统级证据�
     expect(preBoundaryHeader).not.toContain(SECRET);
   });
 
-  test("⑤ audit finalized 落文件且链可校验", async () => {
+  test("⑤ audit finalize 不再写无签名旁路文件，链仍可校验", async () => {
     const auditDir = mkdtempSync(join(tmpdir(), "zeta-audit-"));
     try {
       const auditSink = createAuditSink();
@@ -281,24 +281,11 @@ describe("T-06 安全组件接入真实工具/provider 路径（系统级证据�
       expect(result.finalized).toBe("complete");
       expect(result.entries).toBe(revision);
       expect(result.verified).toBe(true);
-      expect(result.path).toBeDefined();
-      expect(existsSync(result.path!)).toBe(true);
+      expect(result.path).toBeUndefined();
+      expect(readdirSync(auditDir)).toHaveLength(0);
+      expect(verifyAuditChain(auditSink.entries, auditHash)).toBe(true);
 
-      const saved = JSON.parse(readFileSync(result.path!, "utf8")) as {
-        readonly revision: number;
-        readonly finalized: string;
-        readonly entries: Parameters<typeof verifyAuditChain>[0];
-        readonly integrity: { readonly marker: string; readonly seq: number; readonly head: string; readonly verified: boolean };
-      };
-      expect(saved.revision).toBe(revision);
-      expect(saved.finalized).toBe("complete");
-      expect(saved.integrity.marker).toBe("AUDIT_CHAIN_SEALED_V1");
-      expect(saved.integrity.seq).toBe(revision);
-      expect(saved.integrity.head).toBe(saved.entries[saved.entries.length - 1]!.hash);
-      expect(saved.integrity.verified).toBe(true);
-      expect(verifyAuditChain(saved.entries, auditHash)).toBe(true);
-
-      const decisions = saved.entries.map((entry) => entry.record.decision);
+      const decisions = auditSink.entries.map((entry) => entry.record.decision);
       expect(decisions).toContain("EMISSION_WITHHELD");
       expect(decisions).toContain("EMISSION_DISPATCHED");
       expect(decisions).toContain("TOOL_EXECUTED");
