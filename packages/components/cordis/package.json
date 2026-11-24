@@ -4,8 +4,13 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
-  "dependencies": {
-    "@zeta-agent/framework": "workspace:*"
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./effect": "./src/effect.ts",
+    "./fiber": "./src/fiber.ts",
+    "./reflect": "./src/reflect.ts",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",

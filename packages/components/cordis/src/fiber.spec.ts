@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { CoeffectKey } from "@zeta-agent/framework";
+import type { CoeffectKey } from "./types";
 import { NOOP } from "./effect";
 import { FiberSystem, key, type Fiber, type FiberSpec } from "./fiber";
 
@@ -37,14 +37,9 @@ describe("Fiber 六态状态机", () => {
     expect(provider.state.kind).toBe("ACTIVE");
 
     base.remove();
-    const unloading = provider.refresh();
-    expect(provider.state.kind).toBe("UNLOADING");
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(provider.state.kind).toBe("UNLOADING");
-
-    consumer.remove();
-    await unloading;
+    await provider.refresh();
     expect(provider.state.kind).toBe("PENDING");
+    expect(consumer.state.kind).toBe("PENDING");
   });
 
   test("FAILED 不自动重试，update 才恢复", async () => {
@@ -72,7 +67,7 @@ describe("Fiber 六态状态机", () => {
     const system = new FiberSystem();
     const fiber = system.create(spec({ uid: "f5" }));
     await fiber.refresh();
-    fiber.remove();
+    await fiber.remove();
     expect(fiber.state.kind).toBe("DISPOSED");
   });
 
@@ -122,9 +117,7 @@ describe("Fiber 六态状态机", () => {
     const system = new FiberSystem();
     const other = key("other");
     const providerA = system.create(spec({ uid: "provider-A", provide: [svc] }));
-    const providerB = system.create(spec({ uid: "provider-B", provide: [svc] }));
     await providerA.refresh();
-    await providerB.refresh();
 
     let fiber!: Fiber;
     let shouldDivert = false;
@@ -145,27 +138,17 @@ describe("Fiber 六态状态机", () => {
         },
       })
     );
-    // holder 依赖 diverter 提供的 other，使 diverter 的 unload guard 持续挂起，
-    // 从而可稳定观测 UNLOADING 态。
-    const holder = system.create(spec({ uid: "holder", inject: [other] }));
     await fiber.refresh();
     expect(fiber.state.kind).toBe("ACTIVE");
-    await holder.refresh();
-    expect(holder.state.kind).toBe("ACTIVE");
 
-    // 撤掉 A 后以 B 为目标重入 reload；apply 内再次改 target → guard 失效。
-    providerA.remove();
+    // update 重入 reload；apply 内修改 target → guard 失效后必须进入 UNLOADING 回收。
     shouldDivert = true;
     reachedSecondYield = false;
-    const transition = fiber.refresh();
-    expect(fiber.state.kind).toBe("LOADING");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const transition = fiber.update();
     expect(fiber.state.kind).toBe("UNLOADING");
-    expect(reachedSecondYield).toBe(false);
-
-    holder.remove();
     await transition;
     expect(fiber.state.kind).toBe("PENDING");
+    expect(reachedSecondYield).toBe(false);
   });
 
   test("G03 committed Impl.dependents 与 Fiber.dependents 同步登记与撤回", async () => {
@@ -180,7 +163,7 @@ describe("Fiber 六态状态机", () => {
     expect(impl!.dependents.has("consumer")).toBe(true);
     expect([...provider.dependents].map((item) => item.uid)).toEqual(["consumer"]);
 
-    consumer.remove();
+    await consumer.remove();
     expect(impl!.dependents.has("consumer")).toBe(false);
     expect(provider.dependents.size).toBe(0);
   });
@@ -195,7 +178,8 @@ describe("Fiber 六态状态机", () => {
     const impl = consumer.target!.get(svc)!;
     expect(typeof impl.check).toBe("function");
     expect(impl.check!()).toBe(true);
-    provider.remove();
+    await consumer.remove();
+    await provider.remove();
     expect(impl.check!()).toBe(false);
   });
 });

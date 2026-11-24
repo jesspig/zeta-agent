@@ -1,4 +1,4 @@
-import type { Disposer } from "@zeta-agent/framework";
+import type { Disposer } from "@zeta-agent/cordis/types";
 
 export interface Seam<T> {
   readonly ns: string;

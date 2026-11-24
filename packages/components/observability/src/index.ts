@@ -1,4 +1,6 @@
-import type { Disposer } from "@zeta-agent/framework";
+import { setActiveEffectObserver, type Disposer, type EffectMeta, type EffectObserver } from "@zeta-agent/cordis";
+
+export type { EffectMeta, EffectObserver } from "@zeta-agent/cordis";
 
 export type LogLevel = "error" | "warn" | "info" | "debug";
 
@@ -7,13 +9,6 @@ export interface LogMessage {
   readonly runId: string;
   readonly level: LogLevel;
   readonly message: string;
-}
-
-export interface EffectMeta {
-  readonly label: string;
-  readonly runId?: string;
-  readonly fiberUid?: string;
-  children: EffectMeta[];
 }
 
 export interface RedactRule {
@@ -112,10 +107,8 @@ export function createLogger(options: LoggerOptions): Logger {
   };
 }
 
-export interface EffectBridge {
-  readonly runId?: string;
+export interface EffectBridge extends EffectObserver {
   onEffect(handler: (meta: EffectMeta) => void): Disposer;
-  emit(meta: EffectMeta): void;
 }
 
 export function createEffectBridge(runId?: string): EffectBridge {
@@ -140,7 +133,12 @@ let activeEffectBridge: EffectBridge | undefined;
 export function setActiveEffectBridge(bridge: EffectBridge | null): Disposer {
   const previous = activeEffectBridge;
   activeEffectBridge = bridge ?? undefined;
+  const restoreObserver = setActiveEffectObserver(bridge);
+  let armed = true;
   return () => {
+    if (!armed) return;
+    armed = false;
+    restoreObserver();
     activeEffectBridge = previous;
   };
 }

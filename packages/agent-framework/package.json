@@ -23,9 +23,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@zeta-agent/framework": "workspace:*",
-    "@zeta-agent/cordis": "workspace:*",
-    "@zeta-agent/events": "workspace:*"
+    "@zeta-agent/framework": "workspace:*"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",
