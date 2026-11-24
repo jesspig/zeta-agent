@@ -42,7 +42,7 @@ flowchart TD
 
 ## 深度差距分析与本批处置（2026-11-23）
 
-> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-4 已有实现并通过全量测试（792 pass / 0 fail；截至 2026-11-20 的规划基线为 734，T-01~T-07 后实测 792，数字以实测为准）。
+> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-6 主体能力已实现并通过全量测试（849 pass / 0 fail；此前规划基线 734，第二阶段补齐后实测 849，数字以实测为准）。
 
 ### 六类差距结论
 
@@ -53,7 +53,7 @@ flowchart TD
 | 工具流水线 | pi 基线中的 hook 字段赋值尚未升级为插件管线，monkey-patch 链仍是重构首要目标（见 [pi-baseline.md](../research/pi-baseline.md)） | **插件管线**：以插件管线替代字段赋值，保留 legacy 兼容层 |
 | 安全接线 | 权限门禁、发射策略（withhold / enqueue）、egress 默认拒绝、凭证不持明文、进程外审计尚未端到端接线（见 [security.md](../agent/security.md)） | **权限 / 发射 / egress / 凭证 / 审计接线**：按契约逐项落地门禁与审计完整性 |
 | TUI seam | 唯一发布实现与可替换后端 seam 的边界须在文档与实现两侧同时成立（见 [tui.md](../agent/tui.md)） | 保持 `RendererBackend` seam 与 `createTui({ backend })`，OpenTUI 仍为默认且唯一发布实现 |
-| 阶段 5/6 | HMR 核心（版本戳新鲜求值、按 unit 事务、故障注入、自动 watcher、扩展 reload e2e）已实现并测试；对象运行时 / unit 快照恢复与研究轨仍延后，交付文档此前存在失实表述 | **文档纠偏**：状态描述与代码现实对齐，HMR 核心按已实现记录，其余标为后续可选项 |
+| 阶段 5/6 | HMR 核心与 unit 快照恢复、对象运行时最小集、研究轨护栏均已实现并测试；此前交付文档存在失实表述 | **文档纠偏**：状态描述与代码现实对齐，延后项按设计边界重新界定 |
 
 ### 本批处置范围（固本与门禁）
 
@@ -63,6 +63,6 @@ flowchart TD
 
 ### 明确延后（不在本批范围）
 
-- **HMR 其余部分**：HMR 核心（版本戳新鲜求值、按 unit 事务、故障注入、自动 watcher、扩展 reload e2e）已实现并测试；阶段 5 剩余的对象运行时 / unit 快照恢复仍延后，不在本批范围。
-- **对象运行时**：阶段 5 可选子路径（contract / document / store / link），当前不实现。
-- **研究轨**：阶段 6 递归自演化已有可选实现与测试（promotion / experience / fitness 及 A29 真实 evaluator，证据：`packages/agent/src/research/*.spec.ts`、`packages/deploy/src/fitness.evaluator.ts`），但不进入默认装配，默认仍为 no-op seam，仅在具备可重放任务与评估器时启用。
+- **HMR / 对象运行时 / 研究轨护栏**：均已实现并测试；HMR unit 快照恢复见 `packages/components/loader/src/hmr.spec.ts`，对象运行时最小集见 `packages/framework/src/objects/`，研究护栏见 `packages/agent/src/research/guardrails.spec.ts`。
+- **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 按设计不实现。
+- **研究轨边界**：promotion / experience / fitness 与四道护栏均为可选 seam，不进入默认装配，默认仍为 no-op seam；仅在具备可重放任务与评估器时启用。

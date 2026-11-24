@@ -117,6 +117,7 @@ interface AuditSink {
 - 只追加、可签名；自演化晋升/withhold 副作用必写；
 - 与 operational log 分离；凭证值/域名不进 label；
 - 借鉴 nodeagent 的 `finalized.<rev>.json` 标记回答"这些日志可信吗"。
+- **实现状态（2026-11-24）**：独立 Bun daemon + 本地 socket NDJSON 已落地（`packages/components/security/src/audit-daemon.ts`、`audit.socket.ts`），签名密钥只驻 daemon 进程；主进程只持端点、append 入有界队列，finalize/verify 由 daemon 跨进程执行（证据：`audit.socket.spec.ts`、`packages/agent/src/facade.audit.socket.spec.ts`）。facade 默认仍为 memory transport，socket 需显式注入；daemon 重启不从已有日志重建链状态。
 
 ## 7 多租户：identity 与 realm
 
@@ -129,6 +130,7 @@ interface Principal { userId: string; spaceId: string; realm: symbol }
 - **事件级过滤**：cordis `Context.filter` + 我们的 `Scoped<T>` 实现跨租户事件路由；
 - **配额作为 coeffect**：`QuotaService{check({tenant,tool}),reserve({tokens,qps})}`，withhold 前先 reserve——避免 coze 配额不落地；
 - **经验库隔离**（自演化）：per-domain + per-mode 各持一个，只读更早任务。
+- **实现状态（2026-11-24）**：`listeners` 已按 realm 分桶，`isolate(realm)` 派生 context 的事件默认严格隔离（root 与派生互不串扰），`on/emit/dispose` 均绑定 realm；配额 reserve 与资源隔离已有专测（证据：`packages/framework/src/context.spec.ts` A28 章节）。facade 自己的 eventBus/stream 为独立总线，不在 realm 隔离范围。
 
 ## 8 错误模型（缺口 8）
 

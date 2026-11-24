@@ -244,6 +244,7 @@ stateDiagram-v2
 ## 9 MCP 与 provider 插件
 
 - MCP：pi 的 `createMcpExtension()` 把 MCP server 的工具注册为 `mcp__<server>__<tool>`，监听 `session_start/before_agent_start/tool_call/turn_start/mcp_servers_change/session_shutdown`（[pi-baseline §5.2](../research/pi-baseline.md)）。我们做成 `mcp` 插件：server 配置是一个 coeffect（`@zeta-agent/mcp:servers`），工具注册是逆可撤销的 effect，server 变化时工具自动重激活。
+  **实现状态（2026-11-24）**：最小插件已落地于 `packages/agent/src/plugins/mcp/`，自实现 JSON-RPC 客户端（无外部 SDK）；工具注册、tools_changed 重激活与卸载清理已实现，并复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定（证据：`packages/agent/src/plugins/mcp/mcp.spec.ts`）。真实 stdio/socket 字节传输由宿主注入 transport，MCP resources/prompts 未实现。
 - Provider：`registerProvider`/`registerNativeProvider`/`registerVirtualModel` 保留；底层走 `@zeta-agent/agent-framework` 的 `StreamFn` broker（[agent-framework §12](../agent-framework/state-and-events.md#12-模型服务作为-broker)）。模型目录由生成式 catalog + `accepts` 版本映射管理。
 
 
