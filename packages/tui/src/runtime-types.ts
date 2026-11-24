@@ -83,6 +83,7 @@ export interface RuntimeTuiHandle {
   setModelOptions(options: readonly RuntimeModelOption[]): void;
   /** 异步更新当前模型显示。 */
   setModel(model: string): void;
+  readonly restoreDraft?: (text: string) => void;
   waitForExit(): Promise<void>;
   destroy(): Promise<void>;
   getSignals(): AgentSignals | undefined;

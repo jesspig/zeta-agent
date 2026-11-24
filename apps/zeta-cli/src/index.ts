@@ -155,9 +155,56 @@ function toRuntimeMessages(messages: readonly { role: string; content: unknown }
   return messages.map((message) => ({ role: message.role, content: message.content }));
 }
 
-async function runTui(args: CliArgs): Promise<number> {
+export async function loadInteractiveTui() {
   await import("@opentui/solid/preload");
-  const { detectGitBranch, renderTui } = await import("@zeta-agent/tui");
+  return import("@zeta-agent/tui");
+}
+
+export function createSteerLock(): { tryAcquire(): boolean; release(): void } {
+  let active = false;
+  return {
+    tryAcquire() {
+      if (active) return false;
+      active = true;
+      return true;
+    },
+    release() {
+      active = false;
+    },
+  };
+}
+
+export function createSteerRunner(deps: {
+  isBusy(): boolean;
+  prompt(text: string): Promise<unknown>;
+  waitForIdle(): Promise<void>;
+  onBusy(): void;
+  onError(error: unknown): void;
+  restoreDraft?(text: string): void;
+}): { start(text: string): { accepted: boolean; done: Promise<void> } } {
+  const lock = createSteerLock();
+  return {
+    start(text) {
+      if (deps.isBusy() || !lock.tryAcquire()) {
+        deps.onBusy();
+        return { accepted: false, done: Promise.resolve() };
+      }
+      const done = deps.prompt(text)
+        .then(() => deps.waitForIdle())
+        .catch((error: unknown) => {
+          deps.restoreDraft?.(text);
+          deps.onError(error);
+        })
+        .finally(() => {
+          lock.release();
+        });
+      return { accepted: true, done };
+    },
+  };
+}
+
+async function runTui(args: CliArgs): Promise<number> {
+  const { detectGitBranch, renderTui } = await loadInteractiveTui();
   const bundle = makeAgent();
   const agent = bundle.agent;
 
@@ -243,6 +290,15 @@ async function runTui(args: CliArgs): Promise<number> {
     void applyConnection(bundle.connection.baseUrl, bundle.connection.apiKey);
   }
 
+  const startSteer = createSteerRunner({
+    isBusy: () => agent.state.isStreaming || agent.state.pendingToolCalls.size > 0,
+    prompt: (text) => agent.prompt(text),
+    waitForIdle: () => agent.waitForIdle(),
+    onBusy: () => notice("正在运行中：请等待完成，或按 Esc 中止后再发送"),
+    onError: (error) => notice(`发送失败：${(error as Error).message}`),
+    restoreDraft: (text) => tui?.restoreDraft?.(text),
+  }).start;
+
   const handleCommand = async (text: string, mode: SubmitMode = "steer"): Promise<boolean> => {
     if (!text.startsWith("/")) {
       if (mode === "follow-up") {
@@ -250,14 +306,7 @@ async function runTui(args: CliArgs): Promise<number> {
         notice(`已排队 follow-up：${text}`);
         return true;
       }
-      if (agent.state.isStreaming || agent.state.pendingToolCalls.size > 0) {
-        notice("正在运行中：请等待完成，或按 Esc 中止后再发送");
-        return false;
-      }
-      void agent.prompt(text)
-        .then(() => agent.waitForIdle())
-        .catch((error: unknown) => notice(`发送失败：${(error as Error).message}`));
-      return true;
+      return startSteer(text).accepted;
     }
     const result = await registry.execute(text);
     if (!result.ok) {
@@ -315,8 +364,8 @@ async function runTui(args: CliArgs): Promise<number> {
 
   try {
     if (args.prompt !== undefined) {
-      await agent.prompt(args.prompt);
-      await agent.waitForIdle();
+      const initial = startSteer(args.prompt);
+      if (initial.accepted) await initial.done;
     }
     await tui.waitForExit();
   } finally {

@@ -292,7 +292,8 @@ export function ZetaEditor(props: ZetaEditorProps) {
 
   const submitWithMode = async (mode: SubmitMode, overrideText?: string): Promise<void> => {
     if (submitting) return;
-    const value = (overrideText ?? area?.plainText ?? text()).trim();
+    const currentText = area?.plainText ?? text();
+    const value = (overrideText ?? currentText).trim();
     if (value.length === 0) return;
     const handler = props.onSubmitWithMode ?? props.onSubmit;
     if (handler === undefined) return;
@@ -302,7 +303,7 @@ export function ZetaEditor(props: ZetaEditorProps) {
       if (accepted === false) return;
       editorState.setValue(value);
       editorState.submitWithMode(mode);
-      setAreaText("");
+      if ((area?.plainText ?? text()) === currentText) setAreaText("");
     } catch (error) {
       props.onSubmitError?.(error);
     } finally {
@@ -363,7 +364,7 @@ export function ZetaEditor(props: ZetaEditorProps) {
         applySelected(false);
         return;
       }
-      if (key.name === "return" || key.name === "enter") {
+      if ((key.name === "return" || key.name === "enter") && !key.shift) {
         key.preventDefault();
         key.stopPropagation();
         if (applySelected(true)) return;

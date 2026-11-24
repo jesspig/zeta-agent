@@ -166,6 +166,57 @@ describe("U-02 编辑器交互接线（真实键盘）", () => {
     }
   });
 
+  test("候选菜单打开时 Shift+Enter 只插入换行", async () => {
+    let submitted = 0;
+    let handle: EditorHandle | undefined;
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          commands={[{ name: "quit", description: "退出" }]}
+          onSubmitWithMode={() => { submitted += 1; }}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 8, kittyKeyboard: true },
+    );
+    try {
+      setup.mockInput.typeText("/q");
+      await setup.waitForFrame((frame) => frame.includes("/quit"));
+      setup.mockInput.pressEnter({ shift: true });
+      await Bun.sleep(10);
+      expect(submitted).toBe(0);
+      expect(handle?.value()).toContain("\n");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  test("异步提交期间的新输入不会在接受后被清空", async () => {
+    let release: (() => void) | undefined;
+    let handle: EditorHandle | undefined;
+    const setup = await testRender(
+      () => (
+        <ZetaEditor
+          onSubmitWithMode={() => new Promise<boolean>((resolve) => { release = () => resolve(true); })}
+          onHandle={(value) => { handle = value; }}
+        />
+      ),
+      { width: 48, height: 6 },
+    );
+    try {
+      setup.mockInput.typeText("first");
+      await setup.waitForFrame((frame) => frame.includes("first"));
+      setup.mockInput.pressEnter();
+      setup.mockInput.typeText(" second");
+      await setup.waitForFrame((frame) => frame.includes("second"));
+      release?.();
+      await Bun.sleep(10);
+      expect(handle?.value()).toBe("first second");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
   test("异步提交期间重复 Enter 不会触发二次提交", async () => {
     let calls = 0;
     let release: (() => void) | undefined;
