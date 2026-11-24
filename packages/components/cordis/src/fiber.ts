@@ -125,6 +125,16 @@ export class FiberSystem {
     this.latestBindings.get(realm)?.delete(key.symbol);
   }
 
+  /**
+   * 回收一个 realm 的 provider/订阅登记。fiber 的卸载由 fiber.remove 负责，
+   * 这里只清掉 realm 索引，使 realm churn 不残留可解析的 binding。
+   */
+  disposeRealm(realm: symbol): void {
+    this.bindings.delete(realm);
+    this.latestBindings.delete(realm);
+    this.subscribers.delete(realm);
+  }
+
   activeBinding(key: CoeffectKey<any>, realm: symbol): ProviderBinding | undefined {
     const binding = this.bindings.get(realm)?.get(key.symbol);
     if (!binding || binding.released || binding.provider.state.kind !== "ACTIVE") return undefined;

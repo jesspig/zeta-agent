@@ -19,6 +19,7 @@ export * from "./session/jsonl-store";
 export * from "./session/sqlite-store";
 export * from "./session/tree";
 export * from "./session/tree-commands";
+export * from "./tenant";
 export * from "./cli/modes";
 export * from "./providers/openai";
 export * from "./providers/openai-responses";

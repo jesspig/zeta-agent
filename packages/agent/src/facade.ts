@@ -108,6 +108,7 @@ import { builtinIdsForProfile, resolveAssemblyProfile, type AssemblyProfile } fr
 import { createAssemblyManifest, type CapabilityDiagnostic } from "./assembly/manifest";
 import { diagnoseCapabilities, executableToolNames } from "./assembly/profile";
 import type { SessionStore } from "./session/store";
+import type { TenantScope } from "./tenant/governance";
 
 export type {
   AgentEvent,
@@ -452,6 +453,11 @@ export interface AgentOptions {
   /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
   readonly sessionStore?: SessionStore;
   /**
+   * 租户治理作用域（由 principal resolver 解析得到）：注入后 session/provider/effects/quota/audit
+   * 全部按该 realm 解析；未注入时保持原有单租户行为。
+   */
+  readonly tenantScope?: TenantScope;
+  /**
    * 可选压缩装配：surface/offloader 由 facade 创建并随 agent_end 落 SessionStore；
    * 不注入时压缩路径完全不启用，保持既有调用方零回归。
    */
@@ -518,6 +524,8 @@ export interface Agent extends PluginApiSurface {
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
   readonly sessionStore: SessionStore | undefined;
   readonly compaction: AgentCompactionHandle | undefined;
+  /** 本 agent 绑定的租户作用域；单租户调用方为 undefined。 */
+  readonly tenantScope: TenantScope | undefined;
 }
 
 function streamErrorMessage(error: unknown): string {
@@ -527,7 +535,8 @@ function streamErrorMessage(error: unknown): string {
 
 export function createAgent(options: AgentOptions = {}): Agent {
   const stream = createEventStream();
-  const sessionStore = options.sessionStore;
+  const tenantScope = options.tenantScope;
+  const sessionStore = tenantScope?.sessionStore ?? options.sessionStore;
   if (sessionStore !== undefined) {
     // agent_end 只含本次 newMessages；事件流 await listener，故 prompt resolve 前消息已落盘。
     stream.subscribe(async (event) => {
@@ -535,7 +544,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       for (const item of event.messages) await sessionStore.append(item);
     });
   }
-  const baseStreamFn = options.streamFn;
+  const baseStreamFn = tenantScope?.streamFn ?? options.streamFn;
   let reasoningEffort: string | undefined = options.reasoningEffort;
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
   const includeBuiltins = options.includeBuiltins !== false;
@@ -572,8 +581,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
   /** 发射工具在 commit 阶段经同一管线派发，此时不再重复 enqueue。 */
   let dispatchingEmission = false;
   /** withhold 策略下总是创建默认效果：插件（如 MCP）可在装配后声明发射工具。 */
-  const usesDefaultEffects = options.durableEffects === undefined && emissionPolicy !== "direct";
-  const durableEffects = options.durableEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
+  const injectedEffects = tenantScope?.durableEffects ?? options.durableEffects;
+  const usesDefaultEffects = injectedEffects === undefined && emissionPolicy !== "direct";
+  const durableEffects = injectedEffects ?? (usesDefaultEffects ? createDefaultEmissionEffects() : undefined);
   const isEmissionTool = (name: string): boolean =>
     emissionPolicy !== "direct" && durableEffects !== undefined && emissionTools.has(name);
   // 未注入策略时采用默认拒绝：没有显式 allow 规则，任何可推导的外联目标都被挡下。
@@ -628,8 +638,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (auditSink === undefined) return;
     const record: AuditRecord = {
       ts: Date.now(),
-      actor: "agent",
-      tenant: "default",
+      actor: tenantScope?.principal.userId ?? "agent",
+      tenant: tenantScope?.principal.spaceId ?? "default",
       pluginId: "facade",
       toolName,
       argsDigest,
@@ -1019,6 +1029,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const receipts = await commitPromise;
         committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
         for (const receipt of receipts) {
+          if (!receipt.ok) tenantScope?.quota.release(1);
           recordAudit(
             receipt.kind,
             receipt.key,
@@ -1155,6 +1166,15 @@ export function createAgent(options: AgentOptions = {}): Agent {
           exec.onUpdate(`executing ${name}`);
           if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
             const key = `${name}:${digest}`;
+            // 配额是 coeffect：withhold 入队前先在本 realm 的 QuotaService 原子 reserve。
+            const quota = tenantScope?.quota;
+            if (quota !== undefined) {
+              const request = { tool: name, tokens: 1 };
+              if (!quota.check(request) || !quota.reserve(request)) {
+                recordAudit(name, digest, "QUOTA_DENIED", "QUOTA_EXHAUSTED", key);
+                throw new Error("QUOTA_EXHAUSTED");
+              }
+            }
             const verdict = checkEgress(args, egressPolicy);
             durableEffects.enqueue(name, key, {
               tool: name,
@@ -1432,6 +1452,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     ...api,
     api,
+    tenantScope,
     emitEffect: (meta) => effectBridge.emit(meta),
     resolveLogSink: (options) => resolveLogSink(options),
     logger,

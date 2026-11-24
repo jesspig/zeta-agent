@@ -10,6 +10,49 @@ function spec(overrides: Partial<FiberSpec> & { uid: string }): FiberSpec {
   return { inject: [], provide: [], ...overrides };
 }
 
+describe("T-13 realm 生命周期回收", () => {
+  test("disposeRealm 只清理目标 realm 的绑定/订阅，兄弟 realm 仍可解析", async () => {
+    const system = new FiberSystem();
+    const realmA = Symbol("fiber-realm-a");
+    const realmB = Symbol("fiber-realm-b");
+    const providerA = system.create(spec({ uid: "t13-provider-a", provide: [svc], realm: realmA }));
+    const providerB = system.create(spec({ uid: "t13-provider-b", provide: [svc], realm: realmB }));
+    await providerA.refresh();
+    await providerB.refresh();
+    expect(system.committedFor(svc, realmA)?.value).toBe("svc");
+    expect(system.committedFor(svc, realmB)?.value).toBe("svc");
+
+    system.disposeRealm(realmA);
+    expect(system.committedFor(svc, realmA)).toBeUndefined();
+    expect(system.committedFor(svc, realmB)?.value).toBe("svc");
+
+    system.notify([svc], realmB);
+    await system.drain();
+    await Promise.all([providerA.remove(), providerB.remove()]);
+    expect(system.fibers.size).toBe(0);
+  });
+
+  test("realm churn：反复创建/回收不残留 committed binding，兄弟 realm 稳定", async () => {
+    const system = new FiberSystem();
+    const stableRealm = Symbol("fiber-realm-stable");
+    const stable = system.create(spec({ uid: "t13-stable", provide: [dep], realm: stableRealm }));
+    await stable.refresh();
+
+    for (let index = 0; index < 12; index += 1) {
+      const realm = Symbol(`fiber-realm-churn-${index}`);
+      const provider = system.create(spec({ uid: `t13-churn-${index}`, provide: [svc], realm }));
+      await provider.refresh();
+      expect(system.committedFor(svc, realm)?.value).toBe("svc");
+      system.disposeRealm(realm);
+      await provider.remove();
+      expect(system.committedFor(svc, realm)).toBeUndefined();
+      expect(system.committedFor(dep, stableRealm)?.value).toBe("dep");
+    }
+    await stable.remove();
+    expect(system.fibers.size).toBe(0);
+  });
+});
+
 describe("Fiber 六态状态机", () => {
   test("初始状态为 PENDING", () => {
     const system = new FiberSystem();

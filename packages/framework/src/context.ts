@@ -171,6 +171,8 @@ export interface ContextFiber {
 /** facade 统一上下文：cordis 的 effect/coeffect/fiber 语义的单一入口。 */
 export interface Context extends FiberContext {
   readonly uid: string;
+  /** 本 context 绑定的隔离域；派生 realm 与根/兄弟 realm 身份不同。 */
+  readonly realm: symbol;
   use<P>(component: Component<P>, config?: P): ContextFiber;
   on(name: string, listener: (payload: unknown) => void): Disposer;
   emit(name: string, payload?: unknown): void;
@@ -184,7 +186,14 @@ interface Internals {
   readonly host: EffectHost;
   readonly node: ReflectNode;
   readonly system: FiberSystem;
+  /** 每个 context 独立持有 pending/资源/子 context，撤销子树时不误伤兄弟 realm。 */
   readonly pending: Set<Promise<unknown>>;
+  readonly resources: Set<Disposer>;
+  readonly children: Set<Internals>;
+  readonly parent?: Internals;
+  disposed: boolean;
+  /** 拥有独立 realm：仅 root 与 isolate 派生为真；intercept/fiber 与父共享 realm。 */
+  readonly ownsRealm: boolean;
   /** 事件监听器按 realm 分桶：事件名 → realm → 监听器集合，避免派生 context 共享监听表。 */
   readonly listeners: Map<string, Map<symbol, Set<(payload: unknown) => void>>>;
   readonly intercepted: Map<symbol, unknown>;
@@ -205,18 +214,77 @@ function track(internals: Internals, promise: Promise<unknown>): void {
   void promise.then(forget, forget);
 }
 
+async function settle(run: () => unknown | Promise<unknown>): Promise<PromiseSettledResult<unknown>> {
+  try {
+    return { status: "fulfilled", value: await run() };
+  } catch (reason) {
+    return { status: "rejected", reason };
+  }
+}
+
+/** 逆操作统一从子到父：子 realm 的 host/资源先回收，父 realm 不受兄弟撤销影响。 */
+async function disposeInternals(internals: Internals): Promise<void> {
+  if (internals.disposed) return;
+  internals.disposed = true;
+  const results: PromiseSettledResult<unknown>[] = [];
+
+  for (const child of [...internals.children].reverse()) results.push(await settle(() => disposeInternals(child)));
+  internals.children.clear();
+  for (const dispose of [...internals.resources].reverse()) {
+    internals.resources.delete(dispose);
+    results.push(await settle(dispose));
+  }
+
+  // 只有拥有独立 realm 的 context 才回收该 realm 的 fiber；intercept 与父共享 realm，
+  // 单独 dispose 它不能顺带卸掉父/兄弟的 fiber。
+  const fibers = internals.ownsRealm
+    ? [...internals.system.fibers.values()].filter(
+        (fiber) => internals.node.parent === null || fiber.realm === internals.realm
+      )
+    : [];
+  for (const fiber of fibers) results.push(await settle(() => fiber.remove()));
+  results.push(await settle(() => internals.host.dispose()));
+
+  for (const realms of internals.listeners.values()) realms.delete(internals.realm);
+  if (internals.ownsRealm) internals.system.disposeRealm(internals.realm);
+  internals.pending.clear();
+  internals.parent?.children.delete(internals);
+
+  const errors = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .flatMap((result) =>
+      result.reason instanceof AggregateError ? result.reason.errors : [result.reason]
+    );
+  if (errors.length > 0) throw new AggregateError(errors, "context dispose teardown 失败");
+}
+
 function makeContext(
   base: Internals,
   node: ReflectNode = base.node,
   realm = base.realm,
-  owner?: Fiber
+  owner?: Fiber,
+  attach = false,
+  ownsRealm?: boolean
 ): Context {
   const host = owner?.host ?? (
     node === base.node && realm === base.realm
       ? base.host
       : createEffectHost(`${base.host.uid}:ctx:${++base.uidSeed.value}`, base.observer)
   );
-  const internals: Internals = { ...base, host, node, realm, owner };
+  const internals: Internals = {
+    ...base,
+    host,
+    node,
+    realm,
+    owner,
+    pending: new Set(),
+    resources: new Set(),
+    children: new Set(),
+    disposed: false,
+    ownsRealm: ownsRealm ?? base.ownsRealm,
+    ...(attach ? { parent: base } : {}),
+  };
+  if (attach) base.children.add(internals);
 
   const effect = (callback: EffectCallback, label?: string): Disposer =>
     runEffect(internals.host, () => callback(context), label);
@@ -250,13 +318,16 @@ function makeContext(
     const ready = fiber.refresh();
     track(internals, ready);
     let armed = true;
-    return () => {
+    const dispose: Disposer = () => {
       if (!armed) return;
       armed = false;
+      internals.resources.delete(dispose);
       releaseValue();
       void fiber.remove();
       if (!keepTombstone) internals.system.forget(key, realm);
     };
+    internals.resources.add(dispose);
+    return dispose;
   };
 
   const provide = <T>(key: CoeffectKey<T>, value: T, options?: ProvideOptions): Disposer =>
@@ -266,14 +337,14 @@ function makeContext(
 
   const isolate = <T>(key: CoeffectKey<T>, realm?: symbol): FiberContext => {
     const nextRealm = realm ?? Symbol(key.symbol.description ?? key.name);
-    return makeContext(internals, reflectIsolate(internals.node, key, nextRealm), nextRealm);
+    return makeContext(internals, reflectIsolate(internals.node, key, nextRealm), nextRealm, undefined, true, true);
   };
 
   const intercept = <T>(key: CoeffectKey<T>, metadata: unknown): FiberContext => {
     internals.intercepted.set(key.symbol, metadata);
     const transform: (value: unknown) => unknown =
       typeof metadata === "function" ? (metadata as (value: unknown) => unknown) : (value) => value;
-    return makeContext(internals, reflectIntercept(internals.node, key, transform), realm);
+    return makeContext(internals, reflectIntercept(internals.node, key, transform), realm, undefined, true, false);
   };
 
   const use = <P>(component: Component<P>, config?: P): ContextFiber => {
@@ -356,26 +427,11 @@ function makeContext(
     await internals.system.drain();
   };
 
-  const dispose: Disposer = async () => {
-    const fibers = [...internals.system.fibers.values()].filter(
-      (fiber) => internals.node.parent === null || fiber.realm === realm
-    );
-    const results = await Promise.allSettled([
-      ...fibers.map((fiber) => fiber.remove()),
-      internals.host.dispose(),
-    ]);
-    for (const realms of internals.listeners.values()) realms.delete(internals.realm);
-    internals.pending.clear();
-    const errors = results
-      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-      .flatMap((result) =>
-        result.reason instanceof AggregateError ? result.reason.errors : [result.reason]
-      );
-    if (errors.length > 0) throw new AggregateError(errors, "context dispose teardown 失败");
-  };
+  const dispose: Disposer = () => disposeInternals(internals);
 
   const context: Context = {
     uid: internals.host.uid,
+    realm,
     effect,
     get,
     set,
@@ -395,9 +451,12 @@ function makeContext(
 let contextSeed = 0;
 
 /** 创建一个可装配的运行时上下文（facade 唯一入口）。 */
-export function createContext(options: { uid?: string; observer?: EffectObserver } = {}): Context {
+export function createContext(
+  options: { uid?: string; observer?: EffectObserver; realm?: symbol } = {}
+): Context {
   const uid = options.uid ?? `ctx:${++contextSeed}`;
-  const realm = Symbol(`realm:${uid}`);
+  // 外部身份系统（principal resolver）可绑定稳定 realm；缺省仍按 uid 生成。
+  const realm = options.realm ?? Symbol(`realm:${uid}`);
   const node = createNode(uid, null, []);
   const system = new FiberSystem(options.observer);
   bindRealm(node, realm);
@@ -407,6 +466,10 @@ export function createContext(options: { uid?: string; observer?: EffectObserver
     node,
     system,
     pending: new Set(),
+    resources: new Set(),
+    children: new Set(),
+    disposed: false,
+    ownsRealm: true,
     listeners: new Map(),
     intercepted: new Map(),
     realm,
