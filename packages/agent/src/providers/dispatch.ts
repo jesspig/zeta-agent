@@ -4,6 +4,8 @@ import { MODELS, PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
 import { createOpenAiStreamFn } from "./openai";
 import { createOpenAiResponsesStreamFn } from "./openai-responses";
+import { doneChunk, errorChunk, httpError } from "./protocol";
+import { withProviderRetry, type ProviderRetryOptions } from "./retry";
 
 export interface ProviderConfig {
   /** provider id（如 openai / anthropic / groq）。 */
@@ -21,6 +23,8 @@ export interface ProviderConfig {
    */
   readonly credentialVault?: CredentialVault;
   readonly secretBroker?: SecretBroker;
+  /** 显式启用时在输出前按中央策略重试；缺省保持既有单次请求行为。 */
+  readonly retry?: ProviderRetryOptions | false;
 }
 
 interface ProviderInfo {
@@ -140,71 +144,90 @@ function toAnthropicTools(tools: AgentStreamRequest["tools"]): unknown[] | undef
 interface AnthropicEvent {
   readonly type?: string;
   readonly index?: number;
+  readonly message?: { readonly id?: string; readonly usage?: unknown };
+  readonly usage?: unknown;
+  readonly error?: { readonly type?: string };
   readonly content_block?: { readonly type?: string; readonly id?: string; readonly name?: string };
   readonly delta?: {
     readonly type?: string;
     readonly text?: string;
     readonly thinking?: string;
     readonly partial_json?: string;
+    readonly stop_reason?: string;
   };
 }
 
-async function* parseAnthropicSse(body: ReadableStream<Uint8Array>): AsyncIterableIterator<AgentStreamChunk> {
+async function* parseAnthropicSse(body: ReadableStream<Uint8Array>, startedAt: number): AsyncIterableIterator<AgentStreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let responseId: string | undefined;
+  let usage: unknown;
+  let stopReason = "stop";
   const blocks = new Map<number, { id?: string; name: string; json: string }>();
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (payload.length === 0) continue;
-        let event: AnthropicEvent;
-        try {
-          event = JSON.parse(payload) as AnthropicEvent;
-        } catch {
-          continue;
-        }
-        if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
-          blocks.set(event.index ?? blocks.size, {
-            id: event.content_block.id,
-            name: event.content_block.name ?? "",
-            json: "",
-          });
-          continue;
-        }
-        if (event.type === "content_block_delta") {
-          const delta = event.delta;
-          if (delta?.type === "text_delta" && typeof delta.text === "string") {
-            yield delta.text;
-          } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
-            yield { type: "reasoning", text: delta.thinking };
-          } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
-            const block = blocks.get(event.index ?? 0);
-            if (block !== undefined) block.json += delta.partial_json;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload.length === 0) continue;
+          let event: AnthropicEvent;
+          try {
+            event = JSON.parse(payload) as AnthropicEvent;
+          } catch {
+            continue;
           }
-        }
-        if (event.type === "content_block_stop") {
-          const block = blocks.get(event.index ?? 0);
-          if (block !== undefined && block.name.length > 0) {
-            yield { type: "tool_call", id: block.id, name: block.name, arguments: block.json };
-            blocks.delete(event.index ?? 0);
+          if (event.type === "message_start") {
+            if (typeof event.message?.id === "string") responseId = event.message.id;
+            if (event.message?.usage !== undefined) usage = event.message.usage;
+          } else if (event.type === "message_delta") {
+            if (event.usage !== undefined) usage = { ...(typeof usage === "object" && usage !== null ? usage : {}), ...event.usage };
+            if (typeof event.delta?.stop_reason === "string") stopReason = event.delta.stop_reason;
+          } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+            blocks.set(event.index ?? blocks.size, { id: event.content_block.id, name: event.content_block.name ?? "", json: "" });
+          } else if (event.type === "content_block_delta") {
+            const delta = event.delta;
+            if (delta?.type === "text_delta" && typeof delta.text === "string") yield delta.text;
+            else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") yield { type: "reasoning", text: delta.thinking };
+            else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+              const block = blocks.get(event.index ?? 0);
+              if (block !== undefined) block.json += delta.partial_json;
+            }
+          } else if (event.type === "content_block_stop") {
+            const block = blocks.get(event.index ?? 0);
+            if (block !== undefined && block.name.length > 0) {
+              yield { type: "tool_call", id: block.id, name: block.name, arguments: block.json };
+              blocks.delete(event.index ?? 0);
+            }
+          } else if (event.type === "error") {
+            yield errorChunk({ code: event.error?.type ?? "unknown", message: `ANTHROPIC_ERROR ${event.error?.type ?? "unknown"}`, provider: "anthropic", responseId });
+            return;
+          } else if (event.type === "message_stop") {
+            yield doneChunk(stopReason === "max_tokens" ? "length" : stopReason === "end_turn" || stopReason === "stop_sequence" ? "stop" : "error", { usage, responseId, startedAt });
+            return;
           }
         }
       }
     }
+    yield doneChunk(stopReason === "max_tokens" ? "length" : "stop", { usage, responseId, startedAt });
+  } finally {
+    reader.releaseLock();
   }
 }
 
 interface GoogleEvent {
+  readonly responseId?: string;
+  readonly usageMetadata?: unknown;
+  readonly promptFeedback?: { readonly blockReason?: string };
   readonly candidates?: readonly {
+    readonly finishReason?: string;
     readonly content?: {
       readonly parts?: readonly {
         readonly text?: string;
@@ -215,56 +238,63 @@ interface GoogleEvent {
   }[];
 }
 
-async function* parseGoogleSse(body: ReadableStream<Uint8Array>): AsyncIterableIterator<AgentStreamChunk> {
+async function* parseGoogleSse(
+  body: ReadableStream<Uint8Array>,
+  startedAt: number,
+): AsyncIterableIterator<AgentStreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (payload.length === 0) continue;
-        let event: GoogleEvent;
-        try {
-          event = JSON.parse(payload) as GoogleEvent;
-        } catch {
-          continue;
-        }
-        for (const candidate of event.candidates ?? []) {
-          for (const part of candidate.content?.parts ?? []) {
-            if (typeof part.text === "string" && part.text.length > 0) {
-              yield part.thought === true ? { type: "reasoning", text: part.text } : part.text;
-            }
-            if (part.functionCall !== undefined && typeof part.functionCall.name === "string") {
-              yield {
-                type: "tool_call",
-                name: part.functionCall.name,
-                arguments: JSON.stringify(part.functionCall.args ?? {}),
-              };
+  let responseId: string | undefined;
+  let usage: unknown;
+  let finishReason: string | undefined;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload.length === 0) continue;
+          let event: GoogleEvent;
+          try {
+            event = JSON.parse(payload) as GoogleEvent;
+          } catch {
+            continue;
+          }
+          responseId = event.responseId ?? responseId;
+          usage = event.usageMetadata ?? usage;
+          for (const candidate of event.candidates ?? []) {
+            finishReason = candidate.finishReason ?? finishReason;
+            for (const part of candidate.content?.parts ?? []) {
+              if (typeof part.text === "string" && part.text.length > 0) {
+                yield part.thought === true ? { type: "reasoning", text: part.text } : part.text;
+              }
+              if (part.functionCall !== undefined && typeof part.functionCall.name === "string") {
+                yield {
+                  type: "tool_call",
+                  name: part.functionCall.name,
+                  arguments: JSON.stringify(part.functionCall.args ?? {}),
+                };
+              }
             }
           }
         }
       }
     }
+    const stopReason = finishReason === "MAX_TOKENS"
+      ? "length"
+      : finishReason === "STOP" || finishReason === undefined
+        ? "stop"
+        : "error";
+    yield doneChunk(stopReason, { usage, responseId, startedAt });
+  } finally {
+    reader.releaseLock();
   }
-}
-
-function httpError(status: number, provider: string): Error {
-  const hint =
-    status === 401
-      ? "请检查 API key 环境变量"
-      : status === 429
-        ? "请求被限流或额度不足，请稍后重试"
-        : status === 404
-          ? "请检查 baseUrl 与 model"
-          : "";
-  return new Error(`${provider.toUpperCase()}_HTTP_${status}${hint ? ` (${hint})` : ""}`);
 }
 
 export function createProviderStreamFn(
@@ -307,19 +337,18 @@ export function createProviderStreamFn(
     apiKey = resolveApiKey(config.provider, config.apiKey);
   }
 
+  let stream: AgentStreamFn;
   if (info.api === "openai-responses") {
     // OpenAI Responses API：/responses + instructions/input。
-    return createOpenAiResponsesStreamFn({ baseUrl, apiKey, model: modelName }, boundaryFetch);
-  }
-  if (info.api !== "anthropic-messages" && info.api !== "google-generate") {
+    stream = createOpenAiResponsesStreamFn({ baseUrl, apiKey, model: modelName }, boundaryFetch);
+  } else if (info.api !== "anthropic-messages" && info.api !== "google-generate") {
     // openai-chat 与 bedrock-invoke 均通过 OpenAI 兼容 SSE 网关对接。
-    return createOpenAiStreamFn({ baseUrl, apiKey, model: modelName }, boundaryFetch);
-  }
-
-  return async function* (request: AgentStreamRequest) {
-    let url: string;
-    let init: RequestInit;
-    let parse: (body: ReadableStream<Uint8Array>) => AsyncIterableIterator<AgentStreamChunk>;
+    stream = createOpenAiStreamFn({ baseUrl, apiKey, model: modelName }, boundaryFetch);
+  } else {
+    stream = async function* (request: AgentStreamRequest) {
+      let url: string;
+      let init: RequestInit;
+      let parse: (body: ReadableStream<Uint8Array>, startedAt: number) => AsyncIterableIterator<AgentStreamChunk>;
 
     if (info.api === "anthropic-messages") {
       url = `${baseUrl}/messages`;
@@ -399,12 +428,23 @@ export function createProviderStreamFn(
       parse = parseGoogleSse;
     }
 
+    const startedAt = Date.now();
     const response = await boundaryFetch(url, {
       ...init,
       ...(request.signal !== undefined ? { signal: request.signal } : {}),
     });
-    if (!response.ok) throw httpError(response.status, config.provider);
-    if (response.body === null) throw new Error(`${config.provider.toUpperCase()}_NO_BODY`);
-    yield* parse(response.body);
-  };
+    if (!response.ok) {
+      yield errorChunk(httpError(config.provider, response));
+      return;
+    }
+    if (response.body === null) {
+      yield errorChunk({ code: "invalid_response", message: `${config.provider.toUpperCase()}_NO_BODY`, provider: config.provider });
+      return;
+    }
+    yield* parse(response.body, startedAt);
+    };
+  }
+  return config.retry === undefined || config.retry === false
+    ? stream
+    : withProviderRetry(stream, config.retry);
 }

@@ -23,7 +23,7 @@ function harness() {
     order.push(event.type);
   });
   const inbox = createInbox();
-  inbox.followUp(userMessage);
+  inbox.steer(userMessage);
   return { stream, order, inbox };
 }
 

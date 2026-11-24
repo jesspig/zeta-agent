@@ -29,6 +29,7 @@ export interface ToolResultMessage extends AgentMessage {
 
 export type AgentEvent =
   | { readonly type: "agent_start" }
+  /** messages 仅包含本次 run 新增消息；完整 transcript 始终由 state.messages 持有。 */
   | { readonly type: "agent_end"; readonly messages: readonly AgentMessage[] }
   | { readonly type: "turn_start" }
   | { readonly type: "turn_end"; readonly message: AgentMessage; readonly toolResults: readonly ToolResultMessage[] }
@@ -76,8 +77,8 @@ export function reduceState(state: AgentState, event: AgentEvent): AgentState {
     case "agent_start":
       return { ...state, isStreaming: false, streamingMessage: undefined, pendingToolCalls: new Set<string>(), errorMessage: undefined };
     case "agent_end":
-      // 运行已终止：清空本运行的待处理工具，避免监听器失败后永久 pending。
-      return { ...state, messages: [...event.messages], isStreaming: false, streamingMessage: undefined, pendingToolCalls: new Set<string>() };
+      // 运行已终止：清空本运行的待处理工具；newMessages 不替换已归约的 transcript。
+      return { ...state, isStreaming: false, streamingMessage: undefined, pendingToolCalls: new Set<string>() };
     case "turn_start":
       return { ...state, isStreaming: false, streamingMessage: undefined };
     case "turn_end":
@@ -112,7 +113,7 @@ export type AgentListener = (event: AgentEvent, signal?: AbortSignal) => void | 
 export interface EventStream {
   getState(): AgentState;
   subscribe(listener: AgentListener): () => void;
-  emit(event: AgentEvent): Promise<void>;
+  emit(event: AgentEvent, signal?: AbortSignal): Promise<void>;
   waitForIdle(): Promise<void>;
   /** 清空状态与在途等待，保留订阅者，供新建会话使用。 */
   reset(): void;
@@ -130,8 +131,8 @@ export function createEventStream(initial: AgentState = createInitialState()): E
     for (const resolve of idleWaiters.splice(0)) resolve();
   }
 
-  async function dispatch(event: AgentEvent): Promise<void> {
-    for (const listener of [...listeners]) await listener(event);
+  async function dispatch(event: AgentEvent, signal?: AbortSignal): Promise<void> {
+    for (const listener of [...listeners]) await listener(event, signal);
   }
 
   return {
@@ -142,9 +143,9 @@ export function createEventStream(initial: AgentState = createInitialState()): E
         listeners = listeners.filter((item) => item !== listener);
       };
     },
-    emit(event) {
+    emit(event, signal) {
       state = reduceState(state, event);
-      const pending = dispatch(event);
+      const pending = dispatch(event, signal);
       inFlight.add(pending);
       void pending.then(
         () => {

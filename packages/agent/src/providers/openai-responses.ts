@@ -1,4 +1,5 @@
 import type { AgentMessage, AgentStreamChunk, AgentStreamFn, AgentStreamRequest, AgentToolSchema } from "../facade";
+import { doneChunk, errorChunk, httpError } from "./protocol";
 
 export interface OpenAiResponsesConfig {
   readonly baseUrl: string;
@@ -19,7 +20,10 @@ interface ResponsesEvent {
     readonly arguments?: string;
   };
   readonly response?: {
+    readonly id?: string;
     readonly status?: string;
+    readonly usage?: unknown;
+    readonly incomplete_details?: { readonly reason?: string };
     readonly error?: { readonly code?: string; readonly message?: string };
   };
   readonly code?: string;
@@ -90,7 +94,7 @@ function toResponsesInput(messages: readonly AgentMessage[]): readonly Record<st
   return input;
 }
 
-async function* parseResponsesSse(body: ReadableStream<Uint8Array>): AsyncIterableIterator<AgentStreamChunk> {
+async function* parseResponsesSse(body: ReadableStream<Uint8Array>, startedAt: number): AsyncIterableIterator<AgentStreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -99,80 +103,79 @@ async function* parseResponsesSse(body: ReadableStream<Uint8Array>): AsyncIterab
   const pendingCalls: AgentStreamChunk[] = [];
   let completed = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (payload.length === 0 || payload === "[DONE]") continue;
-        let event: ResponsesEvent;
-        try {
-          event = JSON.parse(payload) as ResponsesEvent;
-        } catch {
-          continue;
-        }
-        if (event.type === "response.output_item.added" && event.item?.type === "function_call") {
-          slots.set(event.output_index ?? slots.size, {
-            type: "function_call",
-            callId: event.item.call_id ?? event.item.id ?? "call-1",
-            name: event.item.name ?? "",
-            args: event.item.arguments ?? "",
-          });
-        } else if (
-          event.type === "response.reasoning_summary_text.delta" ||
-          event.type === "response.reasoning_text.delta"
-        ) {
-          if (typeof event.delta === "string" && event.delta.length > 0) {
-            yield { type: "reasoning", text: event.delta };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload.length === 0 || payload === "[DONE]") continue;
+          let event: ResponsesEvent;
+          try {
+            event = JSON.parse(payload) as ResponsesEvent;
+          } catch {
+            continue;
           }
-        } else if (event.type === "response.output_text.delta") {
-          if (typeof event.delta === "string" && event.delta.length > 0) yield event.delta;
-        } else if (event.type === "response.function_call_arguments.delta") {
-          const slot = slots.get(event.output_index ?? 0);
-          if (slot !== undefined && typeof event.delta === "string") slot.args += event.delta;
-        } else if (event.type === "response.function_call_arguments.done") {
-          const slot = slots.get(event.output_index ?? 0);
-          if (slot !== undefined && typeof event.arguments === "string") slot.args = event.arguments;
-        } else if (event.type === "response.output_item.done") {
-          const slot = slots.get(event.output_index ?? 0);
-          if (slot !== undefined && slot.type === "function_call") {
-            const args = event.item?.arguments;
-            pendingCalls.push({
-              type: "tool_call",
-              id: slot.callId,
-              name: slot.name,
-              arguments: typeof args === "string" && args.length > 0 ? args : slot.args,
+          if (event.type === "response.output_item.added" && event.item?.type === "function_call") {
+            slots.set(event.output_index ?? slots.size, {
+              type: "function_call",
+              callId: event.item.call_id ?? event.item.id ?? "call-1",
+              name: event.item.name ?? "",
+              args: event.item.arguments ?? "",
             });
-            slots.delete(event.output_index ?? 0);
+          } else if (event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta") {
+            if (typeof event.delta === "string" && event.delta.length > 0) yield { type: "reasoning", text: event.delta };
+          } else if (event.type === "response.output_text.delta") {
+            if (typeof event.delta === "string" && event.delta.length > 0) yield event.delta;
+          } else if (event.type === "response.function_call_arguments.delta") {
+            const slot = slots.get(event.output_index ?? 0);
+            if (slot !== undefined && typeof event.delta === "string") slot.args += event.delta;
+          } else if (event.type === "response.function_call_arguments.done") {
+            const slot = slots.get(event.output_index ?? 0);
+            if (slot !== undefined && typeof event.arguments === "string") slot.args = event.arguments;
+          } else if (event.type === "response.output_item.done") {
+            const slot = slots.get(event.output_index ?? 0);
+            if (slot !== undefined && slot.type === "function_call") {
+              const args = event.item?.arguments;
+              pendingCalls.push({
+                type: "tool_call",
+                id: slot.callId,
+                name: slot.name,
+                arguments: typeof args === "string" && args.length > 0 ? args : slot.args,
+              });
+              slots.delete(event.output_index ?? 0);
+            }
+          } else if (event.type === "response.completed") {
+            completed = true;
+            for (const call of pendingCalls) yield call;
+            for (const slot of slots.values()) {
+              if (slot.name.length === 0) continue;
+              yield { type: "tool_call", id: slot.callId, name: slot.name, arguments: slot.args };
+            }
+            yield doneChunk("stop", { usage: event.response?.usage, responseId: event.response?.id, startedAt });
+            return;
+          } else if (event.type === "response.incomplete") {
+            yield doneChunk("length", { usage: event.response?.usage, responseId: event.response?.id, startedAt });
+            return;
+          } else if (event.type === "error") {
+            yield errorChunk({ code: event.code ?? "unknown", message: `OPENAI_RESPONSES_ERROR ${event.code ?? "unknown"}`, provider: "openai-responses" });
+            return;
+          } else if (event.type === "response.failed") {
+            const error = event.response?.error;
+            yield errorChunk({ code: error?.code ?? "unknown", message: `OPENAI_RESPONSES_FAILED ${error?.code ?? "unknown"}`, provider: "openai-responses", responseId: event.response?.id });
+            return;
           }
-        } else if (event.type === "response.completed") {
-          completed = true;
-        } else if (event.type === "response.incomplete") {
-          // 未完成：不得交付任何工具调用。
-          throw new Error("OPENAI_RESPONSES_INCOMPLETE: 响应未完成，未提交工具调用");
-        } else if (event.type === "error") {
-          // 只保留允许的分类码；上游 message 原文不进入会话可见输出。
-          throw new Error(`OPENAI_RESPONSES_ERROR ${event.code ?? "unknown"}`);
-        } else if (event.type === "response.failed") {
-          const error = event.response?.error;
-          throw new Error(`OPENAI_RESPONSES_FAILED ${error?.code ?? "unknown"}`);
         }
       }
     }
-  }
-  if (!completed) {
-    // 裸 EOF 或 [DONE] 而未收到成功终态：不交付待定工具调用，作为失败上抛。
-    throw new Error("OPENAI_RESPONSES_NO_COMPLETION: 未收到成功终态，未提交工具调用");
-  }
-  for (const call of pendingCalls) yield call;
-  for (const slot of slots.values()) {
-    if (slot.name.length === 0) continue;
-    yield { type: "tool_call", id: slot.callId, name: slot.name, arguments: slot.args };
+    if (!completed) yield errorChunk({ code: "no_completion", message: "OPENAI_RESPONSES_NO_COMPLETION", provider: "openai-responses" });
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -182,6 +185,7 @@ export function createOpenAiResponsesStreamFn(
   fetchImpl: typeof fetch = fetch
 ): AgentStreamFn {
   return async function* (request: AgentStreamRequest) {
+    const startedAt = Date.now();
     const url = `${config.baseUrl.replace(/\/+$/, "")}/responses`;
     const instructions = request.messages
       .filter((message) => message.role === "system")
@@ -208,17 +212,13 @@ export function createOpenAiResponsesStreamFn(
       ...(request.signal !== undefined ? { signal: request.signal } : {}),
     });
     if (!response.ok) {
-      const hint =
-        response.status === 401
-          ? "请检查 ZETA_API_KEY"
-          : response.status === 429
-            ? "请求被限流或额度不足，请稍后重试"
-            : response.status === 404
-              ? "请检查 ZETA_BASE_URL 与 ZETA_MODEL"
-              : "";
-      throw new Error(`OPENAI_RESPONSES_HTTP_${response.status}${hint ? ` (${hint})` : ""}`);
+      yield errorChunk({ ...httpError("openai-responses", response), message: `OPENAI_RESPONSES_HTTP_${response.status}` });
+      return;
     }
-    if (response.body === null) throw new Error("OPENAI_RESPONSES_NO_BODY");
-    yield* parseResponsesSse(response.body);
+    if (response.body === null) {
+      yield errorChunk({ code: "no_body", message: "OPENAI_RESPONSES_NO_BODY", provider: "openai-responses" });
+      return;
+    }
+    yield* parseResponsesSse(response.body, startedAt);
   };
 }

@@ -27,6 +27,11 @@ async function collect(iterable: AsyncIterable<AgentStreamChunk>): Promise<Agent
   return out;
 }
 
+function lastErrorMessage(chunks: readonly AgentStreamChunk[]): string {
+  const last = chunks.at(-1);
+  return typeof last === "object" && last.type === "error" ? last.error.message : "";
+}
+
 describe("OpenAI Responses 适配器", () => {
   test("POST /responses，instructions 与 input 分离，工具 schema 为 function 形态", async () => {
     let captured: { url?: string; init?: RequestInit } = {};
@@ -40,7 +45,8 @@ describe("OpenAI Responses 适配器", () => {
     const out = await collect(
       createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1/", apiKey: "dummy", model: "gpt-4o" }, fakeFetch)(request)
     );
-    expect(out).toEqual(["ok"]);
+    expect(out.slice(0, -1)).toEqual(["ok"]);
+    expect(out.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
     expect(captured.url).toBe("https://api.openai.com/v1/responses");
     const headers = new Headers(captured.init?.headers);
     expect(headers.get("Authorization")).toBe("Bearer dummy");
@@ -65,7 +71,8 @@ describe("OpenAI Responses 适配器", () => {
     const out = await collect(
       createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "dummy", model: "gpt-4o" }, fakeFetch)(request)
     );
-    expect(out).toEqual([{ type: "reasoning", text: "think" }, "hel", "lo"]);
+    expect(out.slice(0, -1)).toEqual([{ type: "reasoning", text: "think" }, "hel", "lo"]);
+    expect(out.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
   });
 
   test("解析 function_call：增量参数在 output_item.done 汇成 tool_call", async () => {
@@ -94,37 +101,28 @@ describe("OpenAI Responses 适配器", () => {
     const out = await collect(
       createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "dummy", model: "gpt-4o" }, fakeFetch)(req)
     );
-    expect(out).toEqual([{ type: "tool_call", id: "fc_x", name: "write", arguments: '{"a":1}' }]);
+    expect(out.slice(0, -1)).toEqual([{ type: "tool_call", id: "fc_x", name: "write", arguments: '{"a":1}' }]);
+    expect(out.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
     const body = JSON.parse(String(captured.init?.body));
     expect(body.input).toContainEqual({ type: "function_call", call_id: "fc_1", name: "read", arguments: '{"path":"/a"}' });
     expect(body.input).toContainEqual({ type: "function_call_output", call_id: "fc_1", output: "content" });
   });
 
-  test("error 事件与非 2xx 响应抛错且不泄露凭据", async () => {
+  test("error 事件与非 2xx 响应产出 sanitized error chunk 且不泄露凭据", async () => {
     const errFetch = (async () =>
       sse(['data: {"type":"error","code":"rate_limit","message":"slow down"}\n\n'])) as unknown as typeof fetch;
-    let message = "";
-    try {
-      await collect(
-        createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-4o" }, errFetch)(request)
-      );
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain("OPENAI_RESPONSES_ERROR");
-    expect(message).toContain("rate_limit");
-    expect(message).not.toContain("secret");
+    const errChunks = await collect(
+      createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-4o" }, errFetch)(request)
+    );
+    expect(lastErrorMessage(errChunks)).toContain("OPENAI_RESPONSES_ERROR");
+    expect(lastErrorMessage(errChunks)).toContain("rate_limit");
+    expect(JSON.stringify(errChunks)).not.toContain("secret");
 
     const httpFetch = (async () => new Response("denied", { status: 401 })) as unknown as typeof fetch;
-    message = "";
-    try {
-      await collect(
-        createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-4o" }, httpFetch)(request)
-      );
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain("OPENAI_RESPONSES_HTTP_401");
-    expect(message).not.toContain("secret");
+    const httpChunks = await collect(
+      createOpenAiResponsesStreamFn({ baseUrl: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-4o" }, httpFetch)(request)
+    );
+    expect(lastErrorMessage(httpChunks)).toContain("OPENAI_RESPONSES_HTTP_401");
+    expect(JSON.stringify(httpChunks)).not.toContain("secret");
   });
 });

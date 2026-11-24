@@ -93,7 +93,7 @@ describe("T-15 decision union 与 waterfall 拦截", () => {
     });
     const inbox = createInbox();
     const userMessage: AgentMessage = { role: "user", content: "q" };
-    inbox.followUp(userMessage);
+    inbox.steer(userMessage);
 
     const waterfall = createDecisionWaterfall();
     waterfall.add((_decision, next) => next({ kind: "exit", reason: "intercepted" }));

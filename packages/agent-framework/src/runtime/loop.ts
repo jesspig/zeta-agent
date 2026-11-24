@@ -32,6 +32,10 @@ export interface AssistantResult {
   readonly toolCalls: readonly ToolCall[];
   readonly stopReason: "stop" | "length" | "error" | "aborted";
   readonly updates?: readonly AssistantMessageEvent[];
+  readonly usage?: unknown;
+  readonly durationMs?: number;
+  readonly responseId?: string;
+  readonly error?: unknown;
 }
 
 /** 旧 loop 结果形状别名：统一定义见 tools/types。 */
@@ -40,25 +44,27 @@ export type ToolResult = LoopToolResult;
 export interface LastTurn {
   readonly message: AgentMessage;
   readonly toolResults: readonly AgentMessage[];
+  readonly newMessages?: readonly AgentMessage[];
 }
 
 export interface LoopRuntime {
   readonly inbox: Inbox;
-  emit(event: AgentEvent): Promise<void> | void;
+  readonly signal?: AbortSignal;
+  emit(event: AgentEvent, signal?: AbortSignal): Promise<void> | void;
   getState(): AgentState;
-  prepareNextTurn?(lastTurn: LastTurn | undefined): void;
+  prepareNextTurn?(lastTurn: LastTurn | undefined, signal?: AbortSignal): unknown | Promise<unknown>;
   /** 工具声明 delta：返回 system 消息或 delta 对象，由 loop 统一 emit。 */
-  declareToolChanges?(): readonly AgentMessage[] | ToolDeclarationDelta | void;
-  prepareRequest?(request: unknown): unknown;
-  streamAssistant(request: unknown, onPartial?: (message: AgentMessage) => void | Promise<void>): Promise<AssistantResult>;
-  executeToolCalls?(calls: readonly ToolCall[]): Promise<readonly ToolResult[]>;
+  declareToolChanges?(signal?: AbortSignal): readonly AgentMessage[] | ToolDeclarationDelta | void | Promise<readonly AgentMessage[] | ToolDeclarationDelta | void>;
+  prepareRequest?(request: unknown, signal?: AbortSignal): unknown | Promise<unknown>;
+  streamAssistant(request: unknown, onPartial?: (message: AgentMessage, signal?: AbortSignal) => void | Promise<void>, signal?: AbortSignal): Promise<AssistantResult>;
+  executeToolCalls?(calls: readonly ToolCall[], signal?: AbortSignal): Promise<readonly ToolResult[]>;
   /** 提供时由统一 prepare/execute/finalize 管线执行工具，否则沿用 executeToolCalls。 */
   toolPipeline?: ToolPipeline;
-  finishTurn?(turn: LastTurn): LoopDecision | undefined;
+  finishTurn?(turn: LastTurn, signal?: AbortSignal): LoopDecision | undefined | void | Promise<LoopDecision | undefined | void>;
   decide?(state: AgentState, turn: LastTurn): LoopDecision;
   decision?(state: AgentState, turn: LastTurn): AgentDecision;
   waterfall?: DecisionWaterfall;
-  pollFollowUp?(): readonly AgentMessage[];
+  pollFollowUp?(signal?: AbortSignal): readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
   /** 兼容开关：文本工具标记由上层可选解析，统一管线本身不依赖该协议。 */
   readonly allowTextToolMarkers?: boolean;
   /** 仅测试可见：按进入顺序记录 11 步流水线阶段，用于校验真实执行顺序。 */
@@ -82,22 +88,22 @@ export const RUN_LOOP_STEPS = [
 async function resolveAction(
   runtime: LoopRuntime,
   turn: LastTurn,
-  toolCallCount: number
+  toolCallCount: number,
+  signal?: AbortSignal
 ): Promise<"continue" | "end"> {
-  const legacy = runtime.finishTurn?.(turn);
-  if (legacy) return legacy.action;
+  const legacy = await runtime.finishTurn?.(turn, signal);
+  if (legacy !== undefined) return legacy.action;
   const legacyDecision = runtime.decide?.(runtime.getState(), turn);
-  if (legacyDecision) return legacyDecision.action;
-  if (runtime.decision || runtime.waterfall) {
+  if (legacyDecision !== undefined) return legacyDecision.action;
+  if (runtime.decision !== undefined || runtime.waterfall !== undefined) {
     const state = runtime.getState();
     const initial = runtime.decision?.(state, turn) ?? nextAction(state);
     const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
     let decided: AgentDecision = initial;
-    if (runtime.waterfall) {
+    if (runtime.waterfall !== undefined) {
       try {
         decided = await runtime.waterfall.run(initial, { state, event });
       } catch {
-        // 归一化：hook 抛错不致命，回退到依据当前状态计算的安全决策。
         decided = nextAction(state);
       }
     }
@@ -106,159 +112,189 @@ async function resolveAction(
   return toolCallCount > 0 ? "continue" : "end";
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
-  const { inbox, emit } = runtime;
+  const { inbox, signal } = runtime;
+  const initialMessageCount = runtime.getState().messages.length;
   let lastTurn: LastTurn | undefined;
   let explicitContinuation = false;
   let ended = false;
+  let enterInner = true;
+  let hasMoreToolCalls = false;
+  let pending: readonly InboxMessage[] = inbox.poll("nextTurn");
+
+  const emit = async (event: AgentEvent): Promise<void> => {
+    await runtime.emit(event, signal);
+  };
 
   async function emitAgentEnd(): Promise<void> {
     if (ended) return;
     ended = true;
     runtime.onStep?.("emitAgentEnd");
-    await emit({ type: "agent_end", messages: runtime.getState().messages });
+    await emit({ type: "agent_end", messages: runtime.getState().messages.slice(initialMessageCount) });
   }
 
-  // pi 基线：首轮 turn_start 与初始 steering 轮询发生在 runLoop 之前
-  // （runAgentLoop 前置 emit + 进入循环前的 getSteeringMessages）；
-  // step1（prepareNextTurn → 再轮询 steering → turn_start）只在存在
-  // lastCompletedTurn 的后续轮次进入，避免首轮误触发与重复 turn_start。
-  // 首轮不调用 prepareNextTurn：step1 严格只在存在 lastCompletedTurn 的后续轮次进入。
   await emit({ type: "turn_start" });
-  let steering: readonly InboxMessage[] = inbox.poll("nextTurn");
 
   while (true) {
-    if (lastTurn !== undefined) {
-      runtime.onStep?.("prepareNextTurn");
-      runtime.prepareNextTurn?.(lastTurn);
-      steering = inbox.poll("nextTurn");
-      await emit({ type: "turn_start" });
-    }
+    while (enterInner || pending.length > 0 || hasMoreToolCalls) {
+      enterInner = false;
+      if (lastTurn !== undefined) {
+        runtime.onStep?.("prepareNextTurn");
+        await runtime.prepareNextTurn?.(lastTurn, signal);
+        pending = [...pending, ...inbox.poll("nextTurn")];
+        await emit({ type: "turn_start" });
+      }
 
-    runtime.onStep?.("declareToolChanges");
-    const declared = runtime.declareToolChanges?.();
-    if (declared !== undefined) {
-      const deltaMessages = "messages" in declared ? declared.messages : declared;
-      for (const message of deltaMessages) {
+      runtime.onStep?.("declareToolChanges");
+      const declared = await runtime.declareToolChanges?.(signal);
+      if (declared !== undefined) {
+        const deltaMessages = "messages" in declared ? declared.messages : declared;
+        for (const message of deltaMessages) {
+          await emit({ type: "message_start", message });
+          await emit({ type: "message_end", message });
+        }
+      }
+
+      for (const item of pending) {
+        await emit({ type: "message_start", message: item.body });
+        await emit({ type: "message_end", message: item.body });
+      }
+      pending = [];
+
+      runtime.onStep?.("prepareRequest");
+      const request = await runtime.prepareRequest?.({ messages: runtime.getState().messages }, signal)
+        ?? { messages: runtime.getState().messages };
+
+      runtime.onStep?.("streamAssistant");
+      await emit({ type: "message_start", message: { role: "assistant", content: "" } });
+      let response: AssistantResult;
+      try {
+        response = await runtime.streamAssistant(request, async (partial) => {
+          await emit({
+            type: "message_update",
+            message: partial,
+            assistantMessageEvent: { type: "text_delta", delta: partial.content },
+          });
+        }, signal);
+      } catch (error) {
+        response = {
+          message: { role: "assistant", content: `Error: ${errorMessage(error)}` },
+          toolCalls: [],
+          stopReason: "error",
+          error,
+        };
+      }
+      for (const update of response.updates ?? []) {
+        await emit({ type: "message_update", message: response.message, assistantMessageEvent: update });
+      }
+      await emit({ type: "message_end", message: response.message });
+
+      runtime.onStep?.("hardExitCheck");
+      if (response.stopReason === "error" || response.stopReason === "aborted") {
+        const turn: LastTurn = { message: response.message, toolResults: [] };
+        await resolveAction(runtime, turn, 0, signal);
+        await emit({ type: "turn_end", message: response.message, toolResults: [] });
+        await emitAgentEnd();
+        return runtime.getState();
+      }
+
+      runtime.onStep?.("executeToolCalls");
+      const toolCalls = response.toolCalls;
+      let results: readonly ToolResult[] = [];
+      if (toolCalls.length > 0) {
+        if (response.stopReason === "length") {
+          results = toolCalls.map((call) => ({
+            callId: call.id,
+            message: { role: "toolResult", content: "truncated", toolCallId: call.id, toolName: call.name },
+            isError: true,
+          }));
+        } else if (runtime.toolPipeline !== undefined) {
+          const pipelineResults = await runtime.toolPipeline.executeBatch(toolCalls, signal);
+          results = pipelineResults.map((result) => result as ToolResult);
+        } else if (runtime.executeToolCalls !== undefined) {
+          results = await runtime.executeToolCalls(toolCalls, signal);
+        }
+        for (const call of toolCalls) {
+          await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
+        }
+        for (const result of results) {
+          for (const update of result.updates ?? []) {
+            await emit({
+              type: "tool_execution_update",
+              toolCallId: result.callId,
+              toolName: result.tool ?? "",
+              args: {},
+              partialResult: update.partialResult,
+            });
+          }
+          await emit({
+            type: "tool_execution_end",
+            toolCallId: result.callId,
+            toolName: result.tool ?? "",
+            result: result.message.content,
+            isError: result.isError ?? false,
+            ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+          });
+        }
+      }
+
+      runtime.onStep?.("appendToolResultsAndFinishTurn");
+      const resultByCallId = new Map(results.map((result) => [result.callId, result]));
+      const orderedResults = toolCalls
+        .map((call) => resultByCallId.get(call.id))
+        .filter((result): result is ToolResult => result !== undefined);
+      const toolResultMessages = (orderedResults.length === results.length ? orderedResults : results).map(
+        (result) => result.message
+      );
+      for (const message of toolResultMessages) {
         await emit({ type: "message_start", message });
         await emit({ type: "message_end", message });
       }
-    }
+      const turn: LastTurn = { message: response.message, toolResults: toolResultMessages };
+      const action = await resolveAction(runtime, turn, toolCalls.length, signal);
+      await emit({ type: "turn_end", message: response.message, toolResults: toolResultMessages });
+      lastTurn = turn;
 
-    for (const item of steering) {
-      await emit({ type: "message_start", message: item.body });
-      await emit({ type: "message_end", message: item.body });
-    }
-
-    runtime.onStep?.("prepareRequest");
-    const request = runtime.prepareRequest?.({ messages: runtime.getState().messages }) ?? {
-      messages: runtime.getState().messages,
-    };
-
-    runtime.onStep?.("streamAssistant");
-    await emit({ type: "message_start", message: { role: "assistant", content: "" } });
-    const response = await runtime.streamAssistant(request, async (partial) => {
-      await emit({
-        type: "message_update",
-        message: partial,
-        assistantMessageEvent: { type: "text_delta", delta: partial.content },
-      });
-    });
-    for (const update of response.updates ?? []) {
-      await emit({ type: "message_update", message: response.message, assistantMessageEvent: update });
-    }
-    await emit({ type: "message_end", message: response.message });
-
-    runtime.onStep?.("hardExitCheck");
-    if (response.stopReason === "error" || response.stopReason === "aborted") {
-      const turn: LastTurn = { message: response.message, toolResults: [] };
-      runtime.finishTurn?.(turn);
-      await emit({ type: "turn_end", message: response.message, toolResults: [] });
-      await emitAgentEnd();
-      return runtime.getState();
-    }
-
-    runtime.onStep?.("executeToolCalls");
-    const toolCalls = response.toolCalls;
-    let results: readonly ToolResult[] = [];
-    if (toolCalls.length > 0) {
-      for (const call of toolCalls) {
-        await emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
-      }
-      if (response.stopReason === "length") {
-        results = toolCalls.map((call) => ({
-          callId: call.id,
-          message: { role: "toolResult" as const, content: "truncated" },
-          isError: true,
-        }));
-      } else if (runtime.toolPipeline !== undefined) {
-        const pipelineResults = await runtime.toolPipeline.executeBatch(toolCalls);
-        results = pipelineResults.map((result) => result as ToolResult);
-      } else if (runtime.executeToolCalls !== undefined) {
-        results = await runtime.executeToolCalls(toolCalls);
-      } else {
-        results = [];
-      }
-      for (const result of results) {
-        for (const update of result.updates ?? []) {
-          await emit({
-            type: "tool_execution_update",
-            toolCallId: result.callId,
-            toolName: "",
-            args: {},
-            partialResult: update.partialResult,
-          });
+      runtime.onStep?.("decisionEnd");
+      const shouldEnd = action === "end";
+      runtime.onStep?.("decisionContinue");
+      const shouldContinue = action === "continue";
+      runtime.onStep?.("outerFollowUpOrBreak");
+      if (shouldEnd) {
+        if (inbox.size("followUp") > 0) {
+          pending = inbox.poll("followUp").map((item) => ({ id: item.id, body: item.body }));
+          enterInner = true;
+          continue;
         }
-        await emit({
-          type: "tool_execution_end",
-          toolCallId: result.callId,
-          toolName: "",
-          result: result.message.content,
-          isError: result.isError ?? false,
-        });
+        await emitAgentEnd();
+        return runtime.getState();
       }
+
+      hasMoreToolCalls = shouldContinue && toolCalls.length > 0;
+      if (inbox.size("nextTurn") > 0) enterInner = true;
+      explicitContinuation = shouldContinue && toolCalls.length === 0 && inbox.size("nextTurn") === 0;
     }
 
-    // 完成通知按 results（完成顺序）发出；会话提交按 assistant 声明顺序排列，
-    // 两者解耦，保证 transcript 顺序稳定且与工具声明对应。
-    runtime.onStep?.("appendToolResultsAndFinishTurn");
-    const resultByCallId = new Map(results.map((result) => [result.callId, result]));
-    const orderedResults = toolCalls
-      .map((call) => resultByCallId.get(call.id))
-      .filter((result): result is ToolResult => result !== undefined);
-    const toolResultMessages = (orderedResults.length === results.length ? orderedResults : results).map(
-      (result) => result.message
-    );
-    for (const message of toolResultMessages) {
-      await emit({ type: "message_start", message });
-      await emit({ type: "message_end", message });
-    }
-    const turn: LastTurn = { message: response.message, toolResults: toolResultMessages };
-    const action = await resolveAction(runtime, turn, toolCalls.length);
-    await emit({ type: "turn_end", message: response.message, toolResults: toolResultMessages });
-    lastTurn = turn;
-
-    // 决策阶段进入序列按设计顺序记录（test-only），与 RUN_LOOP_STEPS 对齐。
-    runtime.onStep?.("decisionEnd");
-    const shouldEnd = action === "end";
-    runtime.onStep?.("decisionContinue");
-    const shouldContinue = action === "continue";
     runtime.onStep?.("outerFollowUpOrBreak");
-    if (shouldEnd) {
-      await emitAgentEnd();
-      return runtime.getState();
+    const followUps = runtime.pollFollowUp !== undefined
+      ? await runtime.pollFollowUp(signal)
+      : inbox.poll("followUp").map((item) => item.body);
+    if (followUps.length > 0) {
+      pending = followUps.map((body) => ({ id: 0, body }));
+      lastTurn = undefined;
+      explicitContinuation = false;
+      continue;
     }
-
-    // 只读判定队列是否非空：消息留到下一轮轮首统一 poll，避免被此处提前消费。
-    explicitContinuation = toolCalls.length === 0 && inbox.size("nextTurn") === 0;
-
-    // 决策为 continue（例如模型请求了原生工具调用）时必须进入下一轮，
-    // 让工具结果回到模型；否则会在一轮后静默结束。
-    if (shouldContinue) continue;
-
-    const followUps = runtime.pollFollowUp?.() ?? inbox.poll("nextTurn");
-    if (followUps.length > 0) continue;
-    if (explicitContinuation) continue;
+    if (explicitContinuation) {
+      pending = [];
+      enterInner = true;
+      explicitContinuation = false;
+      continue;
+    }
     break;
   }
 

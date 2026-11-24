@@ -55,7 +55,7 @@ describe("T-13 AgentEvent 与订阅屏障", () => {
     expect(done.pendingToolCalls.size).toBe(0);
 
     const ended = reduceState(done, { type: "agent_end", messages: [userMessage] });
-    expect(ended.messages).toEqual([userMessage]);
+    expect(ended.messages).toEqual([assistantMessage]);
     expect(done.messages).toEqual([assistantMessage]);
     expect(done).not.toBe(ended);
   });

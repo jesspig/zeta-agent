@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentStreamRequest } from "../facade";
+import type { AgentStreamChunk, AgentStreamRequest } from "../facade";
 import { createProviderStreamFn } from "./dispatch";
 
 function sse(frames: readonly string[], init?: ResponseInit): Response {
@@ -19,6 +19,11 @@ const request: AgentStreamRequest = {
     { role: "user", content: "hi" },
   ],
 };
+
+function lastErrorMessage(chunks: readonly AgentStreamChunk[]): string {
+  const last = chunks.at(-1);
+  return typeof last === "object" && last.type === "error" ? last.error.message : "";
+}
 
 async function collect(iterable: AsyncIterable<string | { readonly type: string; readonly text?: string }>): Promise<string[]> {
   const out: string[] = [];
@@ -170,20 +175,13 @@ describe("多 provider 流式接口（T-12）", () => {
     expect(message).toContain("UNKNOWN_PROVIDER");
   });
 
-  test("非 2xx 响应抛带状态码且不泄露凭据", async () => {
+  test("非 2xx 响应产出带状态码的 error chunk 且不泄露凭据", async () => {
     const fakeFetch = (async () => new Response("denied", { status: 401 })) as unknown as typeof fetch;
-    let message = "";
-    try {
-      await collect(
-        createProviderStreamFn(
-          { provider: "groq", model: "llama", apiKey: "super-secret" },
-          fakeFetch
-        )(request)
-      );
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain("HTTP_401");
-    expect(message).not.toContain("super-secret");
+    const chunks = await Array.fromAsync(createProviderStreamFn(
+      { provider: "groq", model: "llama", apiKey: "super-secret" },
+      fakeFetch
+    )(request));
+    expect(lastErrorMessage(chunks)).toContain("HTTP_401");
+    expect(JSON.stringify(chunks)).not.toContain("super-secret");
   });
 });

@@ -27,7 +27,7 @@ describe("T-04 facade 装配收敛", () => {
 
     const messages = await agent.prompt("start");
 
-    expect(turn).toBe(2);
+    expect(turn).toBe(3);
     const userContents = messages
       .filter((message) => message.role === "user")
       .map((message) => String(message.content));
