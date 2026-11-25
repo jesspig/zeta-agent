@@ -18,6 +18,7 @@ import {
   type AgentMessage,
   type AgentState,
   type EventStream,
+  type UsageSnapshot,
 } from "./agent";
 import { createInbox, type Inbox, type InboxMessage, type QueueMode, type QueueTarget } from "./inbox";
 import {
@@ -384,9 +385,10 @@ export class Agent {
       prepareRequest: async (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
         const prompt = this.resolveSystemPrompt();
+        const alreadyInjected = base.messages?.some((message) => message.role === "system" && message.content === prompt) === true;
         const seeded = {
           ...(request as object),
-          messages: prompt.length > 0 && base.messages?.[0]?.role !== "system"
+          messages: prompt.length > 0 && !alreadyInjected
             ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
             : (base.messages ?? []),
         };
@@ -433,7 +435,7 @@ export class Agent {
     let content = "";
     const calls: ToolCall[] = [];
     let stopReason: AssistantResult["stopReason"] = "stop";
-    let terminal: { usage?: unknown; durationMs?: number; responseId?: string } = {};
+    let terminal: { usage?: UsageSnapshot; durationMs?: number; responseId?: string } = {};
     let failure: unknown;
     this.lastTurnHadNativeTools = false;
     try {
@@ -453,7 +455,7 @@ export class Agent {
             } else if (record.type === "done") {
               stopReason = isStopReason(record.stopReason) ? record.stopReason : "stop";
               terminal = {
-                ...(record.usage !== undefined ? { usage: record.usage } : {}),
+                ...(typeof record.usage === "object" && record.usage !== null ? { usage: record.usage as UsageSnapshot } : {}),
                 ...(typeof record.durationMs === "number" ? { durationMs: record.durationMs } : {}),
                 ...(typeof record.responseId === "string" ? { responseId: record.responseId } : {}),
               };
@@ -461,6 +463,11 @@ export class Agent {
             } else if (record.type === "error") {
               stopReason = "error";
               failure = record.error;
+              // 错误终态只保留可诊断元数据；usage 不进入消息，避免重试后重复计费。
+              terminal = {
+                ...(typeof record.durationMs === "number" ? { durationMs: record.durationMs } : {}),
+                ...(typeof record.responseId === "string" ? { responseId: record.responseId } : {}),
+              };
               break;
             }
           }
@@ -474,7 +481,13 @@ export class Agent {
     if (stopReason === "error") content = `Error: ${messageOf(failure)}`;
     this.lastTurnHadNativeTools = calls.length > 0;
     return {
-      message: { role: "assistant", content },
+      message: {
+        role: "assistant",
+        content,
+        ...(terminal.usage !== undefined ? { usage: terminal.usage } : {}),
+        ...(terminal.durationMs !== undefined ? { durationMs: terminal.durationMs } : {}),
+        ...(terminal.responseId !== undefined ? { responseId: terminal.responseId } : {}),
+      },
       toolCalls: stopReason === "error" || stopReason === "aborted" ? [] : calls,
       stopReason,
       ...terminal,

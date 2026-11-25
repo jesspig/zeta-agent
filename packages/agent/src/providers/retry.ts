@@ -119,7 +119,10 @@ export function withProviderRetry(streamFn: AgentStreamFn, options: ProviderRetr
           yield chunk;
         }
         if (!terminal) {
-          yield { type: "done", stopReason: isAborted() ? "aborted" : "stop" };
+          // EOF 未伴随 provider 终态不得伪装成功；abort 仍按取消归一化，避免误报计费。
+          yield isAborted()
+            ? { type: "done", stopReason: "aborted" }
+            : errorChunk({ code: "incomplete_stream", message: "no_completion", provider: typeof request.provider === "string" ? request.provider : undefined });
           return;
         }
       } catch (value) {

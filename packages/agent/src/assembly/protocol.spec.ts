@@ -7,6 +7,7 @@ import { createAgent } from "../facade";
 function stubStream() {
   return async function* () {
     yield "ok";
+    yield { type: "done", stopReason: "stop" } as const;
   };
 }
 

@@ -11,7 +11,7 @@ import { MODELS, PROVIDERS } from "./catalog.generated";
 import { createModelRegistry } from "./registry";
 import { createOpenAiStreamFn } from "./openai";
 import { createOpenAiResponsesStreamFn } from "./openai-responses";
-import { doneChunk, errorChunk, httpError } from "./protocol";
+import { doneChunk, errorChunk, httpError, incompleteStreamChunk } from "./protocol";
 import { withProviderRetry, type ProviderRetryOptions } from "./retry";
 
 export interface ProviderConfig {
@@ -150,6 +150,68 @@ function toAnthropicTools(tools: AgentStreamRequest["tools"]): unknown[] | undef
   }));
 }
 
+function googleResponseValue(content: unknown): unknown {
+  if (content === undefined || content === null) return {};
+  if (typeof content === "string") return { output: content };
+  return content;
+}
+
+/**
+ * Google 多轮工具协议：assistant.toolCalls → model functionCall parts，
+ * toolResult → user functionResponse {id,name,response}。连续的并行结果合并到同一 content，
+ * 每条结果独立成 part，避免 id 串位或丢失。
+ */
+function toGoogleContents(messages: ReadonlyArray<AgentStreamRequest["messages"][number]>): unknown[] {
+  const contents: unknown[] = [];
+  let responses: unknown[] = [];
+  const flushResponses = (): void => {
+    if (responses.length === 0) return;
+    contents.push({ role: "user", parts: responses });
+    responses = [];
+  };
+  for (const message of messages) {
+    if (message.role === "system") continue;
+    if (message.role === "toolResult") {
+      responses.push({
+        functionResponse: {
+          ...(typeof message.toolCallId === "string" && message.toolCallId.length > 0 ? { id: message.toolCallId } : {}),
+          name: message.toolName ?? "",
+          response: googleResponseValue(message.content),
+        },
+      });
+      continue;
+    }
+    flushResponses();
+    if (message.role === "assistant" && message.toolCalls !== undefined && message.toolCalls.length > 0) {
+      const parts: unknown[] = [];
+      if (typeof message.content === "string" && message.content.length > 0) parts.push({ text: message.content });
+      for (const call of message.toolCalls) {
+        let args: unknown = {};
+        try {
+          args = JSON.parse(call.arguments) as unknown;
+        } catch {
+          args = {};
+        }
+        parts.push({
+          functionCall: {
+            ...(typeof call.id === "string" && call.id.length > 0 ? { id: call.id } : {}),
+            name: call.name,
+            args,
+          },
+        });
+      }
+      contents.push({ role: "model", parts });
+      continue;
+    }
+    contents.push({
+      role: message.role === "assistant" ? "model" : message.role,
+      parts: [{ text: typeof message.content === "string" ? message.content : JSON.stringify(message.content) }],
+    });
+  }
+  flushResponses();
+  return contents;
+}
+
 interface AnthropicEvent {
   readonly type?: string;
   readonly index?: number;
@@ -173,6 +235,7 @@ async function* parseAnthropicSse(body: ReadableStream<Uint8Array>, startedAt: n
   let responseId: string | undefined;
   let usage: unknown;
   let stopReason = "stop";
+  let completed = false;
   const blocks = new Map<number, { id?: string; name: string; json: string }>();
 
   try {
@@ -219,13 +282,16 @@ async function* parseAnthropicSse(body: ReadableStream<Uint8Array>, startedAt: n
             yield errorChunk({ code: event.error?.type ?? "unknown", message: `ANTHROPIC_ERROR ${event.error?.type ?? "unknown"}`, provider: "anthropic", responseId });
             return;
           } else if (event.type === "message_stop") {
+            completed = true;
             yield doneChunk(stopReason === "max_tokens" ? "length" : stopReason === "end_turn" || stopReason === "stop_sequence" ? "stop" : "error", { usage, responseId, startedAt });
             return;
           }
         }
       }
     }
-    yield doneChunk(stopReason === "max_tokens" ? "length" : "stop", { usage, responseId, startedAt });
+    yield completed
+      ? doneChunk(stopReason === "max_tokens" ? "length" : "stop", { usage, responseId, startedAt })
+      : incompleteStreamChunk("anthropic", { responseId, startedAt });
   } finally {
     reader.releaseLock();
   }
@@ -257,6 +323,7 @@ async function* parseGoogleSse(
   let responseId: string | undefined;
   let usage: unknown;
   let finishReason: string | undefined;
+  let callSeq = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -284,8 +351,11 @@ async function* parseGoogleSse(
                 yield part.thought === true ? { type: "reasoning", text: part.text } : part.text;
               }
               if (part.functionCall !== undefined && typeof part.functionCall.name === "string") {
+                // Gemini 的 functionCall 不保证携带 id；按流内序号生成稳定 id 供 functionResponse 关联。
+                callSeq += 1;
                 yield {
                   type: "tool_call",
+                  id: `google-call-${callSeq}`,
                   name: part.functionCall.name,
                   arguments: JSON.stringify(part.functionCall.args ?? {}),
                 };
@@ -295,12 +365,16 @@ async function* parseGoogleSse(
         }
       }
     }
-    const stopReason = finishReason === "MAX_TOKENS"
-      ? "length"
-      : finishReason === "STOP" || finishReason === undefined
-        ? "stop"
-        : "error";
-    yield doneChunk(stopReason, { usage, responseId, startedAt });
+    if (finishReason === undefined) {
+      yield incompleteStreamChunk("google", { responseId, startedAt });
+    } else {
+      const stopReason = finishReason === "MAX_TOKENS"
+        ? "length"
+        : finishReason === "STOP"
+          ? "stop"
+          : "error";
+      yield doneChunk(stopReason, { usage, responseId, startedAt });
+    }
   } finally {
     reader.releaseLock();
   }
@@ -415,12 +489,7 @@ export function createProviderStreamFn(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: request.messages
-            .filter((m) => m.role !== "system")
-            .map((m) => ({
-              role: m.role === "assistant" ? "model" : m.role === "toolResult" ? "user" : m.role,
-              parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }],
-            })),
+          contents: toGoogleContents(request.messages),
           ...(request.messages.some((m) => m.role === "system")
             ? {
                 system_instruction: {

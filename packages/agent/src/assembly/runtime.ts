@@ -13,6 +13,12 @@ import {
   type BackendProfile,
 } from "@zeta-agent/security";
 import { createAgent, type Agent, type AgentOptions, type AgentStreamFn } from "../facade";
+import {
+  createProviderBroker,
+  type ProviderBroker,
+  type ProviderBrokerOptions,
+  type ProviderRegistrationOptions,
+} from "../providers/broker";
 import { createResourceRegistry, type ResourceRegistry } from "../resources/registry";
 import { createJsonlSessionStore } from "../session/jsonl-store";
 import { createSqliteSessionStore } from "../session/sqlite-store";
@@ -56,6 +62,19 @@ export interface DefaultRuntimeOptions {
   readonly tokensPerTenant?: number;
   /** 插件热重载目录；提供后用同一 ctx/root fiber 装配真实文件 watcher。 */
   readonly hotReloadDirs?: readonly string[];
+  /** 显式注入 broker；缺省时由生产装配创建，所有模型请求统一经它路由。 */
+  readonly providerBroker?: ProviderBroker;
+  readonly providerRoutes?: ProviderBrokerOptions["routes"];
+  readonly providerFallback?: ProviderBrokerOptions["fallback"];
+  readonly providerRetry?: ProviderBrokerOptions["retry"];
+  readonly providerObservers?: Pick<ProviderBrokerOptions, "onRoute" | "onPayload" | "onResponse" | "onProviderStreamEvent">;
+  readonly providerRegistrations?: readonly {
+    readonly id: string;
+    readonly streamFn: AgentStreamFn;
+    readonly options?: ProviderRegistrationOptions;
+  }[];
+  readonly provider?: string;
+  readonly model?: string;
 }
 
 export interface DefaultRuntime {
@@ -70,6 +89,7 @@ export interface DefaultRuntime {
   readonly tenantScope: TenantScope | undefined;
   readonly governance: TenantGovernance | undefined;
   readonly hotReload: PluginHotReloader | undefined;
+  readonly providerBroker: ProviderBroker;
   dispose(): Promise<void>;
 }
 
@@ -129,9 +149,22 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
         ? createSqliteSessionStore({ path: options.sessionStorePath, sessionId })
         : createJsonlSessionStore({ path: options.sessionStorePath, sessionId }));
 
+  const providerBroker = options.providerBroker ?? createProviderBroker({
+    ...(options.providerRoutes === undefined ? {} : { routes: options.providerRoutes }),
+    ...(options.providerFallback === undefined ? {} : { fallback: options.providerFallback }),
+    ...(options.providerRetry === undefined ? {} : { retry: options.providerRetry }),
+    ...(options.providerObservers ?? {}),
+  });
+  for (const registration of options.providerRegistrations ?? []) {
+    providerBroker.register(registration.id, registration.streamFn, registration.options);
+  }
+
   const agent = createAgent({
     tenantScope,
     streamFn: options.streamFn,
+    providerBroker,
+    ...(options.provider === undefined ? {} : { provider: options.provider }),
+    ...(options.model === undefined ? {} : { model: options.model }),
     allowedDirectories,
     includeBuiltins: options.includeBuiltins,
     securityBackend,
@@ -199,6 +232,7 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     tenantScope,
     governance,
     hotReload,
+    providerBroker,
     async dispose() {
       await hotReload?.close();
       await ctx.dispose();

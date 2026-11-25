@@ -31,6 +31,8 @@ export * from "./providers/model-catalog";
 export * from "./providers/catalog.generated";
 export * from "./providers/registry";
 export * from "./providers/dispatch";
+export * from "./providers/broker";
+export * from "./providers/retry";
 export * from "./providers/oauth";
 export * from "./providers/image";
 export * from "./providers/image-stream";

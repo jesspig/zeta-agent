@@ -60,6 +60,9 @@ import {
   type StreamFn,
   type ToolCall,
   type ToolResult,
+  type UsageSnapshot,
+  aggregateUsage,
+  createInitialState,
 } from "@zeta-agent/agent-framework";
 import {
   createToolLeaseManager,
@@ -133,6 +136,12 @@ import {
   type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import { createProviderStreamFn } from "./providers/dispatch";
+import {
+  createProviderBroker,
+  type ProviderBroker,
+  type ProviderBrokerOptions,
+  type ProviderRegistrationOptions,
+} from "./providers/broker";
 import { builtinIdsForProfile, resolveAssemblyProfile, type AssemblyProfile } from "./assembly/builtins";
 import { createAssemblyManifest, type CapabilityDiagnostic } from "./assembly/manifest";
 import { diagnoseCapabilities, executableToolNames } from "./assembly/profile";
@@ -533,8 +542,13 @@ export interface AgentOptions {
   readonly auditToken?: string;
   /** @deprecated facade 不再自行写无签名旁路文件；落盘由 daemon 独占。 */
   readonly auditDir?: string;
-  /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
+  /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt；创建时同步回放 committed transcript。 */
   readonly sessionStore?: SessionStore;
+  /** 可选 broker；注入后所有模型请求统一经它路由，注册/切换不动 Agent 实例。 */
+  readonly providerBroker?: ProviderBroker;
+  /** broker 路由使用的 provider/model；可由 setProvider/setModel 热切换。 */
+  readonly provider?: string;
+  readonly model?: string;
   /**
    * 租户治理作用域（由 principal resolver 解析得到）：注入后 session/provider/effects/quota/audit
    * 全部按该 realm 解析；未注入时保持原有单租户行为。
@@ -613,6 +627,22 @@ export interface Agent extends PluginApiSurface {
   closeAudit(): Promise<void>;
   /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
+  /** 模型请求统一入口；生产装配中始终存在，register/switch 不重建 Agent。 */
+  readonly providerBroker: ProviderBroker | undefined;
+  registerProvider(id: string, streamFn: AgentStreamFn, options?: ProviderRegistrationOptions): Disposer;
+  unregisterProvider(id: string): void;
+  setProviderRoutes(routes: Readonly<Record<string, readonly string[]>>): void;
+  setProviderFallback(providerIds: readonly string[]): void;
+  setProvider(id: string | undefined): void;
+  setModel(model: string | undefined): void;
+  /** session/run 计费汇总，来自消息上的 done 终态而非 adapter 局部状态。 */
+  readonly usageSummary: UsageSummary;
+  lastRunUsage(): UsageSummary;
+  /** 重新绑定 SessionStore 并从 committed transcript 回放；运行中拒绝。 */
+  attachSessionStore(store: SessionStore): void;
+  resumeSession(frameId: string): void;
+  forkSession(fromId?: string): Promise<SessionStore>;
+  truncateSession(frameId: string): Promise<SessionStore>;
   readonly sessionStore: SessionStore | undefined;
   readonly compaction: AgentCompactionHandle | undefined;
   /** 本 agent 绑定的租户作用域；单租户调用方为 undefined。 */
@@ -648,17 +678,96 @@ function streamErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function createAgent(options: AgentOptions = {}): Agent {
-  const stream = createEventStream();
-  const tenantScope = options.tenantScope;
-  const sessionStore = tenantScope?.sessionStore ?? options.sessionStore;
-  if (sessionStore !== undefined) {
-    // agent_end 只含本次 newMessages；事件流 await listener，故 prompt resolve 前消息已落盘。
-    stream.subscribe(async (event) => {
-      if (event.type !== "agent_end") return;
-      for (const item of event.messages) await sessionStore.append(item);
-    });
+/** session/run 计费汇总；只统计带 usage 的 assistant 终态，错误与重试不重复计入。 */
+export interface UsageSummary {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly durationMs: number;
+  readonly responseId?: string;
+  readonly requests: number;
+  readonly errors: number;
+}
+
+function usageSummaryFrom(messages: readonly AgentMessage[]): UsageSummary {
+  const billable = messages.filter((message) => message.role === "assistant" && message.usage !== undefined);
+  const usage = aggregateUsage(messages) ?? {};
+  const numeric = (key: "inputTokens" | "outputTokens" | "totalTokens" | "durationMs"): number => {
+    const value = usage[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  return {
+    inputTokens: numeric("inputTokens"),
+    outputTokens: numeric("outputTokens"),
+    totalTokens: numeric("totalTokens"),
+    durationMs: numeric("durationMs"),
+    ...(typeof usage.responseId === "string" ? { responseId: usage.responseId } : {}),
+    requests: billable.length,
+    errors: messages.filter((message) =>
+      message.role === "assistant" && typeof message.content === "string" && message.content.startsWith("Error:")
+    ).length,
+  };
+}
+
+const TOOLS_DECLARATION = /^tools:\s*(.*)$/m;
+
+/**
+ * committed transcript 回放：system 事实只用于计算，不回灌 state.messages；
+ * 对话事实与工具声明分别恢复，避免重开时重复注入 system/tool 声明。
+ */
+function replayCommittedTranscript(messages: readonly AgentMessage[]): {
+  readonly messages: readonly AgentMessage[];
+  readonly systemPrompt: string;
+  readonly declaredTools: readonly string[] | undefined;
+} {
+  const conversation: AgentMessage[] = [];
+  let systemPrompt = "";
+  let declaredTools: readonly string[] | undefined;
+  for (const message of messages) {
+    if (message.role === "system") {
+      const fact = typeof message.content === "string" ? message.content : String(message.content ?? "");
+      const declaration = fact.match(TOOLS_DECLARATION);
+      if (declaration !== null) {
+        declaredTools = (declaration[1] ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
+        const promptFact = fact.slice(0, declaration.index ?? 0).trim();
+        if (promptFact.length > 0) systemPrompt = promptFact;
+      } else if (fact.length > 0) {
+        systemPrompt = fact;
+      }
+      continue;
+    }
+    conversation.push(message);
   }
+  return { messages: conversation, systemPrompt, declaredTools };
+}
+
+/** 只读适配器：部分测试宿主提供仅含 append 的 SessionStore，投影缺失时按空 transcript 处理。 */
+function projectionMessages(store: SessionStore | undefined): readonly AgentMessage[] {
+  const projection = store?.projection?.();
+  return Array.isArray(projection?.messages) ? projection!.messages : [];
+}
+
+export function createAgent(options: AgentOptions = {}): Agent {
+  const tenantScope = options.tenantScope;
+  let activeSessionStore: SessionStore | undefined = tenantScope?.sessionStore ?? options.sessionStore;
+  const restoredTranscript = activeSessionStore === undefined
+    ? { messages: [] as readonly AgentMessage[], systemPrompt: "", declaredTools: undefined as readonly string[] | undefined }
+    : replayCommittedTranscript(projectionMessages(activeSessionStore));
+  const restoredUsage = aggregateUsage(restoredTranscript.messages);
+  const stream = createEventStream(createInitialState({
+    messages: restoredTranscript.messages,
+    systemPrompt: restoredTranscript.systemPrompt,
+    ...(restoredUsage === undefined ? {} : { usage: restoredUsage }),
+    ...(typeof restoredUsage?.durationMs === "number" ? { durationMs: restoredUsage.durationMs } : {}),
+    ...(typeof restoredUsage?.responseId === "string" ? { responseId: restoredUsage.responseId } : {}),
+  }));
+  // 单一 writer：agent_end 只含本次 newMessages；重绑定 store 时无需重建订阅者。
+  stream.subscribe(async (event) => {
+    if (event.type !== "agent_end") return;
+    const store = activeSessionStore;
+    if (store === undefined) return;
+    for (const item of event.messages) await store.append(item);
+  });
   const baseStreamFn = tenantScope?.streamFn ?? options.streamFn;
   let reasoningEffort: string | undefined = options.reasoningEffort;
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
@@ -779,9 +888,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
       })();
   let persistedLineageCount = 0;
   async function persistCompaction(lineages: readonly CompactionLineage[]): Promise<void> {
-    if (sessionStore === undefined) return;
+    const store = activeSessionStore;
+    if (store === undefined) return;
     for (const lineage of lineages.slice(persistedLineageCount)) {
-      await sessionStore.appendRecap(lineage.recap, lineage.uris, {
+      await store.appendRecap(lineage.recap, lineage.uris, {
         threshold: lineage.threshold,
         preTokenCount: lineage.preTokenCount,
       });
@@ -918,6 +1028,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   let activeRun: RunLease | undefined;
   /** 当前回合是否使用了 provider 原生 tool_calls（决定是否自动续跑消费工具结果）。 */
   let lastTurnHadNativeTools = false;
+  let lastRunMessages: readonly AgentMessage[] = [];
 
   // 插件 API 的工具/身份集合仍用 map 做快照；hook 的真实生产路径统一由 pluginManager 负载。
   interface PluginToolEntry {
@@ -1191,13 +1302,42 @@ export function createAgent(options: AgentOptions = {}): Agent {
     installation.status = pluginManager.syncPluginStatus(installation.plugin).status;
   }
 
+  // 有 streamFn 时 facade 自身也装配 broker，保证模型请求始终只有一条路由路径。
+  const providerBroker = options.providerBroker ?? (baseStreamFn !== undefined ? createProviderBroker() : undefined);
+  let providerId: string | undefined = options.provider;
+  let modelRef: string | undefined = options.model;
+  const BASE_PROVIDER = "base";
+  const PLUGIN_PROVIDER = "plugin";
+  const brokerRegistrations: Disposer[] = [];
+  let pluginProviderFn: ((request: AgentStreamRequest, signal?: AbortSignal) => unknown) | undefined;
+  let pluginProviderRegistration: Disposer | undefined;
+  if (providerBroker !== undefined && baseStreamFn !== undefined) {
+    brokerRegistrations.push(providerBroker.register(BASE_PROVIDER, baseStreamFn, { terminalPolicy: "passthrough" }));
+  }
+
   function activeStreamFn(): AgentStreamFn | undefined {
     // 单一管理器链的最后（最高优先级/最新注册）provider 生效。
-    const provider = pluginManager.chain<AgentStreamRequest>("streamFn").snapshot().at(-1)?.fn;
-    if (provider !== undefined) {
-      return (request: AgentStreamRequest) => provider(request) as AsyncIterable<AgentStreamChunk>;
+    const pluginFn = pluginManager.chain<AgentStreamRequest>("streamFn").snapshot().at(-1)?.fn as
+      | ((request: AgentStreamRequest, signal?: AbortSignal) => unknown)
+      | undefined;
+    const asStreamFn: AgentStreamFn | undefined = pluginFn === undefined
+      ? undefined
+      : (request) => pluginFn(request, request.signal) as AsyncIterable<AgentStreamChunk>;
+    if (pluginFn !== pluginProviderFn) {
+      pluginProviderRegistration?.();
+      pluginProviderRegistration = undefined;
+      pluginProviderFn = pluginFn;
+      if (asStreamFn !== undefined && providerBroker !== undefined) {
+        pluginProviderRegistration = providerBroker.register(PLUGIN_PROVIDER, asStreamFn, { terminalPolicy: "passthrough" });
+      }
     }
-    return baseStreamFn;
+    if (providerBroker === undefined) return asStreamFn ?? baseStreamFn;
+    return (request) => providerBroker.stream({
+      ...request,
+      ...(request.provider === undefined && request.model === undefined
+        ? { provider: asStreamFn !== undefined ? PLUGIN_PROVIDER : BASE_PROVIDER }
+        : {}),
+    });
   }
 
   function toolNamesSnapshot(): readonly string[] {
@@ -1218,8 +1358,31 @@ export function createAgent(options: AgentOptions = {}): Agent {
     return [...executableToolNames(builtins, capabilityDiagnostics), ...pluginNames];
   }
 
-  /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
-  let declaredToolNames: readonly string[] = [...toolNamesSnapshot()];
+  /** 上一次声明的工具名优先取 committed transcript；没有声明时以真实 registry 为基线。 */
+  let declaredToolNames: readonly string[] = restoredTranscript.declaredTools ?? [...toolNamesSnapshot()];
+
+  /** 会话切换只替换 transcript 基线与写入目标，不重建 Agent/插件/provider 注册。 */
+  function rebindSessionStore(store: SessionStore): void {
+    if (activeRun !== undefined) throw new Error("ACTIVE_RUN: 会话切换必须等待当前 run 结束");
+    const projection = store.projection();
+    const replayed = replayCommittedTranscript(projection.messages);
+    const restoredUsage = aggregateUsage(replayed.messages);
+    stream.reset(createInitialState({
+      messages: replayed.messages,
+      systemPrompt: replayed.systemPrompt,
+      ...(restoredUsage === undefined ? {} : { usage: restoredUsage }),
+      ...(typeof restoredUsage?.durationMs === "number" ? { durationMs: restoredUsage.durationMs } : {}),
+      ...(typeof restoredUsage?.responseId === "string" ? { responseId: restoredUsage.responseId } : {}),
+    }));
+    activeSessionStore = store;
+    declaredToolNames = replayed.declaredTools ?? [...toolNamesSnapshot()];
+    persistedLineageCount = projection.lineage.length;
+    lastRunMessages = [];
+    lastTurnHadNativeTools = false;
+    inbox.clear("nextTurn");
+    inbox.clear("nextStep");
+    inbox.clear("followUp");
+  }
 
   // ── 统一工具域：模型工具与 runTool 共用 registry/hooks/审计/effects/leases ──
   const toolLeases = createToolLeaseManager();
@@ -1696,10 +1859,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
         const prompt = resolveSystemPrompt();
         // 系统提示词只进入请求，不写入会话状态，避免 transcript 出现 system 行。
+        // 工具声明 system 消息可能排在 transcript 首位；按内容判重，保证提示词恰好注入一次。
+        const alreadyInjected = base.messages?.some((message) => message.role === "system" && message.content === prompt) === true;
         const seeded = {
           ...(request as object),
           messages:
-            prompt.length > 0 && base.messages?.[0]?.role !== "system"
+            prompt.length > 0 && !alreadyInjected
               ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
               : (base.messages ?? []),
         };
@@ -1733,7 +1898,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         lastTurnHadNativeTools = false;
         let partialSeq = 0;
         let stopReason: AssistantResult["stopReason"] = "stop";
-        let terminal: { usage?: unknown; durationMs?: number; responseId?: string } = {};
+        let terminal: { usage?: UsageSnapshot; durationMs?: number; responseId?: string } = {};
         let failure: unknown;
         const snapshot = (): AgentMessage => ({
           role: "assistant",
@@ -1748,6 +1913,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
               messages: base.messages ?? [],
               tools: base.tools ?? providerToolSchemas(),
               ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+              ...(providerId !== undefined ? { provider: providerId } : {}),
+              ...(modelRef !== undefined ? { model: modelRef } : {}),
               signal,
             } as AgentStreamRequest;
             for await (const chunk of effectiveStreamFn(enriched)) {
@@ -1765,7 +1932,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
               } else if (chunk.type === "done") {
                 stopReason = chunk.stopReason;
                 terminal = {
-                  ...(chunk.usage !== undefined ? { usage: chunk.usage } : {}),
+                  ...(typeof chunk.usage === "object" && chunk.usage !== null ? { usage: chunk.usage as UsageSnapshot } : {}),
                   ...(chunk.durationMs !== undefined ? { durationMs: chunk.durationMs } : {}),
                   ...(chunk.responseId !== undefined ? { responseId: chunk.responseId } : {}),
                 };
@@ -1833,6 +2000,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
             content: allowTextToolMarkers ? content.replace(TOOL_MARKER_RE, "") : content,
             ...(thinking.length > 0 ? { thinking } : {}),
             ...(records.length > 0 ? { toolCalls: records } : {}),
+            ...(terminal.usage !== undefined ? { usage: terminal.usage } : {}),
+            ...(terminal.durationMs !== undefined ? { durationMs: terminal.durationMs } : {}),
+            ...(terminal.responseId !== undefined ? { responseId: terminal.responseId } : {}),
           },
           toolCalls,
           stopReason,
@@ -1871,7 +2041,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     } finally {
       unsubscribeCompaction?.();
     }
-    return stream.getState().messages;
+    const allMessages = stream.getState().messages;
+    lastRunMessages = allMessages.slice(initialMessageCount);
+    return allMessages;
   }
 
   function toSnapshots<T>(registry: {
@@ -1925,7 +2097,33 @@ export function createAgent(options: AgentOptions = {}): Agent {
     // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
     // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
-    sessionStore,
+    get sessionStore() {
+      return activeSessionStore;
+    },
+    attachSessionStore: (store) => rebindSessionStore(store),
+    resumeSession: (frameId) => {
+      const store = activeSessionStore;
+      if (store === undefined) throw new Error("SESSION_STORE_REQUIRED: resume 需要已绑定 SessionStore");
+      rebindSessionStore(store.resume(frameId));
+    },
+    async forkSession(fromId) {
+      const store = activeSessionStore;
+      if (store === undefined) throw new Error("SESSION_STORE_REQUIRED: fork 需要已绑定 SessionStore");
+      const forked = await store.fork(fromId);
+      rebindSessionStore(forked);
+      return forked;
+    },
+    async truncateSession(frameId) {
+      const store = activeSessionStore;
+      if (store === undefined) throw new Error("SESSION_STORE_REQUIRED: truncate 需要已绑定 SessionStore");
+      const truncated = await store.truncate(frameId);
+      rebindSessionStore(truncated);
+      return truncated;
+    },
+    get usageSummary() {
+      return usageSummaryFrom(stream.getState().messages);
+    },
+    lastRunUsage: () => usageSummaryFrom(lastRunMessages),
     compaction,
     abort() {
       aborted = true;
@@ -1954,6 +2152,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
       while (activeRun !== undefined) await activeRun.promise.catch(() => {});
       await stream.waitForIdle();
       pluginManager.disposeAll();
+      pluginProviderRegistration?.();
+      pluginProviderRegistration = undefined;
+      for (const dispose of brokerRegistrations) dispose();
+      brokerRegistrations.length = 0;
     },
     ...api,
     api,
@@ -2080,6 +2282,32 @@ export function createAgent(options: AgentOptions = {}): Agent {
         },
         fetchImpl
       );
+    },
+    providerBroker,
+    registerProvider(id, streamFn, registrationOptions) {
+      if (providerBroker === undefined) throw new Error("PROVIDER_BROKER_REQUIRED: 未注入 providerBroker");
+      const dispose = providerBroker.register(id, streamFn, registrationOptions);
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        dispose();
+      };
+    },
+    unregisterProvider(id) {
+      providerBroker?.unregister(id);
+    },
+    setProviderRoutes(routes) {
+      providerBroker?.setRoutes(routes);
+    },
+    setProviderFallback(providerIds) {
+      providerBroker?.setFallback(providerIds);
+    },
+    setProvider(id) {
+      providerId = id;
+    },
+    setModel(model) {
+      modelRef = model;
     },
   };
 }

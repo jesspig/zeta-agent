@@ -42,6 +42,20 @@ export function errorChunk(error: AgentStreamError): Extract<AgentStreamChunk, {
   return { type: "error", error };
 }
 
+/** 流提前结束且没有 provider 终态时的统一归一化；绝不伪装成 stop。 */
+export function incompleteStreamChunk(
+  provider: string,
+  metadata: { responseId?: string; startedAt?: number } = {}
+): Extract<AgentStreamChunk, { type: "error" }> {
+  return errorChunk({
+    code: "incomplete_stream",
+    message: "no_completion",
+    provider,
+    ...(metadata.responseId !== undefined ? { responseId: metadata.responseId } : {}),
+    ...(metadata.startedAt !== undefined ? { durationMs: Math.max(0, Date.now() - metadata.startedAt) } : {}),
+  });
+}
+
 export function httpError(provider: string, response: Response): AgentStreamError {
   const status = response.status;
   const code = status === 429 ? "rate_limit" : status >= 500 ? "server" : status === 401 || status === 403 ? "auth" : status >= 400 && status < 500 ? "invalid_request" : "http_error";

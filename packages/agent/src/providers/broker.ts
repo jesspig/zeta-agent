@@ -4,6 +4,8 @@ import { classifyProviderError, withProviderRetry, type ProviderRetryOptions } f
 
 export interface ProviderRegistrationOptions {
   readonly models?: readonly string[];
+  /** 注入的兼容 streamFn 可声明 passthrough：EOF 无 terminal 时保持原样，不归一化为错误。 */
+  readonly terminalPolicy?: "normalize" | "passthrough";
 }
 
 export interface ProviderBrokerOptions {
@@ -29,6 +31,7 @@ interface Registration {
   readonly id: string;
   readonly streamFn: AgentStreamFn;
   readonly models?: readonly string[];
+  readonly terminalPolicy: "normalize" | "passthrough";
 }
 
 function unique(ids: readonly string[]): string[] {
@@ -58,7 +61,12 @@ export function createProviderBroker(options: ProviderBrokerOptions = {}): Provi
     register(id, streamFn, registrationOptions = {}) {
       if (typeof id !== "string" || id.length === 0) throw new Error("provider.register: id required");
       if (typeof streamFn !== "function") throw new Error("provider.register: streamFn required");
-      const registration: Registration = { id, streamFn, ...(registrationOptions.models !== undefined ? { models: registrationOptions.models } : {}) };
+      const registration: Registration = {
+        id,
+        streamFn,
+        terminalPolicy: registrationOptions.terminalPolicy ?? "normalize",
+        ...(registrationOptions.models !== undefined ? { models: registrationOptions.models } : {}),
+      };
       registrations.set(id, registration);
       let active = true;
       return () => {
@@ -94,7 +102,9 @@ export function createProviderBroker(options: ProviderBrokerOptions = {}): Provi
           options.onRoute?.(provider, request);
           options.onPayload?.(provider, request);
           const retryOptions = options.retry ?? { maxRetries: 0 };
-          const recovered = withProviderRetry(registration.streamFn, retryOptions);
+          const recovered = registration.terminalPolicy === "passthrough"
+            ? registration.streamFn
+            : withProviderRetry(registration.streamFn, retryOptions);
           try {
             for await (const chunk of recovered(request)) {
               options.onProviderStreamEvent?.(provider, chunk);
@@ -116,6 +126,8 @@ export function createProviderBroker(options: ProviderBrokerOptions = {}): Provi
             yield { type: "error", error };
             return;
           }
+          // 兼容注入的 streamFn 没有终态时已在本次产出内容：不再把同一请求交给 fallback 重放。
+          if (registration.terminalPolicy === "passthrough" && emitted) return;
         }
         if (!emitted) {
           const error = { code: "provider_unavailable", message: `PROVIDER_UNAVAILABLE: ${route.join(", ")}` };

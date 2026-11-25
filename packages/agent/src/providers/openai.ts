@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentStreamChunk, AgentStreamFn, AgentStreamRequest, AgentToolSchema } from "../facade";
-import { doneChunk, errorChunk, httpError } from "./protocol";
+import { doneChunk, errorChunk, httpError, incompleteStreamChunk } from "./protocol";
 
 export interface OpenAiConfig {
   readonly baseUrl: string;
@@ -124,6 +124,7 @@ async function* parseSse(body: ReadableStream<Uint8Array>, startedAt: number): A
   let responseId: string | undefined;
   let usage: unknown;
   let finishReason: string | undefined;
+  let completed = false;
   const toolCalls = new Map<number, { id?: string; name: string; arguments: string }>();
 
   const flushToolCalls = function* (): IterableIterator<AgentStreamChunk> {
@@ -147,6 +148,7 @@ async function* parseSse(body: ReadableStream<Uint8Array>, startedAt: number): A
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") {
+            completed = true;
             yield* flushToolCalls();
             yield doneChunk(finishReason === "length" ? "length" : finishReason === "content_filter" ? "error" : "stop", { usage, responseId, startedAt });
             return;
@@ -161,7 +163,10 @@ async function* parseSse(body: ReadableStream<Uint8Array>, startedAt: number): A
           if (typeof parsed.id === "string") responseId = parsed.id;
           if (parsed.usage !== undefined) usage = parsed.usage;
           const choice = parsed.choices?.[0];
-          if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+          if (typeof choice?.finish_reason === "string") {
+            finishReason = choice.finish_reason;
+            completed = true;
+          }
           const delta = choice?.delta;
           if (delta === undefined) continue;
           const reasoning = extractReasoning(delta);
@@ -192,7 +197,9 @@ async function* parseSse(body: ReadableStream<Uint8Array>, startedAt: number): A
       }
     }
     yield* flushToolCalls();
-    yield doneChunk(finishReason === "length" ? "length" : finishReason === "content_filter" ? "error" : "stop", { usage, responseId, startedAt });
+    yield completed
+      ? doneChunk(finishReason === "length" ? "length" : finishReason === "content_filter" ? "error" : "stop", { usage, responseId, startedAt })
+      : incompleteStreamChunk("openai", { responseId, startedAt });
   } finally {
     reader.releaseLock();
   }
