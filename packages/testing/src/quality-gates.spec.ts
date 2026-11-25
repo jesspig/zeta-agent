@@ -83,10 +83,11 @@ describe("T-26 quality gate report model", () => {
 
 describe("T-26 test authenticity scan", () => {
   function fixtures() {
+    const publicPackage = ["@zeta-agent", "agent"].join("/");
     return [
       {
         path: "a.spec.ts",
-        content: `import { createX } from "@zeta-agent/agent";
+        content: `import { createX } from "${publicPackage}";
 test("x", async () => { await createX(); expect(1).toBe(1); });`,
       },
       {
@@ -107,6 +108,7 @@ rmSync(path, { recursive: true });`,
 
   test("从真实源码文本统计公共 API、真实异步、并行与故障注入标记", () => {
     const files = fixtures();
+    expect(files[0]!.content).toContain('from "@zeta-agent/agent"');
     const scan = scanAuthenticity(files);
     const diagnostics = files.map((file) => ({
       path: file.path,
