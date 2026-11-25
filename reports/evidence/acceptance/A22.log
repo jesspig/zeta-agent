@@ -1,0 +1,9 @@
+===== bun test packages/agent/src/tools/backend.contract.spec.ts packages/components/security/src/backend.matrix.spec.ts packages/components/security/src/credentials.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 14 pass
+ 0 fail
+ 154 expect() calls
+Ran 14 tests across 3 files. [446.00ms]
+
+exit=0

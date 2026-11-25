@@ -1,7 +1,7 @@
 # zeta-agent 设计文档集
 
 > **文档定位**：总入口。按 6 个主题目录组织，每个目录自带 `README.md` 索引。文档之间用相对链接交叉引用，并配有 UML 图（用例/类/组件/部署/对象/时序/活动/状态机）。
-> **检索截止**：2026-11-19。**组织规范**：无数字前缀；每个子目录一个 `README.md`；文档颗粒度对齐（总览/机制/组件/API/取舍四档）。
+> **检索截止**：2026-11-25（交付状态与发布证据复核）。**组织规范**：无数字前缀；每个子目录一个 `README.md`；文档颗粒度对齐（总览/机制/组件/API/取舍四档）。
 
 ## 目录导航
 
@@ -54,9 +54,10 @@ flowchart TB
         AG2 --- AG3["security.md<br/>安全与多租户（缺口 4+3）"]
     end
     subgraph D["delivery/"]
-        D0["README.md"] --- D1["roadmap.md<br/>阶段计划与验收 A1-A30"]
-        D1 --- D2["capability-matrix.md<br/>能力四态矩阵"]
+        D0["README.md"] --- D1["roadmap.md<br/>阶段计划与验收 A1-A40"]
+        D1 --- D2["capability-matrix.md<br/>能力四态矩阵 + 装配清单"]
         D2 --- D3["review-record.md<br/>全面审查与修复记录"]
+        D3 --- D4["release-runbook.md<br/>安装/升级/回滚"]
     end
     ROOT --> R0 & A0 & F0 & AF0 & AG0 & D0
 ```
@@ -130,8 +131,9 @@ flowchart TB
 
 1. 事实来源与分级 → [architecture/fact-registry.md](./architecture/fact-registry.md)
 2. 矛盾与未验证项 → [fact-registry.md §4/§5](./architecture/fact-registry.md#4-矛盾与争议显式并列)
-3. 验收判据 → [delivery/roadmap.md §4](./delivery/roadmap.md#4-验收标准)
-4. 每条设计的交叉引用 → 各文档末尾"文档关系"表
+3. 验收判据 → [delivery/roadmap.md §4](./delivery/roadmap.md#4-验收标准)（A1–A40）
+4. 最终逐项结论 → [最终验收报告](../../reports/acceptance-report.md) 与 [发布候选报告](../../reports/release-candidate.md)
+5. 每条设计的交叉引用 → 各文档末尾"文档关系"表
 
 ## 待用户裁决的问题（汇总）
 
@@ -147,5 +149,6 @@ flowchart TB
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ✅ 阶段 0-6 的组件级最小能力已存在并通过 849 个测试：HMR 状态机与 unit 快照、对象运行时进程内最小集、MCP 最小插件、显式 socket 审计、framework 事件 realm 隔离、研究轨四道可选护栏。
-- ⏳ 默认装配、公共 API、真实 HMR、完整 MCP、持久会话、ExecutionBackend、多租户 facade、跨进程对象、daemon/remote 与研究轨尚未端到端验收；现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，完整建设路线以执行文档为准。
+- ✅ 阶段 0-6 的能力已落地并通过全量测试（1409 pass / 1 skip）：真实文件 HMR、对象运行时（含 SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 握手/OAuth/双结果投影、持久会话、ExecutionBackend、多租户 facade、daemon/remote 与研究轨四道护栏。
+- ⏳ 默认 profile 仍保持安全收敛：研究轨、daemon/remote、跨进程对象默认不装配；shell/sandbox 操作 unsupported 时失败关闭；remote 为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC）。现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，逐项结论见 [最终验收报告](../../reports/acceptance-report.md)。
+- ⏳ 本机仅 win32-x64 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，由 CI 三平台矩阵覆盖；release-age 有 3 个过新依赖为 unverified。详见 [发布候选报告](../../reports/release-candidate.md) 与 [release-runbook.md](./delivery/release-runbook.md)。

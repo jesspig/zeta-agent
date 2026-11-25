@@ -1,0 +1,194 @@
+[
+  {
+    "id": "perf-first-frame",
+    "category": "performance",
+    "name": "首帧：真实 --version 子进程三次中位数",
+    "status": "pass",
+    "scope": "local",
+    "detail": "发布二进制 175/185/235ms，中位 185ms",
+    "evidence": [
+      {
+        "kind": "measurement",
+        "ref": "reports/gates-performance.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-effect",
+    "category": "performance",
+    "name": "effect 生命周期耗时",
+    "status": "pass",
+    "scope": "local",
+    "detail": "6 pass / 0 fail / 0 skip / 2 files，414ms",
+    "exitCode": 0,
+    "durationMs": 414,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 2 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/perf-effect.txt"
+      }
+    ]
+  },
+  {
+    "id": "perf-reload",
+    "category": "performance",
+    "name": "插件/HMR reload 耗时",
+    "status": "pass",
+    "scope": "local",
+    "detail": "14 pass / 0 fail / 0 skip / 3 files，696ms",
+    "exitCode": 0,
+    "durationMs": 696,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 3 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/perf-reload.txt"
+      }
+    ]
+  },
+  {
+    "id": "perf-guard-wait",
+    "category": "performance",
+    "name": "guard/审批等待耗时",
+    "status": "pass",
+    "scope": "local",
+    "detail": "12 pass / 0 fail / 0 skip / 2 files，445ms",
+    "exitCode": 0,
+    "durationMs": 445,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 2 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/perf-guard-wait.txt"
+      }
+    ]
+  },
+  {
+    "id": "perf-long-session",
+    "category": "performance",
+    "name": "长会话虚拟滚动/外置耗时",
+    "status": "pass",
+    "scope": "local",
+    "detail": "15 pass / 0 fail / 0 skip / 2 files，422ms",
+    "exitCode": 0,
+    "durationMs": 422,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 2 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/perf-long-session.txt"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:firstFrameMs",
+    "category": "performance",
+    "name": "性能预算 firstFrameMs",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 185 / 阈值 2000",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:effectMs",
+    "category": "performance",
+    "name": "性能预算 effectMs",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 414 / 阈值 1300",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:reloadMs",
+    "category": "performance",
+    "name": "性能预算 reloadMs",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 696 / 阈值 2400",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:guardWaitMs",
+    "category": "performance",
+    "name": "性能预算 guardWaitMs",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 445 / 阈值 1600",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:longSessionMs",
+    "category": "performance",
+    "name": "性能预算 longSessionMs",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 422 / 阈值 1400",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:memBytes",
+    "category": "performance",
+    "name": "性能预算 memBytes",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 82079744 / 阈值 268435456",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  },
+  {
+    "id": "perf-budget:tokenCost",
+    "category": "performance",
+    "name": "性能预算 tokenCost",
+    "status": "pass",
+    "scope": "local",
+    "detail": "实测 24595 / 阈值 32000（token 为同源估算器结果）",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/perf-benchmark.json"
+      }
+    ]
+  }
+]

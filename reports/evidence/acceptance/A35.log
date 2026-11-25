@@ -1,0 +1,9 @@
+===== bun test packages/agent/src/tools/backend.contract.spec.ts packages/components/security/src/egress.dataplane.spec.ts packages/components/security/src/vault.ownership.spec.ts packages/components/security/src/audit.integrity.spec.ts packages/components/security/src/emission.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 14 pass
+ 0 fail
+ 45 expect() calls
+Ran 14 tests across 5 files. [401.00ms]
+
+exit=0

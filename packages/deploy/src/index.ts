@@ -12,4 +12,5 @@ export * from "./rpc";
 export * from "./stdout";
 export * from "./daemon";
 export * from "./remote";
+export * from "./grpc";
 export * from "./supervisor";

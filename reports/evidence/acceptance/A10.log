@@ -1,0 +1,9 @@
+===== bun test apps/zeta-cli/src/headless-isolation.spec.ts apps/zeta-cli/src/print-e2e.spec.ts packages/agent/src/cli/modes.spec.ts packages/agent/src/cli/modes.failure.spec.ts packages/deploy/src/rpc.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 22 pass
+ 0 fail
+ 109 expect() calls
+Ran 22 tests across 5 files. [1.54s]
+
+exit=0

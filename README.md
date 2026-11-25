@@ -9,7 +9,7 @@ zeta-agent 是对 Cordis 论文与 pi（coding-agent）设计的一套自行实�
 - **不引入任何上游 Cordis 包**（`cordis`、`@cordisjs/*`、`@deepseek-ai/cordis` 均不进依赖树）；`packages/components/cordis/` 是对论文的自行实现命名。
 - **两个框架**：`@zeta-agent/framework`（通用框架，effect/fiber/loader/HMR）与 `@zeta-agent/agent-framework`（agent 运行时、事件协议、工具与会话）。
 - **facade 边界**：上层应用只通过 facade 包使用框架，不 import 组件内部；架构守护脚本（`scripts/guard-architecture.mjs`）静态强制。
-- **可插拔 TUI**：`@zeta-agent/tui` 以 OpenTUI + SolidJS 为默认且唯一发布实现；当前 `RendererBackend` 支持 `createTui({ backend })` 的快照注入，生产 `renderTui()` 的完整运行时 backend 契约纳入后续建设阶段。
+- **可插拔 TUI**：`@zeta-agent/tui` 以 OpenTUI + SolidJS 为默认且唯一发布实现；`RendererBackend` 与 `createTui({ backend })` 允许自定义 backend 接管完整交互（帧/事件/输入/resize/退出），slots 与 keymap 可热更新。
 
 ## 架构
 
@@ -39,6 +39,15 @@ bun run zeta --headless "提示词"   # 无 TTY 打印模式（CI 可用）
 ```
 
 模型配置（TUI 与 headless 通用）：设置 `ZETA_BASE_URL` / `ZETA_API_KEY` / `ZETA_MODEL` 三项使用 OpenAI 兼容模型；缺失时回退 echo（无网络）。密钥勿写入仓库。
+
+产品 profile：`local-safe`（默认）与 `local-full`（显式 opt-in），未知值直接失败关闭；研究轨、daemon/remote 与跨进程对象默认不装配，启用路径不可绕过护栏。公开 API 与 profile 明细见 [API 与测试](docs/desgin/framework/api-and-testing.md)。
+
+## 发布与验收
+
+- 发布候选版本：`zeta 0.1.0`（CLI `--version` 实测）；校验：`bun scripts/release-check.mjs`，产物说明与回滚步骤见 [release-runbook.md](docs/desgin/delivery/release-runbook.md)。
+- 发布报告：[release-candidate.md](reports/release-candidate.md)（版本、架构、SHA-256、SBOM、迁移/回滚说明、平台矩阵）。
+- 最终验收：[acceptance-report.md](reports/acceptance-report.md)（A1–A40 逐项 pass/fail 与命令证据），能力现状见 [capability-matrix.md](docs/desgin/delivery/capability-matrix.md)。
+- 本机仅 `win32-x64` 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，由 CI 三平台矩阵覆盖，不计 pass。`remote` 为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC），release-age 有 3 个过新依赖为 unverified，均列入待裁决。
 
 ## 历史归档
 

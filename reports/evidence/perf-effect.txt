@@ -1,0 +1,9 @@
+$ bun test packages/components/cordis/src/effect.spec.ts packages/components/cordis/src/effect.cleanup.spec.ts
+[exit=0]
+bun test v1.4.2 (744846f84)
+
+
+ 6 pass
+ 0 fail
+ 9 expect() calls
+Ran 6 tests across 2 files. [330.00ms]

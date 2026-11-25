@@ -1,0 +1,9 @@
+===== bun test packages/agent/src/tenant/object-distribution.spec.ts packages/agent/src/tenant/object-host.spec.ts packages/components/capabilities/src/quota.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 6 pass
+ 0 fail
+ 37 expect() calls
+Ran 6 tests across 3 files. [445.00ms]
+
+exit=0

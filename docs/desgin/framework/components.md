@@ -88,7 +88,7 @@ chord 的插件机制已经非常成熟：发现→esbuild 冷构建→`vm.Scrip
 
 chord 把"跨进程对象"做成一等公民（[02 chord 报告 §4-5](../research/pi-baseline.md)）。我们在 `@zeta-agent/framework/objects` 提供**兼容思想的最小实现**，不作为内核依赖。
 
-**实现状态（2026-11-24）**：contract / document / store（内存后端）/ link（memoryLinkPair）/ delta 已实现并通过语义与类型测试（`packages/framework/src/objects/objects.spec.ts`）；host/facet/Reference、IPC/WS、SQLite、group commit、outbox、jobs/derive/rollout 按 YAGNI 未实现。下表“zeta 草案”列中这些项仍为设计预留，不代表已实现：
+**实现状态（2026-11-25）**：contract / document / store（内存 + SQLite/WAL + group commit + outbox + recover）/ link（memory、IPC worker_threads、WS loopback）/ delta / host / facet / Reference / admission / jobs / derive / rollout 均已实现并通过语义与类型测试（`packages/framework/src/objects/objects.spec.ts`、`host.spec.ts`、`admission.spec.ts`、`distribution.store.spec.ts`、`distribution.link.spec.ts`、`distribution.jobs.spec.ts`、`distribution.rollout.spec.ts`）；默认 realm 不装配，IPC 非 OS 子进程。下表“zeta 草案”列用于说明设计来源，实现状态以本节和能力矩阵为准：
 
 | chord 概念 | zeta 草案 | 最小版取舍 |
 | --- | --- | --- |

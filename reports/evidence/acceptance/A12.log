@@ -1,0 +1,9 @@
+===== bun test packages/agent/src/extensions/loader.generation.spec.ts packages/framework/src/loader/extension-policy.spec.ts packages/framework/src/loader/plugin-transaction.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 15 pass
+ 0 fail
+ 38 expect() calls
+Ran 15 tests across 3 files. [486.00ms]
+
+exit=0

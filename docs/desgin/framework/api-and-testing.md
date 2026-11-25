@@ -24,6 +24,24 @@
 
 这些 API 是 [framework-model/engineering §12 验收](../architecture/engineering.md#12-验收标准) 的落地手段。
 
+### 11.1 当前公开 API 与产品 profile（2026-11-25）
+
+| 入口 | 公开 API | 说明 |
+| --- | --- | --- |
+| `@zeta-agent/framework` | `createContext()`、`defineComponent()`、`defineKey()`、`ctx.use/effect/get/set/isolate/intercept` | 通用框架 facade；effect 4 形态、Impl committed view、6 态 fiber |
+| `@zeta-agent/agent-framework` | `createAgent()`、`runLoop()`、`createToolPipeline()`、`AgentEvent` | Agent 运行时、事件协议与统一工具管线 |
+| `@zeta-agent/agent` | `createAgent()`、`createDefaultRuntime()`、`createAssemblyManifest()`、`diagnoseCapabilities()` | facade 装配；工具/会话/模式由 builtin 注册表派生 |
+| `@zeta-agent/tui` | `createTui({ backend })`、`RendererBackend`、`OpenTuiBackend` | OpenTUI 为默认唯一发布实现；自定义 backend 可接管完整交互 |
+| `@zeta-agent/deploy` | `createRuntimeProbeSource()`、`startDaemon()`、`createRemoteClient()`、`verifyArtifactBytes()` | local/daemon/remote 三态与探针、发布物架构校验 |
+
+产品 profile 只有 `local-safe`（默认）与 `local-full`（显式 opt-in），未知值抛 `INVALID_PROFILE`，不静默回退。两者实际安装的 builtin id 由 `packages/agent/src/assembly/builtins.ts` 唯一派生，并在 [capability-matrix.md](../delivery/capability-matrix.md) 的机器可读块中自动比对（`scripts/check-capability-matrix.mjs`）：
+
+- 共有：read/edit/find/grep/ls/powershell/write/bash 工具、skills registry、session store、interactive/json/print/rpc 四种 mode。
+- 仅 `local-full`：prompts registry、themes registry。
+- 默认不装配：研究轨、daemon/remote、跨进程对象；`remote` 通过显式 SDK 注入，且为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC）。
+
+CLI：`zeta`、`zeta --headless "提示词"`、`zeta --print`、`zeta --json`、`zeta --rpc`、`zeta --version`（返回 `zeta 0.1.0`）。发布与升级步骤见 [release-runbook.md](../delivery/release-runbook.md)。
+
 
 ## 12 与 chord / Cordis 的对应关系
 

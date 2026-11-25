@@ -180,7 +180,7 @@ flowchart TB
 | `@zeta-agent/observability` | effect 元树→span、脱敏、HealthBoard | cordis、capabilities |
 | `@zeta-agent/security` | 能力探测、隔离/seccomp、egress 默认拒绝 | cordis、capabilities |
 
-> **包结构对齐说明**：原设计列出的 `@zeta-agent/scope`/`seam`/`registry`/`health`/`hmr` 未作为独立子包落地——其职责并入 `capabilities`/`loader`/`observability`。`@zeta-agent/framework/objects` 已实现 contract/document/store/link/delta 的进程内最小集；host/facet/Reference、IPC/WS、SQLite、group commit、outbox、jobs/derive/rollout 尚未实现，纳入完整对象运行时阶段。`@zeta-agent/testing` 是独立测试工具包（`packages/testing`，不属于组件子包）。聚合包 `@zeta-agent/components` 汇总上述组件。
+> **包结构对齐说明**：原设计列出的 `@zeta-agent/scope`/`seam`/`registry`/`health`/`hmr` 未作为独立子包落地——其职责并入 `capabilities`/`loader`/`observability`。`@zeta-agent/framework/objects` 已实现 contract/document/store/link/delta 的进程内最小集；host/facet/Reference、admission、SQLite/WAL + group commit + outbox、IPC(worker_threads)/WS(loopback)、jobs/derive/rollout 已于 T-18/T-19 实现并有专测；默认 realm 不装配，IPC 非 OS 子进程，完整跨主机拓扑属后续平台阶段。`@zeta-agent/testing` 是独立测试工具包（`packages/testing`，不属于组件子包）。聚合包 `@zeta-agent/components` 汇总上述组件。
 
 **Agent 框架（聚合包 `@zeta-agent/agent-framework`）**：
 

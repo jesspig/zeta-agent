@@ -1,0 +1,16 @@
+===== bun test packages/deploy/src/daemon.spec.ts packages/deploy/src/remote.spec.ts packages/deploy/src/rpc.spec.ts packages/deploy/src/runtime-probes.spec.ts packages/deploy/src/artifact.spec.ts packages/deploy/src/canonical.spec.ts packages/deploy/src/targets.spec.ts packages/deploy/src/grpc.spec.ts =====
+bun test v1.4.2 (744846f84)
+(node:51812) DeprecationWarning: Calling start() is no longer necessary. It can be safely omitted.
+(Use `bun.exe --trace-warnings ...` to show where the warning was created)
+
+ 43 pass
+ 0 fail
+ 180 expect() calls
+Ran 43 tests across 8 files. [685.00ms]
+
+exit=0
+
+===== bun scripts/check-grpc-wire.mjs =====
+PASS grpc-wire: 检测到 wire-level gRPC：依赖 @grpc/grpc-js, @grpc/proto-loader，proto 服务与 server/client 桩齐备
+
+exit=0

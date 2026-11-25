@@ -48,6 +48,17 @@ flowchart LR
     REV["评审者"] -->|"查来源与矛盾"| FR["architecture/fact-registry.md"]
 ```
 
+## 研究轨落地状态（2026-11-25）
+
+> 本目录仍只记录事实与建议；实现状态以下表与 [delivery/capability-matrix.md](../delivery/capability-matrix.md) 为准，逐项验收见 [最终验收报告](../../../reports/acceptance-report.md)。
+
+| 研究方向 | 当前状态 | 证据 |
+| --- | --- | --- |
+| DREAM-RSI / Harness² 递归自演化 | 冻结 trace、`DecisionSurface` live/replay 对偶、grader 信息隔离与 tripwire 已实现；默认不装配 | `packages/agent/src/research/{frozen,pipeline,decision}.spec.ts` |
+| 晋升与护栏 | incumbent 参赛、严格更优才晋升、资格门禁/回归门禁强制；无绕过路径 | `packages/agent/src/research/{promotion,guardrails}.spec.ts` |
+| 经验检索与 fitness | evidence 完整落盘、任意历史候选检索、A/B/held-out/fitness seam 已实现 | `packages/agent/src/research/{experience-library,fitness}.spec.ts`、`packages/deploy/src/fitness.budget-identity.spec.ts` |
+| 论文与平台调研 | 事实与建议保持只读，不作为实现依据；与本目录结论冲突时以一手来源为准 | [fact-registry.md](../architecture/fact-registry.md) |
+
 ## 跨目录关系
 
 - 本目录的**事实**由 [architecture/fact-registry.md](../architecture/fact-registry.md) 逐条登记与分级。

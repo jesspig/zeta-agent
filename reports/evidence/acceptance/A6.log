@@ -1,0 +1,14 @@
+===== bun test packages/agent-framework/src/runtime/invariants.spec.ts packages/agent-framework/src/runtime/invariants-naming.spec.ts packages/agent-framework/src/tools/invariants.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 56 pass
+ 0 fail
+ 332 expect() calls
+Ran 56 tests across 3 files. [385.00ms]
+
+exit=0
+
+===== bun scripts/check-invariant-points.mjs =====
+要点关键词门通过：12 条要点两版哨兵/关键词齐全，真插件管线与三条假阳性修复已校验
+
+exit=0

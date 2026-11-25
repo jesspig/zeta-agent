@@ -1,0 +1,9 @@
+===== bun test packages/agent/src/plugins/effects/durable.crash.spec.ts packages/components/security/src/outbox.spec.ts packages/components/security/src/emission.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 14 pass
+ 0 fail
+ 81 expect() calls
+Ran 14 tests across 3 files. [381.00ms]
+
+exit=0
