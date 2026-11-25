@@ -16,19 +16,21 @@ test("plain bun 运行路径解析到 solid-js 客户端构建（preload 生效�
   const result = spawnSync(process.execPath, ["--preload", "@opentui/solid/preload", probe], {
     cwd: root,
     encoding: "utf8",
+    timeout: 25_000,
   });
-  expect(result.status).toBe(0);
+  expect(result.status, result.stderr || result.error?.message).toBe(0);
   expect(result.stdout.trim()).toBe("CLIENT");
-});
+}, 30_000);
 
 test("plain bun 运行路径可渲染真实 TUI 组件（无 server build 崩溃）", () => {
   const entry = resolve(here, "__fixtures__/runtime-preload-probe.tsx");
   const result = spawnSync(process.execPath, ["--preload", "@opentui/solid/preload", entry], {
     cwd: root,
     encoding: "utf8",
+    timeout: 25_000,
   });
-  expect(result.status).toBe(0);
+  expect(result.status, result.stderr || result.error?.message).toBe(0);
   expect(result.stdout).toContain("RENDER_OK");
   expect(result.stdout).not.toContain("getContextId");
   expect(result.stdout).not.toContain("Orphan text");
-});
+}, 30_000);

@@ -6,7 +6,7 @@ import { parseArgs } from "./args";
 const CLI = join(import.meta.dir, "index.ts");
 
 async function runCli(args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["bun", CLI, ...args], {
+  const proc = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: join(import.meta.dir, "..", "..", ".."),
     stdout: "pipe",
     stderr: "pipe",

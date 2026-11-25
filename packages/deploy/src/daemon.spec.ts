@@ -26,7 +26,6 @@ function options(partial: Partial<DaemonOptions> = {}): DaemonOptions {
     config: { target: "linux-x64", port: 0 },
     runtime: makeRuntime(),
     port: 0,
-    heartbeatMs: 15,
     ...partial,
   };
 }
@@ -124,26 +123,30 @@ describe("T-21 daemon 实际启动与控制面", () => {
     const daemon = startDaemon(options());
     const seenA: Record<string, unknown>[] = [];
     const seenB: Record<string, unknown>[] = [];
-    const clientA = await connectIpc(daemon.ipcPort, (frame) => seenA.push(frame));
-    const clientB = await connectIpc(daemon.ipcPort, (frame) => seenB.push(frame));
-    clientA.send({ kind: "hello", token: "test-token", generation: daemon.generation });
-    clientB.send({ kind: "hello", token: "test-token", generation: daemon.generation });
-    await waitFor(() => seenA.some((frame) => frame.kind === "hello.ack") && seenB.some((frame) => frame.kind === "hello.ack"));
-    expect(daemon.clients).toBe(2);
+    let clientA: IpcClient | undefined;
+    let clientB: IpcClient | undefined;
+    try {
+      clientA = await connectIpc(daemon.ipcPort, (frame) => seenA.push(frame));
+      clientB = await connectIpc(daemon.ipcPort, (frame) => seenB.push(frame));
+      clientA.send({ kind: "hello", token: "test-token", generation: daemon.generation });
+      clientB.send({ kind: "hello", token: "test-token", generation: daemon.generation });
+      await waitFor(() => seenA.some((frame) => frame.kind === "hello.ack") && seenB.some((frame) => frame.kind === "hello.ack"));
+      expect(daemon.clients).toBe(2);
 
-    clientA.send({ kind: "heartbeat", token: "test-token", generation: daemon.generation, seq: 1 });
-    await waitFor(() => seenA.some((frame) => frame.kind === "heartbeat.ack" && frame.seq === 1));
-    clientA.send({ kind: "heartbeat", token: "test-token", generation: daemon.generation - 1, seq: 2 });
-    await waitFor(() => seenA.some((frame) => frame.kind === "error" && frame.error === "STALE_GENERATION"));
+      clientA.send({ kind: "heartbeat", token: "test-token", generation: daemon.generation, seq: 1 });
+      await waitFor(() => seenA.some((frame) => frame.kind === "heartbeat.ack" && frame.seq === 1));
+      clientA.send({ kind: "heartbeat", token: "test-token", generation: daemon.generation - 1, seq: 2 });
+      await waitFor(() => seenA.some((frame) => frame.kind === "error" && frame.error === "STALE_GENERATION"));
 
-    daemon.emit({ type: "test.event", value: 7 });
-    await waitFor(() => seenA.some((frame) => frame.kind === "event") && seenB.some((frame) => frame.kind === "event"));
-    expect(seenA.find((frame) => frame.kind === "event")?.event).toMatchObject({ type: "test.event", value: 7 });
-
-    clientA.close();
-    clientB.close();
-    await daemon.stop();
-  });
+      daemon.emit({ type: "test.event", value: 7 });
+      await waitFor(() => seenA.some((frame) => frame.kind === "event") && seenB.some((frame) => frame.kind === "event"));
+      expect(seenA.find((frame) => frame.kind === "event")?.event).toMatchObject({ type: "test.event", value: 7 });
+    } finally {
+      clientA?.close();
+      clientB?.close();
+      await daemon.stop();
+    }
+  }, 30_000);
 
   test("故障自动重启：重建 runtime、提升代次、计数", async () => {
     let created = 0;

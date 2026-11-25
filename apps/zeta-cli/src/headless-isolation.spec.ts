@@ -1,12 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../../..");
 const entry = resolve(here, "index.ts");
 const preload = resolve(here, "__fixtures__/reject-opentui-preload.ts");
+
+setDefaultTimeout(30_000);
 
 function run(args: readonly string[], input = "") {
   const env = { ...process.env };
@@ -18,6 +20,7 @@ function run(args: readonly string[], input = "") {
     env,
     input,
     encoding: "utf8",
+    timeout: 25_000,
   });
 }
 

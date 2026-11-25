@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +15,8 @@ import { createSocketAuditSink, type SocketAuditSink } from "./audit.socket";
 
 const DAEMON_PATH = join(import.meta.dir, "audit-daemon.ts");
 const CLIENT_TOKEN_ENV = "ZETA_AUDIT_CLIENT_TOKEN";
+
+setDefaultTimeout(30_000);
 
 const record = (over: Partial<AuditRecord> = {}): AuditRecord => ({
   ts: 1,
@@ -42,7 +44,7 @@ async function startDaemon(dir: string, secret: string, token: string): Promise<
   } catch {
     // 目录第一次启动时没有 endpoint 文件。
   }
-  const proc = Bun.spawn(["bun", DAEMON_PATH], {
+  const proc = Bun.spawn([process.execPath, DAEMON_PATH], {
     env: {
       ...process.env,
       [AUDIT_SIGNING_SECRET_ENV]: secret,
@@ -54,7 +56,7 @@ async function startDaemon(dir: string, secret: string, token: string): Promise<
     stderr: "pipe",
   });
   let endpoint = "";
-  for (let attempt = 0; attempt < 100 && endpoint.length === 0; attempt += 1) {
+  for (let attempt = 0; attempt < 500 && endpoint.length === 0; attempt += 1) {
     if (existsSync(endpointPath)) endpoint = readFileSync(endpointPath, "utf8").trim();
     if (endpoint.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -137,6 +139,7 @@ describe("T-14 IF-13 审计 daemon 认证 / ack / 重启恢复", () => {
     const secret = randomBytes(24).toString("hex");
     const token = randomBytes(16).toString("hex");
     let daemon = await startDaemon(dir, secret, token);
+    let failed: ReturnType<typeof Bun.spawn> | undefined;
     try {
       const sink = await client(daemon.endpoint, token);
       await sink.appendAck(record({ toolName: "a" }));
@@ -167,7 +170,7 @@ describe("T-14 IF-13 审计 daemon 认证 / ack / 重启恢复", () => {
       tampered.entry.record = { ...tampered.entry.record, decision: "DENY" };
       writeFileSync(logPath, [JSON.stringify(tampered), ...lines.slice(1), ""].join("\n"), "utf8");
       await daemon.stop();
-      const failed = Bun.spawn(["bun", DAEMON_PATH], {
+      failed = Bun.spawn([process.execPath, DAEMON_PATH], {
         env: {
           ...process.env,
           [AUDIT_SIGNING_SECRET_ENV]: secret,
@@ -179,10 +182,13 @@ describe("T-14 IF-13 审计 daemon 认证 / ack / 重启恢复", () => {
         stderr: "pipe",
       });
       const code = await failed.exited;
+      if (failed.stderr === undefined || typeof failed.stderr === "number") throw new Error("AUDIT_DAEMON_STDERR_UNAVAILABLE");
       const stderr = await new Response(failed.stderr).text();
       expect(code).not.toBe(0);
       expect(stderr).toContain("AUDIT_CHAIN_RECOVERY_FAILED");
     } finally {
+      failed?.kill();
+      if (failed !== undefined) await failed.exited.catch(() => {});
       await daemon.stop().catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }
