@@ -1,19 +1,25 @@
 /**
- * T-27：生成 A1–A40 最终验收报告。
+ * T-01 验收报告 v2（zeta-acceptance/2）。
  *
- * 每一项都实际执行命令并把原始输出落盘到 reports/evidence/acceptance/Axx.log；
- * 命令失败、预期标记缺失或证据文件不存在一律 fail，不把 unavailable 当成 pass。
- * 运行：bun scripts/acceptance-report.mjs
+ * 报告只从本次运行的命令日志与退出码渲染：每项命令的原始输出落盘并记录 sha256，
+ * Markdown 由同一份 JSON 生成，禁止合并历史报告或手工改判 pass。
+ * 运行：bun scripts/acceptance-report.mjs [Axx ...] [--baseline=<sha>] [--ci-evidence=<path>] [--run-id=<id>]
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyCiEvidence, unverifiedCiEvidence } from "./ci-evidence.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EVIDENCE_DIR = join(ROOT, "reports/evidence/acceptance");
-const REPORT_DIR = join(ROOT, "reports");
+const REPORT_REL = "reports";
+const EVIDENCE_REL = "reports/evidence/acceptance";
 const BUN = process.execPath;
+const SCHEMA = "zeta-acceptance/2";
+export const GENERATOR_VERSION = "2.0.0";
+export const CRITERION_VERSION = "zeta-criteria/a1-a40/1";
+const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
 const ITEMS = [
   { id: "A1", title: "build/typecheck/test 全绿、lockfile、依赖图无环", commands: [
@@ -152,6 +158,13 @@ const ITEMS = [
   ] },
 ];
 
+export const ACCEPTANCE_SCHEMA = SCHEMA;
+export const ITEM_IDS = ITEMS.map((item) => item.id);
+
+export function sha256Hex(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 function sanitize(text) {
   const posixRoot = ROOT.replace(/\\/g, "/");
   return text
@@ -163,115 +176,412 @@ function sanitize(text) {
     .replace(/[A-Za-z]:\/(?:[^\/]+\/)*zeta-agent\//g, "./");
 }
 
-function summarize(output) {
-  const lines = output
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && /pass|fail|PASS|FAIL|SKIPPED|UNVERIFIED|successful|exit=|SHA-256|装配|断链|没有|无未实现/i.test(line));
-  return lines.slice(-6).join(" | ") || "无匹配摘要行（见日志）";
+export function buildSummaryFromLogs(output) {
+  const lines = output.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim().length === 0) lines.pop();
+  const matched = (line) => line.length > 0 && /pass|fail|PASS|FAIL|SKIPPED|UNVERIFIED|successful|exit=|SHA-256|装配|断链|没有|无未实现/i.test(line);
+  const picked = [];
+  for (let index = lines.length - 1; index >= 0 && picked.length < 6; index -= 1) {
+    const line = lines[index].trim();
+    if (!matched(line)) break;
+    picked.unshift(line);
+  }
+  return picked.join("\n") || "无匹配摘要行（见日志）";
 }
 
-function runCommand(spec) {
-  const result = spawnSync(BUN, spec.args, {
-    cwd: ROOT,
+export function parseArgs(argv = []) {
+  const ids = [];
+  let baseline;
+  let ciEvidence;
+  let runId;
+  let acceptedRisks;
+  let expectedDigests;
+  for (const arg of argv) {
+    if (arg.startsWith("--baseline=")) baseline = arg.slice("--baseline=".length);
+    else if (arg.startsWith("--ci-evidence=")) ciEvidence = arg.slice("--ci-evidence=".length);
+    else if (arg.startsWith("--run-id=")) runId = arg.slice("--run-id=".length);
+    else if (arg.startsWith("--accepted-risks=")) acceptedRisks = arg.slice("--accepted-risks=".length);
+    else if (arg.startsWith("--expected-digests=")) expectedDigests = arg.slice("--expected-digests=".length);
+    else if (arg.startsWith("--")) throw new Error(`UNKNOWN_OPTION: ${arg}`);
+    else ids.push(arg);
+  }
+  const unknown = ids.filter((id) => !ITEM_IDS.includes(id));
+  if (unknown.length > 0) throw new Error(`UNKNOWN_ITEM_ID: ${unknown.join(", ")}`);
+  return { ids, baseline, ciEvidence, runId, acceptedRisks, expectedDigests };
+}
+
+export function defaultRunGit(root = ROOT) {
+  return (args) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8", shell: false });
+    if (result.error !== undefined || result.status !== 0) {
+      throw new Error(`GIT_FAILED: ${args.join(" ")} (${result.error?.message ?? result.stderr?.trim() ?? result.status})`);
+    }
+    return result.stdout;
+  };
+}
+
+export function collectRunContext(options = {}) {
+  const {
+    root = ROOT,
+    baselineArg,
+    runIdArg,
+    runGit = defaultRunGit(root),
+    now = () => new Date(),
+    readBytes = (path) => readFileSync(path),
+  } = options;
+  const commit = (baselineArg ?? runGit(["rev-parse", "HEAD"])).trim();
+  if (commit.length === 0) throw new Error("BASELINE_COMMIT_UNAVAILABLE");
+  const ref = runGit(["rev-parse", "--abbrev-ref", "HEAD"]).trim() || "unknown";
+  const sourceTreeHash = runGit(["rev-parse", `${commit}^{tree}`]).trim();
+  if (sourceTreeHash.length === 0) throw new Error("SOURCE_TREE_HASH_UNAVAILABLE");
+  const status = runGit(["status", "--porcelain"]).trim();
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const generatorSourceHash = sha256Hex(readBytes(join(root, "scripts/acceptance-report.mjs")));
+  const timestamp = now().toISOString().replace(/[:.]/g, "-");
+  return {
+    id: runIdArg || `zeta-acceptance-${timestamp}-${commit.slice(0, 8)}`,
+    baseline: {
+      ref,
+      commit,
+      sourceTreeHash,
+      worktreeClean: status.length === 0,
+    },
+    toolchain: {
+      bun: process.versions.bun ?? null,
+      node: process.versions.node,
+      packageManager: packageJson.packageManager ?? "unknown",
+    },
+    generator: { version: GENERATOR_VERSION, sourceHash: generatorSourceHash },
+    criterionVersion: CRITERION_VERSION,
+    generatedAt: now().toISOString(),
+  };
+}
+
+export function executeCommand(spec, context = {}) {
+  const {
+    root = ROOT,
+    bun = BUN,
+    runId,
+    itemId,
+    index = 0,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    spawn = spawnSync,
+    writeBytes = (path, bytes) => writeFileSync(path, bytes),
+  } = context;
+  const result = spawn(bun, spec.args, {
+    cwd: root,
     encoding: "utf8",
     shell: false,
     maxBuffer: 64 * 1024 * 1024,
+    timeout: timeoutMs,
   });
-  const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  const expected = spec.expect === undefined ? true : new RegExp(spec.expect).test(output);
-  return { ok: result.status === 0 && expected, output: `${output}\nexit=${result.status ?? "null"}\n` };
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  const exitLine = `exit=${result.status ?? "null"}${result.signal ? ` signal=${result.signal}` : ""}${result.error ? ` error=${result.error.code ?? "unknown"}` : ""}\n`;
+  const rendered = sanitize(`${stdout}${stderr}${exitLine}`);
+  const logPath = `${EVIDENCE_REL}/${runId}/${itemId}.${index}.log`;
+  const bytes = Buffer.from(rendered, "utf8");
+  writeBytes(join(root, logPath), bytes);
+  const timedOut = result.error?.code === "ETIMEDOUT" || result.timedOut === true;
+  return {
+    argv: ["bun", ...spec.args],
+    cwd: ".",
+    exitCode: result.status ?? null,
+    signal: result.signal ?? null,
+    timedOut,
+    spawnError: result.error?.message ?? null,
+    log: { path: logPath, sha256: sha256Hex(bytes), bytes: bytes.length },
+    output: rendered,
+    expected: spec.expect === undefined ? true : new RegExp(spec.expect).test(rendered),
+  };
 }
 
-function platformSkipDetail() {
-  const path = join(ROOT, "reports/gates-platform.json");
-  if (!existsSync(path)) return "gates-platform.json 缺失";
+export function defaultPlatformSkip(root = ROOT) {
+  const path = join(root, "reports/gates-platform.json");
+  if (!existsSync(path)) return ["gates-platform.json 缺失"];
   const gates = JSON.parse(readFileSync(path, "utf8"));
   const skipped = gates
     .filter((gate) => gate.id?.startsWith("platform:") && gate.status !== "pass")
     .map((gate) => gate.id?.replace("platform:", "") ?? "unknown");
-  return skipped.length === 0 ? undefined : `skipped=${skipped.length}: ${skipped.join(", ")}`;
+  return skipped;
 }
 
-export async function runAcceptance(ids = []) {
-  mkdirSync(EVIDENCE_DIR, { recursive: true });
-  const results = [];
+export function evaluateItem(item, commandResults, options = {}) {
+  const reasonCodes = [];
+  let status = "pass";
+  let note = item.note;
+  for (const command of commandResults) {
+    let commandStatus = "pass";
+    if (command.spawnError !== null && command.spawnError !== undefined) {
+      commandStatus = "blocked";
+      reasonCodes.push(`COMMAND_SPAWN_ERROR:${command.spawnError}`);
+    } else if (command.timedOut) {
+      commandStatus = "fail";
+      reasonCodes.push(`COMMAND_TIMED_OUT:${command.argv.join(" ")}`);
+    } else if (command.signal !== null && command.signal !== undefined) {
+      commandStatus = "fail";
+      reasonCodes.push(`COMMAND_SIGNAL:${command.signal}`);
+    } else if (command.exitCode !== 0) {
+      commandStatus = "fail";
+      reasonCodes.push(`COMMAND_NONZERO_EXIT:${command.argv.join(" ")}=${command.exitCode}`);
+    } else if (!command.expected) {
+      commandStatus = "fail";
+      reasonCodes.push(`EXPECTED_MARKER_MISSING:${command.argv.join(" ")}`);
+    }
+    if (commandStatus === "fail") status = "fail";
+    else if (commandStatus === "blocked" && status !== "fail") status = "blocked";
+  }
+  if (item.id === "A36") {
+    const skipped = options.platformSkipped ?? defaultPlatformSkip(options.root ?? ROOT);
+    if (skipped.length > 0) {
+      status = "fail";
+      reasonCodes.push(`PLATFORM_TARGETS_SKIPPED:${skipped.join(",")}`);
+      note = `${item.note ?? ""}；证据：${skipped.join(", ")}`;
+    }
+  }
+  const logs = commandResults.map((command) => command.output).join("\n");
+  return {
+    id: item.id,
+    title: item.title,
+    criterionVersion: options.criterionVersion ?? CRITERION_VERSION,
+    status,
+    commands: commandResults.map((command) => ({
+      argv: command.argv,
+      cwd: command.cwd,
+      exitCode: command.exitCode,
+      signal: command.signal,
+      timedOut: command.timedOut,
+      log: command.log,
+    })),
+    evidence: commandResults.map((command) => command.log.path),
+    summary: buildSummaryFromLogs(logs),
+    reasonCodes,
+    note,
+  };
+}
+
+export async function runAcceptance(ids = [], options = {}) {
+  const {
+    root = ROOT,
+    runId,
+    criterionVersion = CRITERION_VERSION,
+    execute = executeCommand,
+    platformSkipped = defaultPlatformSkip(root),
+  } = options;
+  mkdirSync(join(root, EVIDENCE_REL), { recursive: true });
   const selected = ids.length === 0 ? ITEMS : ITEMS.filter((item) => ids.includes(item.id));
+  if (selected.length === 0) throw new Error(`NO_ITEMS_SELECTED: ${ids.join(", ")}`);
+  const results = [];
   for (const item of selected) {
-    const logs = [];
-    const commands = [];
-    let ok = true;
-    for (const spec of item.commands) {
-      const command = ["bun", ...spec.args].join(" ");
-      commands.push(command);
-      const executed = runCommand(spec);
-      logs.push(`===== ${command} =====\n${executed.output}`);
-      if (!executed.ok) ok = false;
+    const commandResults = [];
+    for (let index = 0; index < item.commands.length; index += 1) {
+      commandResults.push(execute(item.commands[index], { root, runId, itemId: item.id, index }));
     }
-    let status = ok ? "pass" : "fail";
-    let note = item.note;
-    if (item.id === "A36") {
-      const skipped = platformSkipDetail();
-      if (skipped !== undefined) {
-        status = "fail";
-        note = `${item.note ?? ""}；证据：${skipped}`;
-      }
-    }
-    const evidence = `reports/evidence/acceptance/${item.id}.log`;
-    writeFileSync(join(ROOT, evidence), sanitize(logs.join("\n")), "utf8");
-    results.push({
-      id: item.id,
-      title: item.title,
-      status,
-      commands,
-      summary: summarize(logs.join("\n")),
-      evidence,
-      note,
-    });
-    console.log(`${status.toUpperCase()} ${item.id}: ${item.title}`);
+    results.push(evaluateItem(item, commandResults, { criterionVersion, platformSkipped, root }));
+    console.log(`${results[results.length - 1].status.toUpperCase()} ${item.id}: ${item.title}`);
   }
   return results;
 }
 
-export function renderAcceptanceMarkdown(results) {
-  const pass = results.filter((item) => item.status === "pass").length;
-  const fail = results.filter((item) => item.status === "fail").length;
+function fullPlan(ids, reasonCodes) {
+  return {
+    mode: "full",
+    reusedIds: [],
+    rerunIds: ids.length === 0 ? ITEM_IDS.slice() : ITEM_IDS.slice(),
+    reasonCodes: reasonCodes.length > 0 ? reasonCodes : ["PARTIAL_NOT_REQUESTED"],
+  };
+}
+
+/**
+ * 纯函数：只有 baseline/sourceTreeHash/criterionVersion/generatorVersion 完全一致
+ * 且旧日志哈希存在并与落盘字节匹配时，才允许复用未请求项；否则全量重跑。
+ */
+export function planPartialRerun(options = {}) {
+  const {
+    ids = [],
+    previous,
+    context,
+    root = ROOT,
+    readBytes = (path) => readFileSync(join(root, path)),
+  } = options;
+  if (ids.length === 0) return fullPlan(ids, ["PARTIAL_NOT_REQUESTED"]);
+  if (previous === undefined || previous === null || previous.schema !== SCHEMA) {
+    return fullPlan(ids, ["PARTIAL_PREVIOUS_SCHEMA_MISMATCH"]);
+  }
+  const reasons = [];
+  const previousContext = previous.run ?? {};
+  if (previousContext.baseline?.commit !== context.baseline.commit) reasons.push("PARTIAL_BASELINE_MISMATCH");
+  if (previousContext.baseline?.ref !== context.baseline.ref) reasons.push("PARTIAL_BASELINE_REF_MISMATCH");
+  if (previousContext.baseline?.sourceTreeHash !== context.baseline.sourceTreeHash) {
+    reasons.push("PARTIAL_SOURCE_TREE_HASH_MISMATCH");
+  }
+  if (previousContext.generator?.version !== context.generator.version
+    || previousContext.generator?.sourceHash !== context.generator.sourceHash) {
+    reasons.push("PARTIAL_GENERATOR_MISMATCH");
+  }
+  const previousItems = Array.isArray(previous.items) ? previous.items : [];
+  if (previousItems.length !== ITEM_IDS.length) reasons.push("PARTIAL_ITEMS_INCOMPLETE");
+  for (const item of previousItems) {
+    if (item?.criterionVersion !== context.criterionVersion) {
+      reasons.push(`PARTIAL_CRITERION_VERSION_MISMATCH:${item?.id ?? "unknown"}`);
+      continue;
+    }
+    const commands = Array.isArray(item.commands) ? item.commands : [];
+    if (commands.length === 0) reasons.push(`PARTIAL_LOG_HASH_MISSING:${item.id}`);
+    for (const command of commands) {
+      const digest = command?.log?.sha256;
+      if (typeof digest !== "string" || !/^[0-9a-f]{64}$/i.test(digest)) {
+        reasons.push(`PARTIAL_LOG_HASH_MISSING:${item.id}`);
+        continue;
+      }
+      try {
+        if (sha256Hex(readBytes(command.log.path)) !== digest.toLowerCase()) {
+          reasons.push(`PARTIAL_LOG_HASH_MISMATCH:${item.id}`);
+        }
+      } catch {
+        reasons.push(`PARTIAL_LOG_HASH_MISSING:${item.id}`);
+      }
+    }
+  }
+  if (reasons.length > 0) return fullPlan(ids, [...new Set(reasons)]);
+  return {
+    mode: "partial",
+    reusedIds: ITEM_IDS.filter((id) => !ids.includes(id)),
+    rerunIds: ITEM_IDS.filter((id) => ids.includes(id)),
+    reasonCodes: [],
+  };
+}
+
+export function applyAcceptedRisks(items, risks = []) {
+  if (!Array.isArray(risks)) throw new TypeError("acceptedRisks 必须是数组");
+  return items.map((item) => {
+    const matched = risks.filter((risk) => risk?.itemId === item.id || risk?.itemId === "*");
+    if (matched.length === 0) return item;
+    return {
+      ...item,
+      reasonCodes: [...new Set([...(item.reasonCodes ?? []), "ACCEPTED_RISK_RECORDED"])],
+    };
+  });
+}
+
+export function assertAcceptedRisksDoNotUpgrade(before, after) {
+  const beforeById = new Map(before.map((item) => [item.id, item]));
+  for (const item of after) {
+    const prior = beforeById.get(item.id);
+    if (prior !== undefined && prior.status !== "pass" && item.status === "pass") {
+      throw new Error(`ACCEPTED_RISK_UPGRADED_PASS: ${item.id}`);
+    }
+  }
+}
+
+export function exitCodeForReport(report) {
+  const badItem = report.items.some((item) => item.status !== "pass");
+  return badItem || report.ciEvidence?.result === "fail" ? 1 : 0;
+}
+
+export function renderAcceptanceMarkdown(report) {
+  const items = report.items ?? [];
+  const count = (status) => items.filter((item) => item.status === status).length;
+  const pass = count("pass");
+  const fail = count("fail");
+  const blocked = count("blocked");
+  const unverified = count("unverified");
   const lines = [
-    "# A1–A40 最终验收报告",
+    "# A1–A40 最终验收报告（v2）",
     "",
-    `- 基线：feature/release-quality-gates @ \`9b6f231\`（T-26 已提交）`,
-    `- 结论：pass ${pass} / fail ${fail} / 共 ${results.length} 项`,
-    "- 口径：每项均实际执行命令，原始输出见 `reports/evidence/acceptance/Axx.log`；未通过项不写 pass。",
+    `- Schema：\`${report.schema}\``,
+    `- Run ID：\`${report.run.id}\``,
+    `- 基线：${report.run.baseline.ref} @ \`${report.run.baseline.commit}\``,
+    `- 源树哈希：\`${report.run.baseline.sourceTreeHash}\``,
+    `- 工作树干净：${report.run.baseline.worktreeClean ? "yes" : "no"}`,
+    `- 工具链：bun=${report.run.toolchain.bun ?? "unknown"} node=${report.run.toolchain.node} packageManager=${report.run.toolchain.packageManager}`,
+    `- 生成器：${report.run.generator.version} @ \`${report.run.generator.sourceHash}\``,
+    `- CI 证据：${report.ciEvidence.result}（${report.ciEvidence.verifier}）${report.ciEvidence.reasonCodes.length > 0 ? `；${report.ciEvidence.reasonCodes.join(", ")}` : ""}`,
+    `- 部分重跑：${report.partialRerun.mode}；复用=${report.partialRerun.reusedIds.length}；重跑=${report.partialRerun.rerunIds.length}${report.partialRerun.reasonCodes.length > 0 ? `；${report.partialRerun.reasonCodes.join(", ")}` : ""}`,
+    `- 结论：pass=${pass} fail=${fail} blocked=${blocked} unverified=${unverified} 共=${items.length}`,
+    "- 口径：摘要片段逐项取自本次运行的命令日志，原始字节见 evidence 路径与 SHA-256；未通过项不写 pass。",
     "",
-    "| ID | 判据 | 结论 | 关键证据 | 说明 |",
+    "| ID | 判据版本 | 结论 | 关键证据（本次日志摘要） | 原因码 |",
     "| --- | --- | --- | --- | --- |",
-    ...results.map((item) => {
-      const detail = `${item.evidence}；${item.commands.map((c) => `\`${c}\``).join("、")}；${item.summary}`;
-      return `| ${item.id} | ${item.title} | ${item.status.toUpperCase()} | ${detail.replace(/\|/g, "\\|")} | ${item.note ?? "—"} |`;
+    ...items.map((item) => {
+      const detail = `${item.evidence.join("、")}；${item.summary.replace(/\n/g, "<br>")}`;
+      return `| ${item.id} | ${item.criterionVersion} | ${item.status.toUpperCase()} | ${detail.replace(/\|/g, "\\|")} | ${item.reasonCodes.join(", ")} |`;
     }),
     "",
     "## 待裁决项",
     "",
-    "- A36：本机仅 win32-x64 可安装/启动/升级/回滚，其余 11 个 target 在 `reports/gates-platform.json` 为 skipped，不能计 pass；需 CI 三平台矩阵补证。",
-    "- 供应链：`reports/release-ages.json` 中 @opentui/solid、solid-js、turbo 过新（unverified），未改阈值；不属于 A 项 pass 依据。",
+    "- A36：本机仅 win32-x64 可安装/启动/升级/回滚，其余非宿主 target 不计 pass；需 CI 三平台矩阵补证。",
+    "- 供应链与 CI 证据未通过项保持 fail/unverified，不作为 A 项 pass 依据。",
     "",
   ];
   return lines.join("\n");
 }
 
-export async function main() {
-  const ids = process.argv.slice(2);
-  const resultPath = join(REPORT_DIR, "acceptance-report.json");
-  const previous = ids.length > 0 && existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : [];
-  const updated = await runAcceptance(ids);
-  const byId = new Map([...previous, ...updated].map((item) => [item.id, item]));
-  const results = ITEMS.map((item) => byId.get(item.id)).filter((item) => item !== undefined);
-  mkdirSync(REPORT_DIR, { recursive: true });
-  writeFileSync(resultPath, `${JSON.stringify(results, null, 2)}\n`, "utf8");
-  writeFileSync(join(REPORT_DIR, "acceptance-report.md"), renderAcceptanceMarkdown(results), "utf8");
-  const fail = results.filter((item) => item.status === "fail").map((item) => item.id);
-  console.log(`acceptance: pass=${results.length - fail.length} fail=${fail.length} (${fail.join(", ")})`);
-  return 0;
+export async function main(argv = process.argv.slice(2), deps = {}) {
+  const args = parseArgs(argv);
+  const {
+    root = ROOT,
+    reportDir = join(root, REPORT_REL),
+    runGit = defaultRunGit(root),
+    now = () => new Date(),
+    execute = executeCommand,
+    runAcceptanceFn = runAcceptance,
+    readText = (path) => readFileSync(path, "utf8"),
+    writeText = (path, text) => writeFileSync(path, text, "utf8"),
+    mkdir = (path) => mkdirSync(path, { recursive: true }),
+  } = deps;
+  const context = deps.context ?? collectRunContext({ root, baselineArg: args.baseline, runIdArg: args.runId, runGit, now });
+  const previousPath = join(reportDir, "acceptance-report.json");
+  const previous = existsSync(previousPath) ? JSON.parse(readText(previousPath)) : undefined;
+  const plan = deps.plan ?? planPartialRerun({ ids: args.ids, previous, context, root });
+
+  const targets = plan.mode === "partial" ? plan.rerunIds : ITEM_IDS;
+  const fresh = await runAcceptanceFn(targets, {
+    root,
+    runId: context.id,
+    criterionVersion: context.criterionVersion,
+    execute,
+  });
+  const freshById = new Map(fresh.map((item) => [item.id, item]));
+  let items = (previous?.items ?? []).map((item) => freshById.get(item.id) ?? item);
+  for (const item of fresh) {
+    if (!items.some((existing) => existing.id === item.id)) items.push(item);
+  }
+  items = ITEMS.map((item) => items.find((candidate) => candidate.id === item.id)).filter((item) => item !== undefined);
+
+  let ciEvidence = unverifiedCiEvidence();
+  if (args.ciEvidence !== undefined) {
+    const ciPath = isAbsolute(args.ciEvidence) ? args.ciEvidence : resolve(root, args.ciEvidence);
+    const data = JSON.parse(readText(ciPath));
+    const expectedDigests = args.expectedDigests !== undefined
+      ? JSON.parse(readText(isAbsolute(args.expectedDigests) ? args.expectedDigests : resolve(root, args.expectedDigests)))
+      : data.expectedDigests ?? {};
+    ciEvidence = verifyCiEvidence(data, { baselineCommit: context.baseline.commit, root, expectedDigests });
+  }
+
+  let acceptedRisks = [];
+  if (args.acceptedRisks !== undefined) {
+    const riskPath = isAbsolute(args.acceptedRisks) ? args.acceptedRisks : resolve(root, args.acceptedRisks);
+    acceptedRisks = JSON.parse(readText(riskPath));
+  }
+  const beforeRisks = items;
+  items = applyAcceptedRisks(items, acceptedRisks);
+  assertAcceptedRisksDoNotUpgrade(beforeRisks, items);
+
+  const report = {
+    schema: SCHEMA,
+    run: context,
+    items,
+    ciEvidence,
+    partialRerun: plan,
+    acceptedRisks,
+  };
+  mkdir(reportDir);
+  writeText(join(reportDir, "acceptance-report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  writeText(join(reportDir, "acceptance-report.md"), renderAcceptanceMarkdown(report));
+  const code = exitCodeForReport(report);
+  console.log(`acceptance v2: run=${context.id} baseline=${context.baseline.commit} ci=${ciEvidence.result} exit=${code}`);
+  return code;
 }
 
 if (import.meta.main) {
