@@ -1,0 +1,242 @@
+{
+  "schema": 1,
+  "baseline": "T-26 本机实测：win32-x64 / bun 1.4.2 / 2026-11-25；阈值为棘轮下限，不得下调",
+  "authenticity": {
+    "baseline": {
+      "files": 284,
+      "publicApiImports": 59,
+      "realAsyncFiles": 189,
+      "parallelFiles": 33,
+      "faultInjectionFiles": 40,
+      "mockOnlyFiles": 0,
+      "fakeTimerFiles": 1
+    },
+    "requiredMarkers": [
+      {
+        "file": "packages/agent/src/plugins/mcp/conformance.spec.ts",
+        "kind": "conformance 公共 API + 真实异步",
+        "markers": ["createMcpProtocol", "await", "expect("]
+      },
+      {
+        "file": "packages/components/security/src/egress.dataplane.spec.ts",
+        "kind": "egress 安全门真实异步",
+        "markers": ["assertEgressAllowed", "await", "expect("]
+      },
+      {
+        "file": "packages/agent/src/tools/backend.contract.spec.ts",
+        "kind": "backend 契约 + 真实故障注入",
+        "markers": ["await", "expect(", "rmSync"]
+      },
+      {
+        "file": "packages/agent/src/assembly/runtime.session-store.spec.ts",
+        "kind": "持久化崩溃恢复故障注入",
+        "markers": ["await", "expect(", "rmSync"]
+      },
+      {
+        "file": "packages/agent/src/plugins/permissions/approval.spec.ts",
+        "kind": "权限审批真实异步",
+        "markers": ["await", "expect("]
+      },
+      {
+        "file": "packages/tui/src/osc-security.spec.ts",
+        "kind": "红队终端注入断言",
+        "markers": ["expect("]
+      },
+      {
+        "file": "packages/agent/src/facade.tenant.spec.ts",
+        "kind": "真实并行多租户测试",
+        "markers": ["Promise.all", "await", "expect("]
+      }
+    ]
+  },
+  "performance": {
+    "budget": {
+      "maxFirstFrameMs": 2000,
+      "maxEffectMs": 1300,
+      "maxReloadMs": 2400,
+      "maxGuardWaitMs": 1600,
+      "maxLongSessionMs": 1400,
+      "maxMemBytes": 268435456,
+      "maxTokenCost": 32000
+    },
+    "measurement": {
+      "firstFrameMs": 165,
+      "effectMs": 409,
+      "reloadMs": 768,
+      "guardWaitMs": 517,
+      "longSessionMs": 441,
+      "memBytes": 82710528,
+      "tokenCost": 24595,
+      "note": "本机实测；首帧/内存/token 沿用 deploy 既有预算，其余阈值取实测×3向上取整；token 使用与 offload.ts 同源的字节数/4 估算器"
+    }
+  },
+  "testCategories": {
+    "unit": {
+      "name": "单元测试",
+      "files": [
+        "packages/components/cordis/src/effect.spec.ts",
+        "packages/components/cordis/src/effect.cleanup.spec.ts",
+        "packages/components/cordis/src/fiber.spec.ts",
+        "packages/components/cordis/src/reflect.spec.ts",
+        "packages/components/events/src/events.spec.ts",
+        "packages/components/events/src/events.error.spec.ts",
+        "packages/framework/src/context.spec.ts",
+        "packages/framework/src/context.lifecycle.spec.ts",
+        "packages/testing/src/assertions.test.ts",
+        "packages/testing/src/observation.map.spec.ts",
+        "packages/testing/src/quality-gates.spec.ts"
+      ]
+    },
+    "property": {
+      "name": "属性测试",
+      "files": [
+        "packages/testing/src/properties.spec.ts",
+        "packages/components/capabilities/src/principal.spec.ts",
+        "packages/components/capabilities/src/quota.spec.ts"
+      ]
+    },
+    "contract": {
+      "name": "契约测试",
+      "files": [
+        "packages/agent/src/tools/backend.contract.spec.ts",
+        "packages/tui/src/backend.contract.spec.ts",
+        "packages/agent/src/session/store.conformance.spec.ts",
+        "packages/framework/src/objects/objects.spec.ts",
+        "packages/framework/src/objects/host.spec.ts"
+      ]
+    },
+    "e2e": {
+      "name": "端到端测试",
+      "files": [
+        "packages/agent/src/extensions/hot-reload.e2e.spec.ts",
+        "packages/agent/src/plugins/hot-reload.e2e.spec.ts",
+        "packages/agent/src/plugins/mcp/mcp-e2e.spec.ts",
+        "packages/agent/src/providers/image.e2e.spec.ts",
+        "apps/zeta-cli/src/print-e2e.spec.ts"
+      ]
+    },
+    "pty": {
+      "name": "PTY/终端保真",
+      "files": [
+        "packages/tui/src/pty.spec.ts",
+        "packages/tui/src/terminal-fidelity.spec.ts",
+        "packages/tui/src/osc-security.spec.ts"
+      ]
+    },
+    "crash": {
+      "name": "崩溃一致性",
+      "files": [
+        "packages/agent/src/plugins/effects/durable.crash.spec.ts",
+        "packages/agent/src/session/tree.atomic.spec.ts",
+        "packages/components/security/src/audit.daemon.recovery.spec.ts",
+        "packages/framework/src/loader/plugin-transaction.spec.ts"
+      ]
+    },
+    "sandbox": {
+      "name": "沙箱与隔离",
+      "files": [
+        "packages/agent/src/tools/confinement.spec.ts",
+        "packages/framework/src/loader/extension-policy.spec.ts",
+        "packages/agent/src/plugins/permissions/guard.spec.ts",
+        "packages/agent/src/facade.plugin-install.spec.ts"
+      ]
+    },
+    "network": {
+      "name": "网络与数据面",
+      "files": [
+        "packages/components/security/src/egress.spec.ts",
+        "packages/components/security/src/egress.dataplane.spec.ts",
+        "packages/agent/src/plugins/mcp/transport.spec.ts",
+        "packages/agent/src/plugins/mcp/connection.spec.ts",
+        "apps/zeta-cli/src/connection.spec.ts"
+      ]
+    },
+    "conformance": {
+      "name": "协议 conformance",
+      "files": [
+        "packages/agent/src/plugins/mcp/conformance.spec.ts",
+        "packages/agent/src/providers/conformance.spec.ts",
+        "packages/deploy/src/targets.spec.ts",
+        "packages/tui/src/runtime-backend.spec.ts"
+      ]
+    }
+  },
+  "securityGroups": {
+    "permissions": {
+      "name": "权限排列",
+      "files": [
+        "packages/agent/src/plugins/permissions/approval.spec.ts",
+        "packages/agent/src/plugins/permissions/guard.spec.ts",
+        "packages/agent/src/plugins/permissions/policy.spec.ts",
+        "packages/agent/src/facade.permission.spec.ts",
+        "packages/components/capabilities/src/principal.spec.ts"
+      ]
+    },
+    "egress": {
+      "name": "egress 不可绕过",
+      "files": [
+        "packages/components/security/src/egress.spec.ts",
+        "packages/components/security/src/egress.dataplane.spec.ts",
+        "packages/agent/src/facade.security-boundary.spec.ts"
+      ]
+    },
+    "credentials": {
+      "name": "凭证泄露",
+      "files": [
+        "packages/components/security/src/credentials.spec.ts",
+        "packages/components/security/src/vault.spec.ts",
+        "packages/components/security/src/vault.ownership.spec.ts",
+        "packages/agent/src/providers/credential-boundary.spec.ts"
+      ]
+    },
+    "audit": {
+      "name": "审计与重启恢复",
+      "files": [
+        "packages/components/security/src/audit.spec.ts",
+        "packages/components/security/src/audit.integrity.spec.ts",
+        "packages/components/security/src/audit.daemon.recovery.spec.ts",
+        "packages/components/security/src/audit.socket.spec.ts",
+        "packages/agent/src/facade.audit.socket.spec.ts"
+      ]
+    },
+    "extensionSandbox": {
+      "name": "扩展沙箱",
+      "files": [
+        "packages/agent/src/extensions/loader.spec.ts",
+        "packages/agent/src/extensions/hot-reload.e2e.spec.ts",
+        "packages/framework/src/loader/extension-policy.spec.ts",
+        "packages/agent/src/facade.plugin-install.spec.ts"
+      ]
+    },
+    "redTeam": {
+      "name": "红队用例",
+      "files": [
+        "packages/tui/src/osc-security.spec.ts",
+        "packages/components/security/src/backend.disabled.spec.ts",
+        "packages/agent/src/tools/confinement.spec.ts",
+        "packages/deploy/src/artifact.spec.ts"
+      ]
+    }
+  },
+  "supplyChain": {
+    "minSbomComponents": 120,
+    "releaseAgeMinDays": 7,
+    "forbiddenPackages": ["cordis", "@cordisjs"],
+    "requiredCiWorkflow": ".github/workflows/quality-gates.yml",
+    "targets": [
+      "linux-x64",
+      "linux-arm64",
+      "linux-x64-musl",
+      "linux-arm64-musl",
+      "linux-x64-baseline",
+      "linux-arm64-baseline",
+      "darwin-x64",
+      "darwin-arm64",
+      "darwin-x64-baseline",
+      "win32-x64",
+      "win32-arm64",
+      "win32-x64-baseline"
+    ],
+    "ciPlatforms": ["ubuntu-latest", "macos-latest", "windows-latest"]
+  }
+}

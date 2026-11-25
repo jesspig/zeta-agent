@@ -1,0 +1,182 @@
+[
+  {
+    "id": "tests:unit",
+    "category": "tests",
+    "name": "单元测试",
+    "status": "pass",
+    "scope": "local",
+    "detail": "92 pass / 0 fail / 0 skip / 11 files，724ms",
+    "exitCode": 0,
+    "durationMs": 724,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 11 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:unit.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:property",
+    "category": "tests",
+    "name": "属性测试",
+    "status": "pass",
+    "scope": "local",
+    "detail": "12 pass / 0 fail / 0 skip / 3 files，811ms",
+    "exitCode": 0,
+    "durationMs": 811,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 3 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:property.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:contract",
+    "category": "tests",
+    "name": "契约测试",
+    "status": "pass",
+    "scope": "local",
+    "detail": "28 pass / 0 fail / 0 skip / 5 files，696ms",
+    "exitCode": 0,
+    "durationMs": 696,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 5 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:contract.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:e2e",
+    "category": "tests",
+    "name": "端到端测试",
+    "status": "pass",
+    "scope": "local",
+    "detail": "9 pass / 0 fail / 0 skip / 5 files，656ms",
+    "exitCode": 0,
+    "durationMs": 656,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 5 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:e2e.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:pty",
+    "category": "tests",
+    "name": "PTY/终端保真",
+    "status": "pass",
+    "scope": "local",
+    "detail": "19 pass / 0 fail / 1 skip / 3 files，520ms",
+    "exitCode": 0,
+    "durationMs": 520,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 3 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:pty.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:crash",
+    "category": "tests",
+    "name": "崩溃一致性",
+    "status": "pass",
+    "scope": "local",
+    "detail": "19 pass / 0 fail / 0 skip / 4 files，1208ms",
+    "exitCode": 0,
+    "durationMs": 1208,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 4 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:crash.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:sandbox",
+    "category": "tests",
+    "name": "沙箱与隔离",
+    "status": "pass",
+    "scope": "local",
+    "detail": "27 pass / 0 fail / 0 skip / 4 files，534ms",
+    "exitCode": 0,
+    "durationMs": 534,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 4 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:sandbox.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:network",
+    "category": "tests",
+    "name": "网络与数据面",
+    "status": "pass",
+    "scope": "local",
+    "detail": "25 pass / 0 fail / 0 skip / 5 files，595ms",
+    "exitCode": 0,
+    "durationMs": 595,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 5 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:network.txt"
+      }
+    ]
+  },
+  {
+    "id": "tests:conformance",
+    "category": "tests",
+    "name": "协议 conformance",
+    "status": "pass",
+    "scope": "local",
+    "detail": "17 pass / 0 fail / 0 skip / 4 files，901ms",
+    "exitCode": 0,
+    "durationMs": 901,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun test 4 files"
+      },
+      {
+        "kind": "file",
+        "ref": "reports/evidence/tests:conformance.txt"
+      }
+    ]
+  }
+]

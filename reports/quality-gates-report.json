@@ -1,0 +1,906 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-11-25T06:44:51.676Z",
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "bun": "1.4.2"
+  },
+  "gates": [
+    {
+      "id": "tests:unit",
+      "category": "tests",
+      "name": "单元测试",
+      "status": "pass",
+      "scope": "local",
+      "detail": "92 pass / 0 fail / 0 skip / 11 files，724ms",
+      "exitCode": 0,
+      "durationMs": 724,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 11 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:unit.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:property",
+      "category": "tests",
+      "name": "属性测试",
+      "status": "pass",
+      "scope": "local",
+      "detail": "12 pass / 0 fail / 0 skip / 3 files，811ms",
+      "exitCode": 0,
+      "durationMs": 811,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 3 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:property.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:contract",
+      "category": "tests",
+      "name": "契约测试",
+      "status": "pass",
+      "scope": "local",
+      "detail": "28 pass / 0 fail / 0 skip / 5 files，696ms",
+      "exitCode": 0,
+      "durationMs": 696,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 5 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:contract.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:e2e",
+      "category": "tests",
+      "name": "端到端测试",
+      "status": "pass",
+      "scope": "local",
+      "detail": "9 pass / 0 fail / 0 skip / 5 files，656ms",
+      "exitCode": 0,
+      "durationMs": 656,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 5 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:e2e.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:pty",
+      "category": "tests",
+      "name": "PTY/终端保真",
+      "status": "pass",
+      "scope": "local",
+      "detail": "19 pass / 0 fail / 1 skip / 3 files，520ms",
+      "exitCode": 0,
+      "durationMs": 520,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 3 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:pty.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:crash",
+      "category": "tests",
+      "name": "崩溃一致性",
+      "status": "pass",
+      "scope": "local",
+      "detail": "19 pass / 0 fail / 0 skip / 4 files，1208ms",
+      "exitCode": 0,
+      "durationMs": 1208,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 4 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:crash.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:sandbox",
+      "category": "tests",
+      "name": "沙箱与隔离",
+      "status": "pass",
+      "scope": "local",
+      "detail": "27 pass / 0 fail / 0 skip / 4 files，534ms",
+      "exitCode": 0,
+      "durationMs": 534,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 4 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:sandbox.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:network",
+      "category": "tests",
+      "name": "网络与数据面",
+      "status": "pass",
+      "scope": "local",
+      "detail": "25 pass / 0 fail / 0 skip / 5 files，595ms",
+      "exitCode": 0,
+      "durationMs": 595,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 5 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:network.txt"
+        }
+      ]
+    },
+    {
+      "id": "tests:conformance",
+      "category": "tests",
+      "name": "协议 conformance",
+      "status": "pass",
+      "scope": "local",
+      "detail": "17 pass / 0 fail / 0 skip / 4 files，901ms",
+      "exitCode": 0,
+      "durationMs": 901,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 4 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/tests:conformance.txt"
+        }
+      ]
+    },
+    {
+      "id": "security:permissions",
+      "category": "security",
+      "name": "权限排列",
+      "status": "pass",
+      "scope": "local",
+      "detail": "23 pass / 0 fail / 0 skip / 5 files，459ms",
+      "exitCode": 0,
+      "durationMs": 459,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 5 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/security:permissions.txt"
+        }
+      ]
+    },
+    {
+      "id": "security:egress",
+      "category": "security",
+      "name": "egress 不可绕过",
+      "status": "pass",
+      "scope": "local",
+      "detail": "18 pass / 0 fail / 0 skip / 3 files，468ms",
+      "exitCode": 0,
+      "durationMs": 468,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 3 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/security:egress.txt"
+        }
+      ]
+    },
+    {
+      "id": "security:credentials",
+      "category": "security",
+      "name": "凭证泄露",
+      "status": "pass",
+      "scope": "local",
+      "detail": "15 pass / 0 fail / 0 skip / 4 files，425ms",
+      "exitCode": 0,
+      "durationMs": 425,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 4 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/security:credentials.txt"
+        }
+      ]
+    },
+    {
+      "id": "security:audit",
+      "category": "security",
+      "name": "审计与重启恢复",
+      "status": "pass",
+      "scope": "local",
+      "detail": "20 pass / 0 fail / 0 skip / 5 files，1531ms",
+      "exitCode": 0,
+      "durationMs": 1531,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 5 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/security:audit.txt"
+        }
+      ]
+    },
+    {
+      "id": "security:extensionSandbox",
+      "category": "security",
+      "name": "扩展沙箱",
+      "status": "pass",
+      "scope": "local",
+      "detail": "24 pass / 0 fail / 0 skip / 4 files，509ms",
+      "exitCode": 0,
+      "durationMs": 509,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 4 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/security:extensionSandbox.txt"
+        }
+      ]
+    },
+    {
+      "id": "security:redTeam",
+      "category": "security",
+      "name": "红队用例",
+      "status": "pass",
+      "scope": "local",
+      "detail": "15 pass / 0 fail / 0 skip / 4 files，522ms",
+      "exitCode": 0,
+      "durationMs": 522,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 4 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/security:redTeam.txt"
+        }
+      ]
+    },
+    {
+      "id": "perf-first-frame",
+      "category": "performance",
+      "name": "首帧：真实 --version 子进程三次中位数",
+      "status": "pass",
+      "scope": "local",
+      "detail": "发布二进制 184/188/1782ms，中位 188ms",
+      "evidence": [
+        {
+          "kind": "measurement",
+          "ref": "reports/gates-performance.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-effect",
+      "category": "performance",
+      "name": "effect 生命周期耗时",
+      "status": "pass",
+      "scope": "local",
+      "detail": "6 pass / 0 fail / 0 skip / 2 files，412ms",
+      "exitCode": 0,
+      "durationMs": 412,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 2 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/perf-effect.txt"
+        }
+      ]
+    },
+    {
+      "id": "perf-reload",
+      "category": "performance",
+      "name": "插件/HMR reload 耗时",
+      "status": "pass",
+      "scope": "local",
+      "detail": "14 pass / 0 fail / 0 skip / 3 files，693ms",
+      "exitCode": 0,
+      "durationMs": 693,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 3 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/perf-reload.txt"
+        }
+      ]
+    },
+    {
+      "id": "perf-guard-wait",
+      "category": "performance",
+      "name": "guard/审批等待耗时",
+      "status": "pass",
+      "scope": "local",
+      "detail": "12 pass / 0 fail / 0 skip / 2 files，447ms",
+      "exitCode": 0,
+      "durationMs": 447,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 2 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/perf-guard-wait.txt"
+        }
+      ]
+    },
+    {
+      "id": "perf-long-session",
+      "category": "performance",
+      "name": "长会话虚拟滚动/外置耗时",
+      "status": "pass",
+      "scope": "local",
+      "detail": "15 pass / 0 fail / 0 skip / 2 files，477ms",
+      "exitCode": 0,
+      "durationMs": 477,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun test 2 files"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/evidence/perf-long-session.txt"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:firstFrameMs",
+      "category": "performance",
+      "name": "性能预算 firstFrameMs",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 188 / 阈值 2000",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:effectMs",
+      "category": "performance",
+      "name": "性能预算 effectMs",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 412 / 阈值 1300",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:reloadMs",
+      "category": "performance",
+      "name": "性能预算 reloadMs",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 693 / 阈值 2400",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:guardWaitMs",
+      "category": "performance",
+      "name": "性能预算 guardWaitMs",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 447 / 阈值 1600",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:longSessionMs",
+      "category": "performance",
+      "name": "性能预算 longSessionMs",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 477 / 阈值 1400",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:memBytes",
+      "category": "performance",
+      "name": "性能预算 memBytes",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 80384000 / 阈值 268435456",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "perf-budget:tokenCost",
+      "category": "performance",
+      "name": "性能预算 tokenCost",
+      "status": "pass",
+      "scope": "local",
+      "detail": "实测 24595 / 阈值 32000（token 为同源估算器结果）",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/perf-benchmark.json"
+        }
+      ]
+    },
+    {
+      "id": "authenticity-ratchet",
+      "category": "authenticity",
+      "name": "去伪棘轮：公共 API / 真实异步 / 真实并行 / 真实故障注入",
+      "status": "pass",
+      "scope": "local",
+      "detail": "284 files / publicApi 59 / async 189 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/test-authenticity.json"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/agent/src/plugins/mcp/conformance.spec.ts",
+      "category": "authenticity",
+      "name": "conformance 公共 API + 真实异步 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/agent/src/plugins/mcp/conformance.spec.ts 命中 createMcpProtocol, await, expect(",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/agent/src/plugins/mcp/conformance.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/components/security/src/egress.dataplane.spec.ts",
+      "category": "authenticity",
+      "name": "egress 安全门真实异步 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/components/security/src/egress.dataplane.spec.ts 命中 assertEgressAllowed, await, expect(",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/components/security/src/egress.dataplane.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/agent/src/tools/backend.contract.spec.ts",
+      "category": "authenticity",
+      "name": "backend 契约 + 真实故障注入 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/agent/src/tools/backend.contract.spec.ts 命中 await, expect(, rmSync",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/agent/src/tools/backend.contract.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/agent/src/assembly/runtime.session-store.spec.ts",
+      "category": "authenticity",
+      "name": "持久化崩溃恢复故障注入 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/agent/src/assembly/runtime.session-store.spec.ts 命中 await, expect(, rmSync",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/agent/src/assembly/runtime.session-store.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/agent/src/plugins/permissions/approval.spec.ts",
+      "category": "authenticity",
+      "name": "权限审批真实异步 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/agent/src/plugins/permissions/approval.spec.ts 命中 await, expect(",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/agent/src/plugins/permissions/approval.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/tui/src/osc-security.spec.ts",
+      "category": "authenticity",
+      "name": "红队终端注入断言 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/tui/src/osc-security.spec.ts 命中 expect(",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/tui/src/osc-security.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:packages/agent/src/facade.tenant.spec.ts",
+      "category": "authenticity",
+      "name": "真实并行多租户测试 去伪锚点",
+      "status": "pass",
+      "scope": "local",
+      "detail": "packages/agent/src/facade.tenant.spec.ts 命中 Promise.all, await, expect(",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "packages/agent/src/facade.tenant.spec.ts"
+        }
+      ]
+    },
+    {
+      "id": "authenticity:real-fault-injection",
+      "category": "authenticity",
+      "name": "真实故障注入探针",
+      "status": "pass",
+      "scope": "local",
+      "detail": "子进程退出码 0；INJECT_OK",
+      "exitCode": 0,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun scripts/gate-inject-probe.mjs"
+        }
+      ]
+    },
+    {
+      "id": "platform:target-matrix",
+      "category": "platform",
+      "name": "12 target 发布矩阵与 deploy TARGETS 一致",
+      "status": "pass",
+      "scope": "local",
+      "detail": "配置 12 个 / deploy 12 个；linux-x64, linux-arm64, linux-x64-musl, linux-arm64-musl, linux-x64-baseline, linux-arm64-baseline, darwin-x64, darwin-arm64, darwin-x64-baseline, win32-x64, win32-arm64, win32-x64-baseline",
+      "evidence": [
+        {
+          "kind": "config",
+          "ref": "quality-gates.config.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:ci-matrix-config",
+      "category": "platform",
+      "name": "三平台 CI 工作流覆盖 12 target",
+      "status": "pass",
+      "scope": "local",
+      "detail": ".github/workflows/quality-gates.yml 含 3 平台与 12 target；CI 未在本机执行",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": ".github/workflows/quality-gates.yml"
+        }
+      ]
+    },
+    {
+      "id": "platform:linux-x64",
+      "category": "platform",
+      "name": "发布目标 linux-x64",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/linux-x64/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:linux-arm64",
+      "category": "platform",
+      "name": "发布目标 linux-arm64",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/linux-arm64/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:linux-x64-musl",
+      "category": "platform",
+      "name": "发布目标 linux-x64-musl",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/linux-x64-musl/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:linux-arm64-musl",
+      "category": "platform",
+      "name": "发布目标 linux-arm64-musl",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/linux-arm64-musl/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:linux-x64-baseline",
+      "category": "platform",
+      "name": "发布目标 linux-x64-baseline",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/linux-x64-baseline/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:linux-arm64-baseline",
+      "category": "platform",
+      "name": "发布目标 linux-arm64-baseline",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/linux-arm64-baseline/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:darwin-x64",
+      "category": "platform",
+      "name": "发布目标 darwin-x64",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/darwin-x64/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:darwin-arm64",
+      "category": "platform",
+      "name": "发布目标 darwin-arm64",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/darwin-arm64/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:darwin-x64-baseline",
+      "category": "platform",
+      "name": "发布目标 darwin-x64-baseline",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/darwin-x64-baseline/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:win32-x64",
+      "category": "platform",
+      "name": "发布目标 win32-x64",
+      "status": "pass",
+      "scope": "local",
+      "detail": "manifest/digest/架构校验通过（098330114fc6…，检测 x64）；本机真实启动通过",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/win32-x64/manifest.json"
+        },
+        {
+          "kind": "measurement",
+          "ref": "sha256=098330114fc6de1189d5deb2956a496c6cd23417eabbb2d4dfcf7ad4ffb946e2"
+        }
+      ]
+    },
+    {
+      "id": "platform:win32-arm64",
+      "category": "platform",
+      "name": "发布目标 win32-arm64",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/win32-arm64/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:win32-x64-baseline",
+      "category": "platform",
+      "name": "发布目标 win32-x64-baseline",
+      "status": "skipped",
+      "scope": "cross-platform",
+      "detail": "本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "dist/local/win32-x64-baseline/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "platform:host-lifecycle",
+      "category": "platform",
+      "name": "宿主 target install/upgrade/rollback 冒烟",
+      "status": "pass",
+      "scope": "local",
+      "detail": "PASS install 1.0.0 digest=c658a85c3849 start=ok | PASS upgrade 1.0.0 -> 1.1.0 digest=c658a85c3849 start=ok | PASS rollback 1.1.0 -> 1.0.0 digest=c658a85c3849 start=ok | smoke-local: 安装/升级/rollback 均通过真实单文件启动（exit=0）",
+      "exitCode": 0,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun scripts/smoke-local.ts"
+        }
+      ]
+    },
+    {
+      "id": "supply:sbom",
+      "category": "supply-chain",
+      "name": "SBOM 组件完整性与摘要",
+      "status": "pass",
+      "scope": "local",
+      "detail": "120 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "bun.lock"
+        },
+        {
+          "kind": "file",
+          "ref": "reports/sbom.json"
+        }
+      ]
+    },
+    {
+      "id": "supply:dependency-policy",
+      "category": "supply-chain",
+      "name": "依赖策略：禁止上游 Cordis 包",
+      "status": "pass",
+      "scope": "local",
+      "detail": "16 个 package.json 无禁用依赖",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "package.json"
+        }
+      ]
+    },
+    {
+      "id": "supply:frozen-lockfile",
+      "category": "supply-chain",
+      "name": "frozen lockfile 可复现安装",
+      "status": "pass",
+      "scope": "local",
+      "detail": "bun install --frozen-lockfile exit=0",
+      "exitCode": 0,
+      "evidence": [
+        {
+          "kind": "command",
+          "ref": "bun install --frozen-lockfile"
+        }
+      ]
+    },
+    {
+      "id": "supply:release-age",
+      "category": "supply-chain",
+      "name": "release-age ≥ 7 天",
+      "status": "unverified",
+      "scope": "network",
+      "detail": "已核验 5 / 跳过 0；过新 @opentui/solid@0.9.3, solid-js@1.9.20, turbo@2.11.13",
+      "evidence": [
+        {
+          "kind": "file",
+          "ref": "reports/release-ages.json"
+        }
+      ]
+    }
+  ]
+}

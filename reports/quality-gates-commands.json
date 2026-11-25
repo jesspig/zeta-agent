@@ -1,0 +1,41 @@
+{
+  "generatedAt": "2026-11-25T06:44:51.676Z",
+  "commands": [
+    {
+      "name": "tests",
+      "command": "bun scripts/gate-tests.mjs",
+      "code": 0,
+      "durationMs": 6826
+    },
+    {
+      "name": "security",
+      "command": "bun scripts/gate-security.mjs",
+      "code": 0,
+      "durationMs": 4095
+    },
+    {
+      "name": "performance",
+      "command": "bun scripts/gate-performance.mjs",
+      "code": 0,
+      "durationMs": 4504
+    },
+    {
+      "name": "authenticity",
+      "command": "bun scripts/gate-authenticity.mjs",
+      "code": 0,
+      "durationMs": 275
+    },
+    {
+      "name": "platform",
+      "command": "bun scripts/gate-platform.mjs",
+      "code": 0,
+      "durationMs": 14707
+    },
+    {
+      "name": "supply-chain",
+      "command": "bun scripts/gate-supply-chain.mjs",
+      "code": 0,
+      "durationMs": 34346
+    }
+  ]
+}

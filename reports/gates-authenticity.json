@@ -1,0 +1,129 @@
+[
+  {
+    "id": "authenticity-ratchet",
+    "category": "authenticity",
+    "name": "去伪棘轮：公共 API / 真实异步 / 真实并行 / 真实故障注入",
+    "status": "pass",
+    "scope": "local",
+    "detail": "284 files / publicApi 59 / async 189 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "reports/test-authenticity.json"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/agent/src/plugins/mcp/conformance.spec.ts",
+    "category": "authenticity",
+    "name": "conformance 公共 API + 真实异步 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/agent/src/plugins/mcp/conformance.spec.ts 命中 createMcpProtocol, await, expect(",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/agent/src/plugins/mcp/conformance.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/components/security/src/egress.dataplane.spec.ts",
+    "category": "authenticity",
+    "name": "egress 安全门真实异步 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/components/security/src/egress.dataplane.spec.ts 命中 assertEgressAllowed, await, expect(",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/components/security/src/egress.dataplane.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/agent/src/tools/backend.contract.spec.ts",
+    "category": "authenticity",
+    "name": "backend 契约 + 真实故障注入 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/agent/src/tools/backend.contract.spec.ts 命中 await, expect(, rmSync",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/agent/src/tools/backend.contract.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/agent/src/assembly/runtime.session-store.spec.ts",
+    "category": "authenticity",
+    "name": "持久化崩溃恢复故障注入 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/agent/src/assembly/runtime.session-store.spec.ts 命中 await, expect(, rmSync",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/agent/src/assembly/runtime.session-store.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/agent/src/plugins/permissions/approval.spec.ts",
+    "category": "authenticity",
+    "name": "权限审批真实异步 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/agent/src/plugins/permissions/approval.spec.ts 命中 await, expect(",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/agent/src/plugins/permissions/approval.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/tui/src/osc-security.spec.ts",
+    "category": "authenticity",
+    "name": "红队终端注入断言 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/tui/src/osc-security.spec.ts 命中 expect(",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/tui/src/osc-security.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:packages/agent/src/facade.tenant.spec.ts",
+    "category": "authenticity",
+    "name": "真实并行多租户测试 去伪锚点",
+    "status": "pass",
+    "scope": "local",
+    "detail": "packages/agent/src/facade.tenant.spec.ts 命中 Promise.all, await, expect(",
+    "evidence": [
+      {
+        "kind": "file",
+        "ref": "packages/agent/src/facade.tenant.spec.ts"
+      }
+    ]
+  },
+  {
+    "id": "authenticity:real-fault-injection",
+    "category": "authenticity",
+    "name": "真实故障注入探针",
+    "status": "pass",
+    "scope": "local",
+    "detail": "子进程退出码 0；INJECT_OK",
+    "exitCode": 0,
+    "evidence": [
+      {
+        "kind": "command",
+        "ref": "bun scripts/gate-inject-probe.mjs"
+      }
+    ]
+  }
+]

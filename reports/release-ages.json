@@ -1,0 +1,42 @@
+{
+  "generatedAt": "2026-11-25T06:44:51.657Z",
+  "minDays": 7,
+  "inputs": [
+    {
+      "name": "@opentui/solid",
+      "version": "0.9.3",
+      "publishedAt": "2026-11-18T20:34:16.458Z"
+    },
+    {
+      "name": "solid-js",
+      "version": "1.9.20",
+      "publishedAt": "2026-11-19T20:54:10.757Z"
+    },
+    {
+      "name": "@types/bun",
+      "version": "1.4.4",
+      "publishedAt": "2026-10-23T00:09:43.191Z"
+    },
+    {
+      "name": "turbo",
+      "version": "2.11.13",
+      "publishedAt": "2026-11-18T15:28:52.490Z"
+    },
+    {
+      "name": "typescript",
+      "version": "5.9.3",
+      "publishedAt": "2025-09-30T21:19:38.784Z"
+    }
+  ],
+  "result": {
+    "checked": 5,
+    "skipped": 0,
+    "tooNew": [
+      "@opentui/solid@0.9.3",
+      "solid-js@1.9.20",
+      "turbo@2.11.13"
+    ],
+    "minDays": 7
+  },
+  "queryFailures": []
+}
