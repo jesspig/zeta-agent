@@ -1,4 +1,0 @@
-===== bun scripts/check-fact-registry.mjs =====
-PASS fact-registry: P1-P10 均指向存在的实现文件与测试/检查脚本
-
-exit=0

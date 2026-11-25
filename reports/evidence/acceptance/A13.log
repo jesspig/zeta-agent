@@ -1,9 +1,0 @@
-===== bun test packages/components/events/src/events.spec.ts packages/agent-framework/src/runtime/agent.spec.ts packages/agent-framework/src/tools/pipeline.spec.ts =====
-bun test v1.4.2 (744846f84)
-
- 22 pass
- 0 fail
- 72 expect() calls
-Ran 22 tests across 3 files. [373.00ms]
-
-exit=0

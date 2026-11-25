@@ -1,9 +1,0 @@
-$ bun test packages/tui/src/virtual.spec.ts packages/agent-framework/src/session/offload.spec.ts
-[exit=0]
-bun test v1.4.2 (744846f84)
-
-
- 15 pass
- 0 fail
- 1058 expect() calls
-Ran 15 tests across 2 files. [337.00ms]

@@ -1,9 +1,0 @@
-===== bun test packages/agent/src/research/frozen.spec.ts packages/agent/src/research/pipeline.spec.ts =====
-bun test v1.4.2 (744846f84)
-
- 23 pass
- 0 fail
- 107 expect() calls
-Ran 23 tests across 2 files. [407.00ms]
-
-exit=0

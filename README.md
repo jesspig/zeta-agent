@@ -45,9 +45,9 @@ bun run zeta --headless "提示词"   # 无 TTY 打印模式（CI 可用）
 ## 发布与验收
 
 - 发布候选版本：`zeta 0.1.0`（CLI `--version` 实测）；校验：`bun scripts/release-check.mjs`，产物说明与回滚步骤见 [release-runbook.md](docs/desgin/delivery/release-runbook.md)。
-- 发布报告：[release-candidate.md](reports/release-candidate.md)（版本、架构、SHA-256、SBOM、迁移/回滚说明、平台矩阵）。
-- 最终验收：[acceptance-report.md](reports/acceptance-report.md)（A1–A40 逐项 pass/fail 与命令证据），能力现状见 [capability-matrix.md](docs/desgin/delivery/capability-matrix.md)。
-- 本机仅 `win32-x64` 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，由 CI 三平台矩阵覆盖，不计 pass。`remote` 为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC），release-age 有 3 个过新依赖为 unverified，均列入待裁决。
+- 发布校验：运行 `bun scripts/release-check.mjs` 生成版本、架构、SHA-256、SBOM、迁移/回滚与平台矩阵报告；生成物位于被 Git 忽略的 `reports/`。
+- 最终验收：运行 `bun scripts/acceptance-report.mjs` 生成 A1–A40 逐项 pass/fail 与命令证据；生成物位于 `reports/`，能力现状见 [capability-matrix.md](docs/desgin/delivery/capability-matrix.md)。
+- 本机仅 `win32-x64` 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，需 CI 三平台矩阵补证。`remote` 已补齐 wire-level gRPC transport；release-age 的 3 个过新依赖按用户裁决接受为已知风险。
 
 ## 历史归档
 

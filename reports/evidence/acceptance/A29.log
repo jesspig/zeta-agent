@@ -1,9 +1,0 @@
-===== bun test packages/agent/src/research/fitness.spec.ts packages/deploy/src/fitness.spec.ts packages/deploy/src/fitness.budget-identity.spec.ts =====
-bun test v1.4.2 (744846f84)
-
- 23 pass
- 0 fail
- 68 expect() calls
-Ran 23 tests across 3 files. [338.00ms]
-
-exit=0

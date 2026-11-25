@@ -1,9 +1,0 @@
-===== bun test packages/agent/src/research/guardrails.spec.ts packages/agent/src/research/promotion.spec.ts packages/agent/src/research/decision.spec.ts packages/deploy/src/fitness.budget-identity.spec.ts =====
-bun test v1.4.2 (744846f84)
-
- 38 pass
- 0 fail
- 146 expect() calls
-Ran 38 tests across 4 files. [402.00ms]
-
-exit=0

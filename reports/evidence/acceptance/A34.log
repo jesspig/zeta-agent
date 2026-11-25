@@ -1,9 +1,0 @@
-===== bun test packages/agent-framework/src/runtime/core.lifecycle.spec.ts packages/agent-framework/src/runtime/loop.lifecycle.spec.ts packages/agent/src/facade.cancellation.spec.ts packages/agent/src/session/tree.atomic.spec.ts =====
-bun test v1.4.2 (744846f84)
-
- 13 pass
- 0 fail
- 46 expect() calls
-Ran 13 tests across 4 files. [394.00ms]
-
-exit=0

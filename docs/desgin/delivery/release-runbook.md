@@ -1,7 +1,7 @@
 # 发布、迁移与回滚 Runbook
 
 > **适用范围**：zeta-agent 本地单文件发布物（12 target 矩阵）与 local/daemon/remote 三态的升级/回滚操作。
-> **基线**：`9b6f231`（T-26），2026-11-25。证据见 [`reports/quality-gates-report.md`](../../../reports/quality-gates-report.md) 与 [`reports/release-candidate.md`](../../../reports/release-candidate.md)。
+> **基线**：`develop @ 3c2ec55`（全部阶段已归并），2026-11-25。质量报告与发布候选由 `bun run check`、`bun scripts/release-check.mjs` 生成在被忽略的 `reports/`；生成物不作为源码版本控制内容。
 
 ## 前置校验
 

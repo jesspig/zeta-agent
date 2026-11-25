@@ -1,9 +1,0 @@
-===== bun test packages/agent/src/plugins/hot-reload.e2e.spec.ts apps/zeta-cli/src/hot-reload.spec.ts packages/components/loader/src/hmr.spec.ts packages/agent/src/extensions/hot-reload.e2e.spec.ts =====
-bun test v1.4.2 (744846f84)
-
- 15 pass
- 0 fail
- 117 expect() calls
-Ran 15 tests across 4 files. [728.00ms]
-
-exit=0

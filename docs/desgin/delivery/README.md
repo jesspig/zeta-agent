@@ -11,8 +11,8 @@
 | [capability-matrix.md](./capability-matrix.md) | 公开能力的组件/显式注入/默认启用/验收四态矩阵，含机器可读装配清单 | 现状基线 |
 | [review-record.md](./review-record.md) | 全面审查记录：P0/P1/P2 发现与修复状态、复核结果 | 质量记录 |
 | [release-runbook.md](./release-runbook.md) | 安装/升级/回滚、发布校验、平台矩阵与已知限制 | 发布运维 |
-| [最终验收报告](../../../reports/acceptance-report.md) | A1–A40 逐项 pass/fail、命令与证据路径 | 验收结论 |
-| [发布候选报告](../../../reports/release-candidate.md) | 版本、架构、SHA-256、SBOM、迁移/回滚校验 | 发布证据 |
+| `scripts/acceptance-report.mjs` | 运行后生成 A1–A40 逐项 pass/fail、命令与证据路径 | 验收生成器 |
+| `scripts/release-check.mjs` | 运行后生成版本、架构、SHA-256、SBOM、迁移/回滚校验 | 发布生成器 |
 
 ## 活动图（实施批次）
 
@@ -40,7 +40,7 @@ flowchart TD
 | A13-A15 | 事件 mode / patch 分层 / effects 幂等 | dsh-optimizations.md |
 | A16-A20 | 冻结重放、晋升单调、观察等价、无 ground truth 泄漏 | recursive-self-evolution.md |
 | A21-A30 | 可观测、隔离、egress/审计、类型/压缩/检索/租户/评测/部署 | 各专题设计文档 + [roadmap.md §4](./roadmap.md#4-验收标准) |
-| A31-A40 | 依赖图、无 stub、崩溃恢复、并发边界、平台矩阵、conformance、性能门、文档一致、研究护栏 | [roadmap.md §4](./roadmap.md#4-验收标准) + [最终验收报告](../../../reports/acceptance-report.md) |
+| A31-A40 | 依赖图、无 stub、崩溃恢复、并发边界、平台矩阵、conformance、性能门、文档一致、研究护栏 | [roadmap.md §4](./roadmap.md#4-验收标准) + `bun scripts/acceptance-report.mjs` |
 
 ## 跨目录关系
 
@@ -49,7 +49,7 @@ flowchart TD
 
 ## 深度差距分析与本批处置（2026-11-23）
 
-> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。当前基线为 `9b6f231`，全量 `bun test` 1409 pass / 1 skip / 0 fail / 284 files；默认装配、公共 API、端到端验收与平台矩阵以 [capability-matrix.md](./capability-matrix.md) 和 [最终验收报告](../../../reports/acceptance-report.md) 为准。
+> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。当前基线为 `develop @ 3c2ec55`，全量 `bun test` 1419 pass / 1 skip / 0 fail / 286 files；默认装配、公共 API、端到端验收与平台矩阵以 [capability-matrix.md](./capability-matrix.md) 为准，生成报告位于被忽略的 `reports/`。
 
 ### 六类差距的当前处置结果（2026-11-25 复核）
 
@@ -66,7 +66,7 @@ flowchart TD
 
 - **已落地**：facade 归位、插件管线、内核接口、安全接线、真实 HMR、对象运行时（host/facet/Reference、SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 协议、三态部署、研究轨护栏。
 - **持续门禁**：测试去伪棘轮、架构守护、链接守护（0 断链 / 0 断锚）、质量门（`bun run gates`：43 pass / 11 skipped / 1 unverified）。
-- **验收口径**：[最终验收报告](../../../reports/acceptance-report.md) 逐项记录 A1–A40 的 pass/fail；A30（wire-level gRPC）与 A36（11 个非宿主 target）如实记 fail/待裁决，不写 pass。
+- **验收口径**：`bun scripts/acceptance-report.mjs` 逐项记录 A1–A40 的 pass/fail；A30 已补齐真实 gRPC 并转 pass，A36（11 个非宿主 target）仍如实记 fail/待 CI 补证，不写 pass。
 
 ### 后续阶段边界
 

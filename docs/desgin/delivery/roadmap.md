@@ -186,7 +186,7 @@ flowchart LR
 | A33 | 持久化三类崩溃与未知结果可恢复 | `packages/agent/src/session/`、`packages/components/security/src/outbox.spec.ts` | 3-5 |
 | A34 | run/tool/session 并发生命周期完备 | `packages/agent-framework/src/runtime/`、`packages/agent/src/session/tree.atomic.spec.ts` | 2-5 |
 | A35 | 文件/进程/网络/凭证/审计由真实边界强制 | `packages/components/security/`、`packages/agent/src/tools/backend.contract.spec.ts` | 3-5 |
-| A36 | local/daemon/remote 与三平台 12 target 矩阵通过 | `scripts/gate-platform.mjs`、`scripts/smoke-local.ts`、`reports/release-candidate.md` | 5 |
+| A36 | local/daemon/remote 与三平台 12 target 矩阵通过 | `scripts/gate-platform.mjs`、`scripts/smoke-local.ts`、`scripts/release-check.mjs` | 5 |
 | A37 | Provider/MCP/RPC/CLI conformance 全绿 | `packages/agent/src/providers/conformance.spec.ts`、`packages/agent/src/plugins/mcp/conformance.spec.ts`、`packages/deploy/src/rpc.spec.ts` | 3-5 |
 | A38 | 性能预算与资源增长有回归门 | `scripts/gate-performance.mjs`、`packages/deploy/src/budget.spec.ts` | 5 |
 | A39 | 文档能力矩阵与代码装配自动一致 | `scripts/check-capability-matrix.mjs`、`capability-matrix.md` 机器可读块 | 5 |

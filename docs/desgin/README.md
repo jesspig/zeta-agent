@@ -132,7 +132,7 @@ flowchart TB
 1. 事实来源与分级 → [architecture/fact-registry.md](./architecture/fact-registry.md)
 2. 矛盾与未验证项 → [fact-registry.md §4/§5](./architecture/fact-registry.md#4-矛盾与争议显式并列)
 3. 验收判据 → [delivery/roadmap.md §4](./delivery/roadmap.md#4-验收标准)（A1–A40）
-4. 最终逐项结论 → [最终验收报告](../../reports/acceptance-report.md) 与 [发布候选报告](../../reports/release-candidate.md)
+4. 最终逐项结论 → 运行 `bun scripts/acceptance-report.mjs` 与 `bun scripts/release-check.mjs`；生成物位于被忽略的 `reports/`
 5. 每条设计的交叉引用 → 各文档末尾"文档关系"表
 
 ## 待用户裁决的问题（汇总）
@@ -150,5 +150,5 @@ flowchart TB
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
 - ✅ 阶段 0-6 的能力已落地并通过全量测试（1409 pass / 1 skip）：真实文件 HMR、对象运行时（含 SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 握手/OAuth/双结果投影、持久会话、ExecutionBackend、多租户 facade、daemon/remote 与研究轨四道护栏。
-- ⏳ 默认 profile 仍保持安全收敛：研究轨、daemon/remote、跨进程对象默认不装配；shell/sandbox 操作 unsupported 时失败关闭；remote 为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC）。现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，逐项结论见 [最终验收报告](../../reports/acceptance-report.md)。
-- ⏳ 本机仅 win32-x64 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，由 CI 三平台矩阵覆盖；release-age 有 3 个过新依赖为 unverified。详见 [发布候选报告](../../reports/release-candidate.md) 与 [release-runbook.md](./delivery/release-runbook.md)。
+- ⏳ 默认 profile 仍保持安全收敛：研究轨、daemon/remote、跨进程对象默认不装配；shell/sandbox 操作 unsupported 时失败关闭；remote 同时提供 HTTP JSON-RPC 与 wire-level gRPC transport。现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，逐项结论由 `bun scripts/acceptance-report.mjs` 生成。
+- ⏳ 本机仅 win32-x64 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，需 CI 三平台矩阵补证；release-age 的 3 个过新依赖按用户裁决接受为已知风险。发布校验见 [release-runbook.md](./delivery/release-runbook.md)。

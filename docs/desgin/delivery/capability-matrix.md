@@ -1,8 +1,8 @@
 # 能力四态矩阵
 
 > **用途**：区分“组件存在”“显式注入可用”“默认启用”“验收通过”，避免把孤立测试或 seam 当作完整交付。
-> **基线**：`feature/release-quality-gates @ 9b6f231`（T-26 已提交），2026-11-25 复核；取代原 `develop f36f457` 基线。
-> **总验收**：[acceptance-report](../../../reports/acceptance-report.md) · [release-candidate](../../../reports/release-candidate.md) · [release-runbook](./release-runbook.md)。
+> **基线**：`develop @ 3c2ec55`（全部阶段已归并），2026-11-25 复核；取代原 `develop f36f457` 基线。
+> **总验收**：运行 `bun scripts/acceptance-report.mjs` 与 `bun scripts/release-check.mjs`，生成物位于被忽略的 `reports/`；发布流程见 [release-runbook](./release-runbook.md)。
 
 ## 状态口径
 

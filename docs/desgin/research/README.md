@@ -50,7 +50,7 @@ flowchart LR
 
 ## 研究轨落地状态（2026-11-25）
 
-> 本目录仍只记录事实与建议；实现状态以下表与 [delivery/capability-matrix.md](../delivery/capability-matrix.md) 为准，逐项验收见 [最终验收报告](../../../reports/acceptance-report.md)。
+> 本目录仍只记录事实与建议；实现状态以下表与 [delivery/capability-matrix.md](../delivery/capability-matrix.md) 为准，逐项验收由 `bun scripts/acceptance-report.mjs` 生成。
 
 | 研究方向 | 当前状态 | 证据 |
 | --- | --- | --- |

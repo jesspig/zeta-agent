@@ -155,4 +155,4 @@
 
 - 上表 8.1/8.3 的“尚未升级 / 尚未接线 / 延后未实现”均为 2026-11-23 的历史口径；T-08/T-09/T-14/T-15/T-18/T-19/T-24/T-25 已逐项落地并通过专测，当前状态以 [capability-matrix.md](./capability-matrix.md) 为准。
 - 安全维度仍保持失败关闭：无真实隔离执行器时 shell/seccomp 一律 unsupported；egress 默认拒绝；凭证不持明文；审计显式 sink 可签名/封存。
-- 发布与平台：本机仅 win32-x64 完成安装/启动/升级/回滚；11 个非宿主 target 与 wire-level gRPC 未通过 A36/A30，结论见 [最终验收报告](../../../reports/acceptance-report.md)。
+- 发布与平台：本机仅 win32-x64 完成安装/启动/升级/回滚；wire-level gRPC 已补齐并通过 A30，11 个非宿主 target 仍使 A36 fail，需 CI 三平台补证；逐项结论由 `bun scripts/acceptance-report.mjs` 生成。

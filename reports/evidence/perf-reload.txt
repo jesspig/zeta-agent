@@ -1,9 +1,0 @@
-$ bun test packages/components/loader/src/hmr.spec.ts packages/components/loader/src/hmr.auto.spec.ts packages/agent/src/extensions/hot-reload.e2e.spec.ts
-[exit=0]
-bun test v1.4.2 (744846f84)
-
-
- 14 pass
- 0 fail
- 98 expect() calls
-Ran 14 tests across 3 files. [613.00ms]
