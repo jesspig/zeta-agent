@@ -62,12 +62,17 @@ import {
   type ToolResult,
 } from "@zeta-agent/agent-framework";
 import {
+  createToolLeaseManager,
   createToolPipeline,
-  createToolRegistry,
+  inputSchemaFromParameters,
+  type BatchContext,
   type BeforeToolCallHook,
   type AfterToolCallHook,
+  type PluginToolParameter,
+  type ToolAuditEvent,
   type ToolDescriptor,
   type ToolPublisher,
+  type ToolRegistry,
 } from "@zeta-agent/agent-framework";
 import {
   createPluginTransaction,
@@ -265,14 +270,16 @@ export interface AgentToolCall {
   readonly execute: () => unknown | Promise<unknown>;
 }
 
-export type ToolFailure = { readonly ok: false; readonly reason: string } | { readonly ok: true; readonly value: unknown };
+export type ToolFailure =
+  | { readonly ok: false; readonly reason: string; readonly reconciliation?: boolean }
+  | { readonly ok: true; readonly value: unknown };
 
 export interface AgentToolSchema {
   readonly name: string;
   readonly description: string;
   readonly parameters: readonly {
     readonly name: string;
-    readonly type: "string" | "number" | "boolean";
+    readonly type: PluginToolParameter["type"];
     readonly description: string;
     readonly required?: boolean;
   }[];
@@ -513,6 +520,8 @@ export interface AgentOptions {
   readonly turnBudget?: number;
   /** 工具调用缺省超时（毫秒）；工具自身 timeoutMs 优先。 */
   readonly toolTimeoutMs?: number;
+  /** 超时取消后等待工具确认终止的宽限期；未确认返回 unknown。 */
+  readonly toolTimeoutConfirmationMs?: number;
   /**
    * 审计传输形态：默认 "memory" 保持零回归；"socket" 走进程外 daemon（仅含端点，不含密钥）。
    * 仅当未注入 auditSink 时生效。
@@ -574,6 +583,8 @@ export interface Agent extends PluginApiSurface {
   abort(): void;
   /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
   reset(): void;
+  /** 取消在途工具并等待其 lease 结算；之后撤销插件贡献。 */
+  dispose(): Promise<void>;
   waitForIdle(): Promise<void>;
   runTool(call: AgentToolCall): Promise<ToolFailure>;
   emitEffect(meta: EffectMeta): void;
@@ -681,7 +692,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
     emissionTools = new Set([...baseEmissionTools, ...pluginEmissionRefs.keys()]);
   };
   let activeSignal: AbortSignal | undefined;
-  let activePipeline: ReturnType<typeof createToolPipeline> | undefined;
   /** 发射工具在 commit 阶段经同一管线派发，此时不再重复 enqueue。 */
   let dispatchingEmission = false;
   /** withhold 策略下总是创建默认效果：插件（如 MCP）可在装配后声明发射工具。 */
@@ -1211,6 +1221,249 @@ export function createAgent(options: AgentOptions = {}): Agent {
   /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
   let declaredToolNames: readonly string[] = [...toolNamesSnapshot()];
 
+  // ── 统一工具域：模型工具与 runTool 共用 registry/hooks/审计/effects/leases ──
+  const toolLeases = createToolLeaseManager();
+  /** 发射工具 callId → durable key，commit 后由 publisher 回填真实结果。 */
+  let emissionSlots = new Map<string, string>();
+  let commitPromise: Promise<readonly Receipt[]> | undefined;
+  let committed: Map<string, Receipt> | undefined;
+
+  function auditTool(event: ToolAuditEvent): void {
+    const decision = event.reason.includes("TOOL_INPUT_")
+      ? "TOOL_INPUT_REJECTED"
+      : event.reason === "TOOL_TIMEOUT_UNKNOWN"
+        ? "TOOL_OUTCOME_UNKNOWN"
+        : event.reason.startsWith("TOOL_TIMEOUT")
+          ? "TOOL_TIMEOUT"
+          : "TOOL_REJECTED";
+    recordAudit(event.tool, stableHash(JSON.stringify(event.args)), decision, event.reason, event.call.id);
+  }
+
+  /** 工具声明（builtin/plugin/loadout/MCP）投影为真实执行 schema。 */
+  function descriptorFor(
+    tool: PluginTool,
+    options: { readonly verify?: (signal?: AbortSignal) => void | Promise<void> } = {}
+  ): ToolDescriptor {
+    return {
+      name: tool.name,
+      inputSchema: inputSchemaFromParameters(tool.parameters),
+      execute: async (args, exec) => {
+        if (exec.signal?.aborted === true) throw new Error("ABORTED");
+        if (options.verify !== undefined) await options.verify(exec.signal);
+        const digest = stableHash(JSON.stringify(args));
+        exec.onUpdate(`executing ${tool.name}`);
+        if (isEmissionTool(tool.name) && durableEffects !== undefined && !dispatchingEmission) {
+          const key = `${tool.name}:${digest}`;
+          const quota = tenantScope?.quota;
+          if (quota !== undefined) {
+            const request = { tool: tool.name, tokens: 1 };
+            if (!quota.check(request) || !quota.reserve(request)) {
+              recordAudit(tool.name, digest, "QUOTA_DENIED", "QUOTA_EXHAUSTED", key);
+              throw new Error("QUOTA_EXHAUSTED");
+            }
+          }
+          const verdict = checkEgress(args, egressPolicy);
+          durableEffects.enqueue(tool.name, key, {
+            tool: tool.name,
+            args,
+            ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
+          });
+          recordAudit(tool.name, digest, "EMISSION_WITHHELD", key, "pending");
+          return { ok: true, withheld: true, tool: tool.name, key };
+        }
+        return (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, exec.signal);
+      },
+    };
+  }
+
+  const runToolDescriptors = new Map<string, ToolDescriptor>();
+  const pipelineRegistry: ToolRegistry = {
+    registerTool(tool) {
+      if (runToolDescriptors.has(tool.name)) throw new Error("TOOL_DUPLICATE");
+      runToolDescriptors.set(tool.name, tool);
+      return () => {
+        runToolDescriptors.delete(tool.name);
+      };
+    },
+    getTool(name) {
+      const transient = runToolDescriptors.get(name);
+      if (transient !== undefined) return transient;
+      const loadout = declaredLoadout.get(name);
+      if (loadout !== undefined) return descriptorFor(loadout);
+      const plugin = pluginTools.get(name);
+      if (plugin !== undefined) return descriptorFor(plugin.tool);
+      const builtin = toolDefinitions.find((item) => item.name === name);
+      return builtin === undefined ? undefined : descriptorFor(builtin);
+    },
+    get size() {
+      const names = new Set([
+        ...runToolDescriptors.keys(),
+        ...declaredLoadout.keys(),
+        ...pluginTools.keys(),
+        ...toolDefinitions.map((item) => item.name),
+      ]);
+      return names.size;
+    },
+  };
+
+  const publisher: ToolPublisher = async (result) => {
+    // commit 派发阶段再次进入管线时不得等待自己尚未完成的 commit。
+    if (dispatchingEmission || emissionSlots.size === 0 || durableEffects === undefined) return result;
+    if (committed === undefined) {
+      if (commitPromise === undefined) commitPromise = durableEffects.commit();
+      const receipts = await commitPromise;
+      committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
+      for (const receipt of receipts) {
+        if (!receipt.ok) tenantScope?.quota.release(1);
+        recordAudit(
+          receipt.kind,
+          receipt.key,
+          receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED",
+          receipt.ok ? "OK" : "FAILED",
+          receipt.key
+        );
+      }
+    }
+    if (!usesDefaultEffects) return result;
+    const key = emissionSlots.get(result.callId);
+    const receipt = key === undefined ? undefined : committed.get(key);
+    if (receipt === undefined) return result;
+    const value = receipt.value;
+    const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+    const content = receipt.ok
+      ? value === undefined ? NO_TOOL_RESULT : value
+      : { ok: false, error: "EMISSION_DISPATCH_FAILED", key };
+    const message = result.message ?? {
+      role: "toolResult" as const,
+      content,
+      toolCallId: result.callId,
+      toolName: result.tool ?? "",
+    };
+    return {
+      ...result,
+      isError: !receipt.ok || failed,
+      output: content,
+      message: { ...message, content },
+    };
+  };
+
+  const before: BeforeToolCallHook = async (input, toolSignal) => {
+    const name = input.tool;
+    const args = input.args;
+    const argsDigest = stableHash(JSON.stringify(args));
+    if (toolSignal?.aborted === true || activeSignal?.aborted === true) {
+      return { block: true, reason: "ABORTED" };
+    }
+    if (permissionGate !== undefined) {
+      const decision = await permissionGate.authorize(permissionStage, name, args);
+      if (decision.behavior !== "ALLOW") {
+        const reason = decision.reason ?? "PERMISSION_DENIED";
+        let approved = false;
+        let state: ApprovalState = "unavailable";
+        if (decision.behavior === "ASK") {
+          const resolved = await resolveApproval(permissionStage, name, args, reason, toolSignal);
+          approved = resolved.approved;
+          state = resolved.state;
+        }
+        if (!approved) {
+          const decisionName = state === "cancelled" ? "PERMISSION_CANCELLED" : "PERMISSION_DENIED";
+          recordAudit(name, argsDigest, decisionName, reason, input.call.id);
+          fiberLogger.warn(`${decisionName} stage=${permissionStage} tool=${name} reason=${reason}`);
+          return { block: true, reason: `PERMISSION_DENIED: ${reason}` };
+        }
+        recordAudit(name, argsDigest, "ASK_APPROVED", reason, input.call.id);
+      }
+    }
+    if (permissionPolicy !== undefined) {
+      const verdict = evaluatePermissionPolicy(permissionPolicy, {
+        stage: permissionStage,
+        tool: name,
+        input: args,
+      });
+      if (verdict.behavior === "DENY" || verdict.behavior === "ASK") {
+        let approved = false;
+        if (verdict.behavior === "ASK") {
+          approved = (await resolveApproval(permissionStage, name, args, verdict.reason, toolSignal)).approved;
+        }
+        if (!approved) {
+          const reason = verdict.reason ?? "POLICY_DENIED";
+          recordAudit(name, argsDigest, `TOOL_POLICY_${verdict.behavior}`, reason, input.call.id);
+          return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${reason}` };
+        }
+      }
+    }
+    const egress = checkEgress(args, egressPolicy);
+    if (egress.status === "denied") {
+      const key = `${name}:${argsDigest}`;
+      recordAudit(name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", input.call.id);
+      if (isEmissionTool(name)) {
+        failedEmissionReceipts.push({ kind: name, key, ok: false, value: { error: "EGRESS_DENIED" } });
+      }
+      return { block: true, reason: "EGRESS_DENIED" };
+    }
+    if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
+      emissionSlots.set(input.call.id, `${name}:${argsDigest}`);
+    }
+    const startEvent: AgentEvent = {
+      type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args,
+    };
+    await pluginManager.run("beforeToolCall", startEvent, toolSignal ?? activeSignal, { failClosed: true });
+    await pluginManager.run("wrap", startEvent, toolSignal ?? activeSignal, { failClosed: true });
+    return {};
+  };
+
+  const after: AfterToolCallHook = async (input, toolSignal) => {
+    const name = input.call.tool ?? input.call.name ?? "";
+    const overrides: Record<string, unknown> = {};
+    const capture = (value: unknown): void => {
+      if (typeof value !== "object" || value === null) return;
+      const record = value as Record<string, unknown>;
+      for (const key of ["content", "details", "structuredContent", "usage"] as const) {
+        if (key in record) overrides[key] = record[key];
+      }
+      if (typeof record.isError === "boolean") overrides.isError = record.isError;
+      if (typeof record.terminate === "boolean") overrides.terminate = record.terminate;
+    };
+    if (!isEmissionTool(name)) {
+      const args = input.call.input ?? input.call.args ?? {};
+      const argsDigest = stableHash(JSON.stringify(args));
+      recordAudit(
+        name,
+        argsDigest,
+        input.isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
+        stableHash(JSON.stringify(input.output ?? "")),
+        input.call.id
+      );
+    }
+    const endEvent: AgentEvent = {
+      type: "tool_execution_end" as const,
+      toolCallId: input.call.id,
+      toolName: name,
+      result: input.output,
+      isError: input.isError,
+    };
+    const accumulator: AfterHookAccumulator = { event: endEvent, overrides };
+    await pluginManager.run("afterToolCall", accumulator, toolSignal ?? activeSignal, { failClosed: true });
+    capture(accumulator.overrides);
+    await pluginManager.run("wrap", endEvent, toolSignal ?? activeSignal, { failClosed: true, reverse: true });
+    return overrides;
+  };
+
+  const toolContext: BatchContext = {
+    registry: pipelineRegistry,
+    audit: auditTool,
+    toolLeases,
+    beforeToolCall: before,
+    afterToolCall: after,
+    publisher,
+    timeoutMs: options.toolTimeoutMs,
+    timeoutConfirmationMs: options.toolTimeoutConfirmationMs,
+    get signal() {
+      return activeSignal;
+    },
+  };
+  const activePipeline = createToolPipeline(toolContext);
+
   const api: PluginApiSurface = {
     registerTool(tool) {
       return registerToolEntry(tool);
@@ -1336,29 +1589,30 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 工具结果仅回传本地执行信息，不重新进入模型（避免 stub 下的无限续跑）。
   const NO_TOOL_RESULT = "";
 
-  /** 把内置工具的简化参数表投影为 provider 可用的工具描述。 */
-  function toToolSchema(tool: ToolDefinition): AgentToolSchema {
+  /** 从真实工具声明投影 provider schema：builtin、插件、loadout 与 MCP 共用同一来源。 */
+  function toToolSchema(tool: PluginTool): AgentToolSchema {
     return {
       name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
+      description: tool.description ?? tool.name,
+      parameters: (tool.parameters ?? []).map((parameter) => ({
+        name: parameter.name,
+        type: parameter.type,
+        description: parameter.description ?? parameter.name,
+        ...(parameter.required === true ? { required: true } : {}),
+      })),
     };
   }
 
   /** provider schema 从最终 active registry 生成，未支持工具不进入模型可见面。 */
   function providerToolSchemas(): AgentToolSchema[] {
     const active = new Set(activeToolNamesSnapshot());
-    // 同名后到者覆盖先到者：插件替换 builtin 后 schema 不再出现旧条目。
     const schemas = new Map<string, AgentToolSchema>();
-    for (const tool of toolDefinitions) {
+    const add = (tool: PluginTool): void => {
       if (active.has(tool.name)) schemas.set(tool.name, toToolSchema(tool));
-    }
-    const addPluginTool = (tool: PluginTool): void => {
-      if (!active.has(tool.name)) return;
-      schemas.set(tool.name, { name: tool.name, description: tool.name, parameters: [] });
     };
-    for (const entry of pluginTools.values()) addPluginTool(entry.tool);
-    for (const tool of declaredLoadout.values()) addPluginTool(tool);
+    for (const tool of toolDefinitions) add(tool);
+    for (const entry of pluginTools.values()) add(entry.tool);
+    for (const tool of declaredLoadout.values()) add(tool);
     return [...schemas.values()];
   }
 
@@ -1408,205 +1662,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
     // followUp 不在这里 promote：自然终局由 runLoop 外层 pollFollowUp 消费；
     // 硬终局保留的队列在下一个 run 的自然终局外层消费，不会永久滞留。
 
-    const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>, signal?: AbortSignal) => unknown | Promise<unknown>>();
-    for (const item of contributions) {
-      if (item.kind !== "tool") continue;
-      const tool = item.tool;
-      toolRegistry.set(tool.name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    }
-    for (const [name, entry] of pluginTools) toolRegistry.set(name, (args, toolSignal) => (entry.tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    /** 发射工具 callId → durable key，commit 后由 publisher 回填真实结果。 */
-    const emissionSlots = new Map<string, string>();
-    let commitPromise: Promise<readonly Receipt[]> | undefined;
-    let committed: Map<string, Receipt> | undefined;
-    const publisher: ToolPublisher = async (result) => {
-      if (emissionSlots.size === 0 || durableEffects === undefined) return result;
-      if (committed === undefined) {
-        // 并行 finalize 会同时触发 publisher；单次 commit 必须共享同一个 in-flight promise。
-        if (commitPromise === undefined) commitPromise = durableEffects.commit();
-        const receipts = await commitPromise;
-        committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
-        for (const receipt of receipts) {
-          if (!receipt.ok) tenantScope?.quota.release(1);
-          recordAudit(
-            receipt.kind,
-            receipt.key,
-            receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED",
-            receipt.ok ? "OK" : "FAILED",
-            receipt.key
-          );
-        }
-      }
-      if (!usesDefaultEffects) return result;
-      const key = emissionSlots.get(result.callId);
-      const receipt = key === undefined ? undefined : committed.get(key);
-      if (receipt === undefined) return result;
-      const value = receipt.value;
-      const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
-      const content = receipt.ok
-        ? value === undefined ? NO_TOOL_RESULT : value
-        : { ok: false, error: "EMISSION_DISPATCH_FAILED", key };
-      const message = result.message ?? {
-        role: "toolResult" as const,
-        content,
-        toolCallId: result.callId,
-        toolName: result.tool ?? "",
-      };
-      return {
-        ...result,
-        isError: !receipt.ok || failed,
-        output: content,
-        message: { ...message, content },
-      };
-    };
-
-    const before: BeforeToolCallHook = async (input, toolSignal) => {
-      const name = input.tool;
-      const args = input.args;
-      const argsDigest = stableHash(JSON.stringify(args));
-      if (toolSignal?.aborted === true || activeSignal?.aborted === true) {
-        return { block: true, reason: "ABORTED" };
-      }
-      if (permissionGate !== undefined) {
-        const decision = await permissionGate.authorize(permissionStage, name, args);
-        if (decision.behavior !== "ALLOW") {
-          const reason = decision.reason ?? "PERMISSION_DENIED";
-          let approved = false;
-          let state: ApprovalState = "unavailable";
-          if (decision.behavior === "ASK") {
-            const resolved = await resolveApproval(permissionStage, name, args, reason, toolSignal);
-            approved = resolved.approved;
-            state = resolved.state;
-          }
-          if (!approved) {
-            const decisionName = state === "cancelled" ? "PERMISSION_CANCELLED" : "PERMISSION_DENIED";
-            recordAudit(name, argsDigest, decisionName, reason, input.call.id);
-            fiberLogger.warn(`${decisionName} stage=${permissionStage} tool=${name} reason=${reason}`);
-            return { block: true, reason: `PERMISSION_DENIED: ${reason}` };
-          }
-          recordAudit(name, argsDigest, "ASK_APPROVED", reason, input.call.id);
-        }
-      }
-      if (permissionPolicy !== undefined) {
-        const verdict = evaluatePermissionPolicy(permissionPolicy, {
-          stage: permissionStage,
-          tool: name,
-          input: args,
-        });
-        if (verdict.behavior === "DENY" || verdict.behavior === "ASK") {
-          let approved = false;
-          if (verdict.behavior === "ASK") {
-            approved = (await resolveApproval(permissionStage, name, args, verdict.reason, toolSignal)).approved;
-          }
-          if (!approved) {
-            const reason = verdict.reason ?? "POLICY_DENIED";
-            recordAudit(name, argsDigest, `TOOL_POLICY_${verdict.behavior}`, reason, input.call.id);
-            return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${reason}` };
-          }
-        }
-      }
-      const egress = checkEgress(args, egressPolicy);
-      if (egress.status === "denied") {
-        const key = `${name}:${argsDigest}`;
-        recordAudit(name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", input.call.id);
-        if (isEmissionTool(name)) {
-          failedEmissionReceipts.push({ kind: name, key, ok: false, value: { error: "EGRESS_DENIED" } });
-        }
-        return { block: true, reason: "EGRESS_DENIED" };
-      }
-      if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
-        emissionSlots.set(input.call.id, `${name}:${argsDigest}`);
-      }
-      const startEvent: AgentEvent = {
-        type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args,
-      };
-      // 普通 hook 经单一管理器链执行；工具链使用 fail-closed，抛错绝不回退 legacy。
-      await pluginManager.run("beforeToolCall", startEvent, toolSignal ?? signal, { failClosed: true });
-      // wrap 贡献按拓扑序执行 before，after 阶段由同一链反向执行。
-      await pluginManager.run("wrap", startEvent, toolSignal ?? signal, { failClosed: true });
-      return {};
-    };
-
-    const after: AfterToolCallHook = async (input, toolSignal) => {
-      const name = input.call.tool ?? input.call.name ?? "";
-      const overrides: Record<string, unknown> = {};
-      const capture = (value: unknown): void => {
-        if (typeof value !== "object" || value === null) return;
-        const record = value as Record<string, unknown>;
-        for (const key of ["content", "details", "structuredContent", "usage"] as const) {
-          if (key in record) overrides[key] = record[key];
-        }
-        if (typeof record.isError === "boolean") overrides.isError = record.isError;
-        if (typeof record.terminate === "boolean") overrides.terminate = record.terminate;
-      };
-      if (!isEmissionTool(name)) {
-        const args = input.call.input ?? input.call.args ?? {};
-        const argsDigest = stableHash(JSON.stringify(args));
-        recordAudit(
-          name,
-          argsDigest,
-          input.isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
-          stableHash(JSON.stringify(input.output ?? "")),
-          input.call.id
-        );
-      }
-      const endEvent: AgentEvent = {
-        type: "tool_execution_end" as const,
-        toolCallId: input.call.id,
-        toolName: name,
-        result: input.output,
-        isError: input.isError,
-      };
-      const accumulator: AfterHookAccumulator = { event: endEvent, overrides };
-      await pluginManager.run("afterToolCall", accumulator, toolSignal ?? signal, { failClosed: true });
-      capture(accumulator.overrides);
-      await pluginManager.run("wrap", endEvent, toolSignal ?? signal, { failClosed: true, reverse: true });
-      return overrides;
-    };
-
-    const pipelineRegistry = createToolRegistry();
-    for (const [name, execute] of toolRegistry) {
-      const pipelineTool: ToolDescriptor = {
-        name,
-        inputSchema: { type: "object", properties: {}, additionalProperties: true },
-        execute: (args, exec) => {
-          if (exec.signal?.aborted === true) throw new Error("ABORTED");
-          const digest = stableHash(JSON.stringify(args));
-          exec.onUpdate(`executing ${name}`);
-          if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
-            const key = `${name}:${digest}`;
-            // 配额是 coeffect：withhold 入队前先在本 realm 的 QuotaService 原子 reserve。
-            const quota = tenantScope?.quota;
-            if (quota !== undefined) {
-              const request = { tool: name, tokens: 1 };
-              if (!quota.check(request) || !quota.reserve(request)) {
-                recordAudit(name, digest, "QUOTA_DENIED", "QUOTA_EXHAUSTED", key);
-                throw new Error("QUOTA_EXHAUSTED");
-              }
-            }
-            const verdict = checkEgress(args, egressPolicy);
-            durableEffects.enqueue(name, key, {
-              tool: name,
-              args,
-              ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
-            });
-            recordAudit(name, digest, "EMISSION_WITHHELD", key, "pending");
-            return { ok: true, withheld: true, tool: name, key };
-          }
-          return execute(args, exec.signal);
-        },
-      };
-      pipelineRegistry.registerTool(pipelineTool);
-    }
-    activePipeline = createToolPipeline({
-      registry: pipelineRegistry,
-      signal,
-      beforeToolCall: before,
-      afterToolCall: after,
-      publisher,
-      timeoutMs: options.toolTimeoutMs,
-    });
+    // 工具域在 agent 作用域只建一次；每回合仅重置发射槽与 durable commit 快照。
+    emissionSlots = new Map<string, string>();
+    commitPromise = undefined;
+    committed = undefined;
 
     const effectiveStreamFn = activeStreamFn();
     const emitConverted = async (input: unknown): Promise<void> => {
@@ -1885,7 +1944,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     async waitForIdle() {
       while (activeRun !== undefined) await activeRun.promise.catch(() => {});
+      await toolLeases.waitForIdle();
       await stream.waitForIdle();
+    },
+    async dispose() {
+      aborted = true;
+      activeRun?.controller.abort("AGENT_DISPOSED");
+      await toolLeases.close();
+      while (activeRun !== undefined) await activeRun.promise.catch(() => {});
+      await stream.waitForIdle();
+      pluginManager.disposeAll();
     },
     ...api,
     api,
@@ -1894,69 +1962,44 @@ export function createAgent(options: AgentOptions = {}): Agent {
     resolveLogSink: (options) => resolveLogSink(options),
     logger,
     async runTool(call) {
-      // 裸回调入口也必须经过同一管线：权限、审批、egress、超时与 cleanup 共用一套实现。
-      const check: BeforeToolCallHook = async (input) => {
-        if (permissionGate !== undefined) {
-          const decision = await permissionGate.authorize(permissionStage, input.tool, input.args);
-          if (decision.behavior !== "ALLOW") {
-            let approved = false;
-            if (decision.behavior === "ASK") {
-              approved = (
-                await resolveApproval(permissionStage, input.tool, input.args, decision.reason, activeSignal)
-              ).approved;
-            }
-            if (!approved) {
-              return { block: true, reason: `PERMISSION_DENIED: ${decision.reason ?? "PERMISSION_DENIED"}` };
-            }
-          }
-        }
-        if (permissionPolicy !== undefined) {
-          const verdict = evaluatePermissionPolicy(permissionPolicy, {
-            stage: permissionStage,
-            tool: input.tool,
-            input: input.args,
-          });
-          if (verdict.behavior !== "ALLOW" && verdict.behavior !== "PASSTHROUGH") {
-            return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${verdict.reason ?? "denied"}` };
-          }
-        }
-        if (checkEgress(input.args, egressPolicy).status === "denied") {
-          return { block: true, reason: "EGRESS_DENIED" };
-        }
-        return {};
-      };
+      // 与模型工具共用同一受管 registry/context：同一 hooks、wrap、审计、effects/quota、
+      // timeout 与 cleanup；runToolCall 只关掉事件 sink 与消息追加。
       let invoked = false;
-      const registry = createToolRegistry();
-      registry.registerTool({
-        name: call.name,
-        inputSchema: { type: "object", properties: {}, additionalProperties: true },
-        execute: async () => {
-          if (isCriticalLayerDegraded(securityBackend.capabilities())) {
-            throw new Error("CRITICAL_LAYER_DEGRADED");
+      const stop = pipelineRegistry.registerTool(
+        descriptorFor(
+          { name: call.name, execute: () => call.execute() },
+          {
+            verify: async (toolSignal) => {
+              // commit 派发阶段已经完成安全边界检查，不再重复 backend.run。
+              if (dispatchingEmission) return;
+              if (isCriticalLayerDegraded(securityBackend.capabilities())) {
+                throw new Error("CRITICAL_LAYER_DEGRADED");
+              }
+              if (toolSignal?.aborted === true) throw new Error("ABORTED");
+              await securityBackend.run({ argv: [call.name] });
+              invoked = true;
+            },
           }
-          await securityBackend.run({ argv: [call.name] });
-          invoked = true;
-          return call.execute();
-        },
-      });
+        )
+      );
       try {
-        const pipeline = createToolPipeline({
-          registry,
-          signal: activeSignal,
-          beforeToolCall: check,
-          timeoutMs: options.toolTimeoutMs,
-        });
-        const result = await pipeline.runToolCall({
+        const result = await activePipeline.runToolCall({
           id: `runTool-${++runToolSeq}`,
           tool: call.name,
           input: {},
         });
         if (result.isError === true || !invoked) {
-          return { ok: false, reason: String(result.reason ?? "TOOL_FAILED") };
+          return {
+            ok: false,
+            reason: String(result.reason ?? "TOOL_FAILED"),
+            ...(result.reconciliation === true ? { reconciliation: true } : {}),
+          };
         }
         return { ok: true, value: result.output };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      } finally {
+        stop();
       }
     },
     get aborted() {

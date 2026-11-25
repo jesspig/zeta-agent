@@ -1,3 +1,4 @@
+import type { PluginToolParameter } from "../plugins/types";
 import type { AgentMessage } from "../runtime/agent";
 
 /** 工具批处理执行方式：默认并行，任一调用或全局配置要求串行时整批串行。 */
@@ -48,6 +49,22 @@ export interface JsonSchemaObject {
 
 export type ToolInputSchema = readonly string[] | JsonSchemaObject;
 
+/** 从工具声明投影真实输入 schema；未声明任何参数时保持无约束的历史形状。 */
+export function inputSchemaFromParameters(
+  parameters: readonly PluginToolParameter[] | undefined
+): ToolInputSchema {
+  if (parameters === undefined || parameters.length === 0) {
+    return { type: "object" };
+  }
+  const properties: Record<string, JsonSchemaProperty> = {};
+  const required: string[] = [];
+  for (const parameter of parameters) {
+    properties[parameter.name] = { type: parameter.type };
+    if (parameter.required === true) required.push(parameter.name);
+  }
+  return { type: "object", properties, required, additionalProperties: false };
+}
+
 export interface ToolRetryPolicy {
   readonly maxAttempts: number;
   readonly delayMs?: number;
@@ -84,6 +101,9 @@ export interface ToolResult {
   readonly structuredContent?: unknown;
   readonly details?: unknown;
   readonly usage?: unknown;
+  /** 工具调用终局：unknown 表示取消未被确认，必须与普通失败区分并对账。 */
+  readonly outcome?: "completed" | "cancelled" | "unknown";
+  readonly reconciliation?: boolean;
 }
 
 /** 工具流水线侧旧结果形状；保留旧名以兼容既有消费者。 */

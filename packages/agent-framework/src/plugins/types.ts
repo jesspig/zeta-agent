@@ -1,8 +1,18 @@
 import type { Disposer } from "@zeta-agent/framework";
 import type { AgentEvent } from "../runtime/agent";
 
+/** 工具声明的参数形状；provider schema 与执行前校验共用同一份定义。 */
+export interface PluginToolParameter {
+  readonly name: string;
+  readonly type: "string" | "number" | "boolean" | "object" | "array";
+  readonly description?: string;
+  readonly required?: boolean;
+}
+
 export interface PluginTool<P = never> {
   readonly name: string;
+  readonly description?: string;
+  readonly parameters?: readonly PluginToolParameter[];
   readonly execute: (input: P, signal?: AbortSignal) => unknown | Promise<unknown>;
 }
 
