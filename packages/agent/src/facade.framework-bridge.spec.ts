@@ -12,6 +12,51 @@ import type {
 } from "./facade";
 import { createAgent as facadeCreateAgent } from "./facade";
 
+describe("T-07 core/facade 同一 manager 语义", () => {
+  test("两条生产路径共享 no-throw 归一化、legacy 适配与工具链 fail-closed", async () => {
+    const coreManager = new AgentPluginManager();
+    const coreSeen: string[] = [];
+    coreManager.setLegacy("prepareRequest", (input) => {
+      coreSeen.push("core-legacy-chain");
+      return input;
+    });
+    coreManager.addHook("prepareRequest", () => { throw new Error("core-hook-down"); }, 10, "broken");
+    coreManager.addHook("prepareRequest", (input) => {
+      coreSeen.push("core-healthy");
+      return input;
+    }, 20, "healthy");
+    const core = frameworkCreateAgent({
+      pluginManager: coreManager,
+      streamFn: async function* () { yield "core"; },
+      loopHooks: { prepareRequest: (request) => { coreSeen.push("core-legacy-field"); return request; } },
+    });
+    await core.prompt("go");
+    expect(coreSeen).toContain("core-legacy-field");
+    expect(coreSeen).toContain("core-healthy");
+    expect(coreManager.chain("prepareRequest").lastFailures).toHaveLength(1);
+
+    const facadeManager = new AgentPluginManager();
+    const facadeSeen: string[] = [];
+    const facade = facadeCreateAgent({
+      includeBuiltins: false,
+      pluginManager: facadeManager,
+      streamFn: async function* () { yield "facade"; },
+    });
+    facade.api.addPrepareRequest(() => { throw new Error("facade-hook-down"); });
+    facade.api.addPrepareRequest((request) => {
+      facadeSeen.push("facade-healthy");
+      return request;
+    });
+    await facade.prompt("go");
+    expect(facadeSeen).toContain("facade-healthy");
+    expect(facadeManager.chain("prepareRequest").lastFailures).toHaveLength(1);
+
+    facadeManager.addHook("beforeToolCall", () => { throw new Error("strict-chain"); }, 10, "strict");
+    await expect(facadeManager.run("beforeToolCall", {}, undefined, { failClosed: true }))
+      .rejects.toThrow("strict-chain");
+  });
+});
+
 describe("T-02 双路径导入与行为归位", () => {
   test("两条路径都能导入 createAgent 与插件管线符号", () => {
     expect(typeof frameworkCreateAgent).toBe("function");

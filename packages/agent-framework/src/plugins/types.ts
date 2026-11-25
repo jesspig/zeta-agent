@@ -9,6 +9,10 @@ export interface PluginTool<P = never> {
 /** 贡献元数据：来源/摘要/能力供审查，order/realm/replaceable 接入真实注册入口。 */
 export interface PluginMetadata {
   readonly order?: number;
+  /** hook 在单一链中的优先级；升序执行，缺省 100。 */
+  readonly priority?: number;
+  /** 必须先于本贡献执行的 hook 名；参与拓扑排序与环检测。 */
+  readonly dependsOn?: readonly string[];
   readonly realm?: symbol;
   readonly replaceable?: boolean;
   readonly required?: boolean;

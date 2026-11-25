@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentEvent, AgentMessage, CoreContextLike } from "@zeta-agent/agent-framework";
-import { createAgent, type PluginApiSurface } from "./facade";
+import {
+  AgentPluginManager,
+  defineAgentPlugin,
+  type AgentEvent,
+  type AgentMessage,
+  type CoreContextLike,
+  type HookEntry,
+} from "@zeta-agent/agent-framework";
+import { createAgent, type AgentStreamChunk, type PluginApiSurface } from "./facade";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -392,5 +399,200 @@ describe("T-10 完整 AgentPluginApi 契约", () => {
     expect(agent.toolNames).toContain("durable-tool");
     expect(messages.some((message) => message.role === "toolResult")).toBe(true);
     expect(hookCount).toBe(2);
+  });
+});
+
+/** 生产路径探针：所有注册与执行真实经过注入的 AgentPluginManager。 */
+class ProbeManager extends AgentPluginManager {
+  readonly events: string[] = [];
+
+  override addHook<I = unknown>(
+    chainName: string,
+    fn: (input: I, signal?: AbortSignal) => unknown | Promise<unknown>,
+    priority?: number,
+    name?: string,
+    options?: { readonly dependsOn?: readonly string[] }
+  ) {
+    this.events.push(`add:${chainName}`);
+    return super.addHook(chainName, fn, priority, name, options);
+  }
+
+  override setLegacy(field: string, fn: (input: unknown) => unknown) {
+    this.events.push(`legacy:${field}`);
+    return super.setLegacy(field, fn);
+  }
+
+  override chain<I = unknown>(
+    name: string,
+    override?: { readonly rethrow?: boolean }
+  ) {
+    this.events.push(`chain:${name}`);
+    return super.chain<I>(name, override);
+  }
+
+  override async run<I>(
+    chainName: string,
+    input: I,
+    signal?: AbortSignal,
+    options?: { readonly failClosed?: boolean; readonly reverse?: boolean }
+  ): Promise<I> {
+    this.events.push(`run:${chainName}`);
+    return super.run(chainName, input, signal, options);
+  }
+
+  override async runEach<I>(
+    chainName: string,
+    input: I,
+    signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
+  ): Promise<void> {
+    this.events.push(`runEach:${chainName}`);
+    return super.runEach(chainName, input, signal, visit);
+  }
+}
+
+describe("T-07 生产路径单一 manager 探针", () => {
+  const HOOK_CHAINS = [
+    "converter",
+    "contextTransform",
+    "beforeToolCall",
+    "afterToolCall",
+    "turnBoundary",
+    "prepareRequest",
+    "prepareNextTurn",
+    "steering",
+    "followUp",
+    "streamFn",
+    "wrap",
+  ] as const;
+
+  function registerAllHooks(
+    agent: ReturnType<typeof createAgent>,
+    provider?: () => AsyncIterable<AgentStreamChunk>
+  ): void {
+    agent.api.addConverter((input) => input === "raw" ? { type: "agent_start" } : undefined);
+    agent.api.addContextTransform((input) => input);
+    agent.api.addBeforeToolCall(() => undefined);
+    agent.api.addAfterToolCall(() => undefined);
+    agent.api.addTurnBoundary(() => undefined);
+    agent.api.addPrepareRequest((input) => input);
+    agent.api.addPrepareNextTurn(() => undefined);
+    agent.api.provideSteering({ name: "probe-steering", next: () => undefined });
+    agent.api.provideFollowUp({ name: "probe-followUp", next: () => undefined });
+    agent.api.provideStreamFn(provider ?? (() => (async function* () { yield "from-provider"; })()));
+    agent.api.addWrap("probe-wrap", { handler: () => undefined });
+  }
+
+  test("生产路径所有 hook 注册经同一 manager，legacy 字段经 setLegacy 适配", () => {
+    const manager = new ProbeManager();
+    const agent = createAgent({
+      includeBuiltins: false,
+      pluginManager: manager,
+      loopHooks: {
+        prepareRequest: (input) => input,
+        prepareNextTurn: () => undefined,
+        finishTurn: () => undefined,
+        pollFollowUp: () => [],
+      },
+      streamFn: async function* () { yield "ok"; },
+    });
+    registerAllHooks(agent);
+
+    for (const chain of HOOK_CHAINS) expect(manager.events).toContain(`add:${chain}`);
+    for (const field of ["prepareRequest", "prepareNextTurn", "turnBoundary", "pollFollowUp"]) {
+      expect(manager.events).toContain(`legacy:${field}`);
+    }
+    expect(manager.chain("prepareRequest").snapshot().map((entry) => entry.name))
+      .toContain("legacy:prepareRequest");
+  });
+
+  test("真实回合中每条 hook 链都由 manager 驱动", async () => {
+    const manager = new ProbeManager();
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      pluginManager: manager,
+    });
+    agent.api.registerTool({ name: "ping", execute: () => "pong" });
+    registerAllHooks(agent, () => (async function* (): AsyncIterable<AgentStreamChunk> {
+      streams += 1;
+      if (streams === 1) yield { type: "tool_call", id: "c1", name: "ping", arguments: "{}" };
+      else yield "ok";
+    })());
+
+    await agent.prompt("go");
+
+    for (const chain of [
+      "contextTransform",
+      "prepareRequest",
+      "steering",
+      "followUp",
+      "beforeToolCall",
+      "afterToolCall",
+      "wrap",
+      "turnBoundary",
+      "prepareNextTurn",
+      "pollFollowUp",
+    ]) {
+      expect(manager.events).toContain(`run:${chain}`);
+    }
+    expect(manager.events).toContain("runEach:converter");
+    expect(manager.events).toContain("chain:streamFn");
+  });
+
+  test("legacy loopHooks 在同一链中真实执行", async () => {
+    const manager = new ProbeManager();
+    const seen: string[] = [];
+    const agent = createAgent({
+      includeBuiltins: false,
+      pluginManager: manager,
+      streamFn: async function* () { yield "ok"; },
+      loopHooks: {
+        prepareRequest: (request) => { seen.push("legacy-request"); return request; },
+        finishTurn: () => { seen.push("legacy-finish"); return undefined; },
+      },
+    });
+    await agent.prompt("x");
+    expect(seen).toEqual(["legacy-request", "legacy-finish"]);
+    expect(manager.events).toContain("run:prepareRequest");
+    expect(manager.events).toContain("run:turnBoundary");
+  });
+
+  test("依赖环只让目标插件 FAILED，健康插件 hook 仍执行", async () => {
+    const seen: string[] = [];
+    const agent = createAgent({
+      includeBuiltins: false,
+      allowTextToolMarkers: true,
+      plugins: [
+        defineAgentPlugin("cyc-a", [{ kind: "wrap", name: "a", dependsOn: ["b"], handler: () => { seen.push("a"); } }]),
+        defineAgentPlugin("cyc-b", [{ kind: "wrap", name: "b", dependsOn: ["a"], handler: () => { seen.push("b"); } }]),
+        defineAgentPlugin("healthy", [{ kind: "wrap", name: "healthy", handler: () => { seen.push("healthy"); } }]),
+      ],
+      streamFn: async function* () { yield '@@TOOL:ping:{}@@'; },
+    });
+    agent.api.registerTool({ name: "ping", execute: () => "pong" });
+    expect(agent.pluginInstallations.find((item) => item.plugin.name === "cyc-a")?.status).toBe("FAILED");
+    expect(agent.pluginInstallations.find((item) => item.plugin.name === "cyc-b")?.status).toBe("FAILED");
+    expect(agent.pluginInstallations.find((item) => item.plugin.name === "healthy")?.status).toBe("ACTIVE");
+
+    await agent.prompt("x");
+    expect(seen).toContain("healthy");
+    expect(seen).not.toContain("a");
+    expect(seen).not.toContain("b");
+  });
+
+  test("工具链 fail-closed：hook 抛错阻断工具执行", async () => {
+    let executions = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      allowTextToolMarkers: true,
+      streamFn: async function* () { yield '@@TOOL:ping:{}@@'; },
+    });
+    agent.api.registerTool({ name: "ping", execute: () => { executions += 1; return "pong"; } });
+    agent.api.addBeforeToolCall(() => { throw new Error("hook-down"); });
+    await agent.prompt("x");
+    expect(executions).toBe(0);
   });
 });

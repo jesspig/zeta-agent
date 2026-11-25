@@ -40,9 +40,12 @@ import {
   type FinishTurn,
   type Inbox,
   type InboxMessage,
+  type LoopDecision,
   type LoopRuntime,
+  type LastTurn,
   type NextTurnUpdate,
   type PluginContribution,
+  type PluginStatus,
   type QueueMode,
   type QueueTarget,
   type SourcePollPhase,
@@ -204,6 +207,8 @@ export interface PluginInstallation {
   readonly dispose: Disposer;
   readonly realm: symbol;
   readonly review: ExtensionReview;
+  /** 依赖环只把目标插件标为 FAILED，其他插件保持 ACTIVE。 */
+  status: PluginStatus;
 }
 
 export interface PluginReviewRecord {
@@ -615,6 +620,18 @@ export interface Agent extends PluginApiSurface {
   providerToolSchemas(): readonly AgentToolSchema[];
 }
 
+function isLoopDecision(value: unknown): value is LoopDecision {
+  if (typeof value !== "object" || value === null) return false;
+  const action = (value as { readonly action?: unknown }).action;
+  return action === "continue" || action === "end";
+}
+
+function turnFromEvent(event: AgentEvent): LastTurn {
+  return event.type === "turn_end"
+    ? { message: event.message, toolResults: event.toolResults }
+    : { message: { role: "assistant", content: "" }, toolResults: [] };
+}
+
 function streamErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) return String(error.message);
   return error instanceof Error ? error.message : String(error);
@@ -892,55 +909,61 @@ export function createAgent(options: AgentOptions = {}): Agent {
   /** 当前回合是否使用了 provider 原生 tool_calls（决定是否自动续跑消费工具结果）。 */
   let lastTurnHadNativeTools = false;
 
-  // 插件 API 的可变注册集合。每个 add* 返回幂等 disposer；disposeAll 按 LIFO 撤销。
+  // 插件 API 的工具/身份集合仍用 map 做快照；hook 的真实生产路径统一由 pluginManager 负载。
   interface PluginToolEntry {
     readonly tool: PluginTool;
     readonly token: object;
     readonly meta: ContributionContext;
     readonly dispose: () => void;
   }
+  interface AfterHookAccumulator {
+    readonly event: AgentEvent;
+    readonly overrides: Record<string, unknown>;
+  }
   const pluginTools = new Map<string, PluginToolEntry>();
   const declaredLoadout = new Map<string, PluginTool>();
-  const converters: Converter[] = [];
-  const contextTransforms: ContextTransform[] = [];
-  const beforeToolCalls: Array<(event: AgentEvent, signal?: AbortSignal) => void | Promise<void>> = [];
-  const afterToolCalls: Array<(event: AgentEvent, signal?: AbortSignal) => void | Promise<void>> = [];
-  const turnBoundaries: FinishTurn[] = [];
-  const prepareRequestFns: PrepareRequest[] = [];
-  const prepareNextTurnFns: PrepareNextTurn[] = [];
-  const steeringSources: QueueSource[] = [];
-  const followUpSources: QueueSource[] = [];
-  const streamFnProviders: StreamFn[] = [];
   // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
   const pluginManager = options.pluginManager ?? new AgentPluginManager();
   const events = createEventBus();
   /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
   const inbox: Inbox = createInbox();
+  let hookSequence = 0;
+  const nextHookName = (chain: string): string => `${chain}#${++hookSequence}`;
+  function registerHook<I>(
+    chain: string,
+    fn: (input: I, signal?: AbortSignal) => unknown | Promise<unknown>,
+    name?: string
+  ): Disposer {
+    return pluginManager.addHook<I>(chain, fn, undefined, name ?? nextHookName(chain));
+  }
+
+  // legacy 字段赋值转换为 `legacy:<field>` 条目，参与同一链（最低优先级），不再旁路执行。
+  const legacyHooks = options.loopHooks;
+  if (legacyHooks?.prepareRequest !== undefined) {
+    pluginManager.setLegacy("prepareRequest", (input) =>
+      legacyHooks.prepareRequest!(input, activeSignal) ?? input);
+  }
+  if (legacyHooks?.prepareNextTurn !== undefined) {
+    pluginManager.setLegacy("prepareNextTurn", (input) =>
+      legacyHooks.prepareNextTurn!(input, activeSignal));
+  }
+  if (legacyHooks?.finishTurn !== undefined) {
+    pluginManager.setLegacy("turnBoundary", (input) =>
+      legacyHooks.finishTurn!(turnFromEvent(input as AgentEvent), activeSignal));
+  }
+  if (legacyHooks?.pollFollowUp !== undefined) {
+    pluginManager.setLegacy("pollFollowUp", async () =>
+      (await legacyHooks.pollFollowUp!(activeSignal)) ?? undefined);
+  }
 
   async function pollQueueSources(signal: AbortSignal, kinds: "all" | "steering" = "all"): Promise<void> {
-    for (const source of steeringSources) {
-      const message = await source.next() as AgentMessage | undefined;
-      if (message !== undefined) inbox.steer(message);
-    }
+    await pluginManager.run("steering", inbox, signal);
     // prepareNextTurn 只重轮询 steering：followUp 在这里重入会与 natural end 外层消费互相喂料而无限续跑。
-    if (kinds === "all") {
-      for (const source of followUpSources) {
-        const message = await source.next() as AgentMessage | undefined;
-        if (message !== undefined) inbox.followUp(message);
-      }
-    }
+    if (kinds === "all") await pluginManager.run("followUp", inbox, signal);
   }
 
   function addDisposer(dispose: () => void): () => void {
     return pluginManager.addDisposer(dispose);
-  }
-
-  function addToList<T>(list: T[], fn: T): () => void {
-    list.push(fn);
-    return addDisposer(() => {
-      const index = list.indexOf(fn);
-      if (index >= 0) list.splice(index, 1);
-    });
   }
 
   /** 同名工具替换：旧条目先撤销，新条目用身份 disposer 登记，旧 disposer 晚到不误删。 */
@@ -974,6 +997,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   let sectionSequence = 0;
   const installationContributionDisposers = new Map<PluginInstallation, Disposer[]>();
+  const pluginTracking = new Map<AgentPlugin, Disposer>();
   const contributionExecutors: ContributionExecutors = {
     tool: (item, ctx) => registerToolEntry(item.tool, ctx),
     hook: (item, ctx) =>
@@ -990,8 +1014,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
         required: ctx.required,
         source: ctx.source,
       }),
-    wrap: (item, ctx) =>
-      wrapRegistry.register({
+    wrap: (item, ctx) => {
+      // registry 仅承载公开快照；真实执行经 manager 的 wrap 链（含拓扑排序/环隔离）。
+      const stopRegistry = wrapRegistry.register({
         name: item.name,
         value: item.handler ?? (() => undefined),
         realm: ctx.realm,
@@ -999,7 +1024,20 @@ export function createAgent(options: AgentOptions = {}): Agent {
         replaceable: ctx.replaceable,
         required: ctx.required,
         source: ctx.source,
-      }),
+      });
+      const ownerPrefix = ctx.owner === undefined ? "" : `${ctx.owner}:`;
+      const stopHook = pluginManager.addHook<AgentEvent>(
+        "wrap",
+        (event, signal) => item.handler?.(event, signal),
+        ctx.priority ?? ctx.order,
+        `${ownerPrefix}${item.name}`,
+        { dependsOn: ctx.dependsOn }
+      );
+      return () => {
+        stopHook();
+        stopRegistry();
+      };
+    },
     task: (item, ctx) =>
       taskRegistry.register({
         name: item.name,
@@ -1083,7 +1121,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const installResult = stage.commit({
     install: (entry) => {
       pluginGeneration += 1;
-      return entry.item.install();
+      const dispose = entry.item.install();
+      // 保留 install() 原样 disposer；管理器只登记状态/顺序，不重复调用 install。
+      pluginTracking.set(entry.item, addDisposer(pluginManager.trackInstall(entry.item)));
+      return dispose;
     },
     apply: (entry, record) => {
       const generation = pluginGeneration;
@@ -1094,6 +1135,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         realm: entry.realm ?? defaultRealm,
         review: pluginReviews.find((item) => item.plugin === entry.item)?.review
           ?? { decision: "allowed", reason: "TRUSTED", source: { origin: "user", trusted: true } },
+        status: "ACTIVE",
       };
       pluginInstallations.push(installation);
       const contributionDisposers: Disposer[] = [];
@@ -1105,6 +1147,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const stop = contributionHost.apply(item, {
           realm: item.realm ?? entry.realm ?? defaultRealm,
           order: item.order ?? entry.order,
+          priority: item.priority ?? entry.item.priority,
+          dependsOn: item.dependsOn ?? entry.item.dependsOn,
+          owner: entry.item.name,
           replaceable: item.replaceable ?? entry.replaceable,
           required: item.required ?? entry.required,
           source: item.source ?? entry.source,
@@ -1116,20 +1161,29 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const tracked = addDisposer(stop);
         contributionDisposers.push(tracked);
       }
+      // 环只让目标插件 FAILED；其他插件的 hook 继续留在同一链上执行。
+      installation.status = pluginManager.syncPluginStatus(entry.item).status;
     },
-    unapply: (_entry, record) => {
+    unapply: (entry, record) => {
       const index = pluginInstallations.findIndex((item) => item.dispose === record.dispose);
       const installation = index >= 0 ? pluginInstallations[index] : undefined;
       if (installation === undefined) return;
       for (const stop of installationContributionDisposers.get(installation) ?? []) stop();
       installationContributionDisposers.delete(installation);
+      pluginTracking.get(entry.item)?.();
+      pluginTracking.delete(entry.item);
       pluginInstallations.splice(index, 1);
     },
   });
   if (installResult.error !== undefined) throw installResult.error;
+  // 最后一批贡献也可能补全依赖图：统一重算所有插件状态，环只影响目标插件。
+  for (const installation of pluginInstallations) {
+    installation.status = pluginManager.syncPluginStatus(installation.plugin).status;
+  }
 
   function activeStreamFn(): AgentStreamFn | undefined {
-    const provider = streamFnProviders[streamFnProviders.length - 1];
+    // 单一管理器链的最后（最高优先级/最新注册）provider 生效。
+    const provider = pluginManager.chain<AgentStreamRequest>("streamFn").snapshot().at(-1)?.fn;
     if (provider !== undefined) {
       return (request: AgentStreamRequest) => provider(request) as AsyncIterable<AgentStreamChunk>;
     }
@@ -1165,34 +1219,43 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return addDisposer(stream.subscribe(handler));
     },
     addConverter(fn) {
-      return addToList(converters, fn);
+      return registerHook<unknown>("converter", (input) => fn(input));
     },
     addContextTransform(fn) {
-      return addToList(contextTransforms, fn);
+      return registerHook<unknown>("contextTransform", (input) => fn(input));
     },
     addBeforeToolCall(fn) {
-      return addToList(beforeToolCalls, fn);
+      return registerHook<AgentEvent>("beforeToolCall", (event, signal) => fn(event, signal));
     },
     addAfterToolCall(fn) {
-      return addToList(afterToolCalls, fn);
+      return registerHook<AfterHookAccumulator>("afterToolCall", async (input, signal) => {
+        const override = await fn(input.event, signal);
+        if (typeof override === "object" && override !== null) Object.assign(input.overrides, override);
+      });
     },
     addTurnBoundary(fn) {
-      return addToList(turnBoundaries, fn);
+      return registerHook<AgentEvent>("turnBoundary", (event, signal) => fn(event, signal));
     },
     addPrepareRequest(fn) {
-      return addToList(prepareRequestFns, fn);
+      return registerHook<unknown>("prepareRequest", (input, signal) => fn(input, signal));
     },
     addPrepareNextTurn(fn) {
-      return addToList(prepareNextTurnFns, fn);
+      return registerHook<unknown>("prepareNextTurn", (input, signal) => fn(input, signal));
     },
     provideSteering(source) {
-      return addToList(steeringSources, source);
+      return registerHook<Inbox>("steering", async (inbox) => {
+        const message = await source.next() as AgentMessage | undefined;
+        if (message !== undefined) inbox.steer(message);
+      }, `steering:${source.name ?? nextHookName("steering")}`);
     },
     provideFollowUp(source) {
-      return addToList(followUpSources, source);
+      return registerHook<Inbox>("followUp", async (inbox) => {
+        const message = await source.next() as AgentMessage | undefined;
+        if (message !== undefined) inbox.followUp(message);
+      }, `followUp:${source.name ?? nextHookName("followUp")}`);
     },
     provideStreamFn(fn) {
-      return addToList(streamFnProviders, fn);
+      return registerHook<unknown>("streamFn", (input) => fn(input));
     },
     declareToolLoadout(tools) {
       declaredLoadout.clear();
@@ -1252,6 +1315,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       pluginManager.disposeAll();
       pluginInstallations.length = 0;
       installationContributionDisposers.clear();
+      pluginTracking.clear();
     },
   };
 
@@ -1454,19 +1518,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
       if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
         emissionSlots.set(input.call.id, `${name}:${argsDigest}`);
       }
-      for (const fn of beforeToolCalls) {
-        await fn(
-          { type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args },
-          toolSignal ?? signal
-        );
-      }
-      // wrap 贡献形成按 order 排序的环绕链，工具调用前依次执行。
-      for (const slot of wrapRegistry.snapshot()) {
-        await slot.value?.(
-          { type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args },
-          toolSignal ?? signal
-        );
-      }
+      const startEvent: AgentEvent = {
+        type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args,
+      };
+      // 普通 hook 经单一管理器链执行；工具链使用 fail-closed，抛错绝不回退 legacy。
+      await pluginManager.run("beforeToolCall", startEvent, toolSignal ?? signal, { failClosed: true });
+      // wrap 贡献按拓扑序执行 before，after 阶段由同一链反向执行。
+      await pluginManager.run("wrap", startEvent, toolSignal ?? signal, { failClosed: true });
       return {};
     };
 
@@ -1493,28 +1551,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
           input.call.id
         );
       }
-      for (const fn of afterToolCalls) {
-        capture(await fn(
-          {
-            type: "tool_execution_end",
-            toolCallId: input.call.id,
-            toolName: input.call.tool ?? input.call.name ?? "",
-            result: input.output,
-            isError: input.isError,
-          },
-          toolSignal ?? signal
-        ));
-      }
-      const endEvent = {
+      const endEvent: AgentEvent = {
         type: "tool_execution_end" as const,
         toolCallId: input.call.id,
         toolName: name,
         result: input.output,
         isError: input.isError,
       };
-      for (const slot of [...wrapRegistry.snapshot()].reverse()) {
-        await slot.value?.(endEvent, toolSignal ?? signal);
-      }
+      const accumulator: AfterHookAccumulator = { event: endEvent, overrides };
+      await pluginManager.run("afterToolCall", accumulator, toolSignal ?? signal, { failClosed: true });
+      capture(accumulator.overrides);
+      await pluginManager.run("wrap", endEvent, toolSignal ?? signal, { failClosed: true, reverse: true });
       return overrides;
     };
 
@@ -1563,10 +1610,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
     const effectiveStreamFn = activeStreamFn();
     const emitConverted = async (input: unknown): Promise<void> => {
-      for (const converter of converters) {
-        const event = await converter(input);
-        if (event !== undefined) await stream.emit(event, signal);
-      }
+      await pluginManager.runEach("converter", input, signal, async (value) => {
+        if (value !== undefined) await stream.emit(value as AgentEvent, signal);
+      });
     };
 
     const runtime: LoopRuntime = {
@@ -1575,14 +1621,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
       turnBudget: options.turnBudget,
       emit: (event) => stream.emit(event, signal),
       getState: () => stream.getState(),
-      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> => {
-        let update: NextTurnUpdate | undefined;
-        for (const fn of prepareNextTurnFns) {
-          update = asNextTurnUpdate(await fn(stream.getState(), signal)) ?? update;
-        }
-        update = asNextTurnUpdate(await options.loopHooks?.prepareNextTurn?.(stream.getState(), signal)) ?? update;
-        return update;
-      },
+      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> =>
+        asNextTurnUpdate(await pluginManager.run("prepareNextTurn", stream.getState(), signal)),
       pollSources: async (phase: SourcePollPhase): Promise<void> => {
         await pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
@@ -1604,20 +1644,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
               ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
               : (base.messages ?? []),
         };
-        let result: unknown = seeded;
-        for (const transform of contextTransforms) result = await transform(result);
-        for (const fn of prepareRequestFns) result = await fn(result, signal);
-        return await options.loopHooks?.prepareRequest?.(result, signal) ?? result;
+        const transformed = await pluginManager.run("contextTransform", seeded, signal);
+        return await pluginManager.run("prepareRequest", transformed, signal);
       },
       pollFollowUp: async () => {
         const followUps = inbox.poll("followUp").map((item) => item.body);
-        return await options.loopHooks?.pollFollowUp?.(signal) ?? followUps;
+        return await pluginManager.run("pollFollowUp", followUps, signal);
       },
       finishTurn: async (turn) => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-        for (const fn of turnBoundaries) await fn(event, signal);
-        const legacy = await options.loopHooks?.finishTurn?.(turn, signal);
-        if (legacy !== undefined) return legacy;
+        const outcome = await pluginManager.run("turnBoundary", event, signal);
+        if (isLoopDecision(outcome)) return outcome;
         // 原生工具调用需要显式续跑一轮，让模型消费工具结果。
         if (lastTurnHadNativeTools && turn.toolResults.length > 0) return TURN_CONTINUE_DECISION;
         // 文本标记协议保持单轮收束：结果已落盘，不能把 toolCalls 交给默认续跑反复解析。

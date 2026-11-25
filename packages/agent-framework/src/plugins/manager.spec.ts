@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { HookChain, DEFAULT_HOOK_PRIORITY, normalizeHookError } from "./hook-chain";
-import { AgentPluginManager, LEGACY_FIELD_PRIORITY } from "./manager";
-import { AgentPlugin, defineCompatExtension } from "./types";
+import {
+  AgentPluginManager,
+  FAIL_CLOSED_HOOK_CHAINS,
+  isFailClosedHookChain,
+  LEGACY_FIELD_PRIORITY,
+} from "./manager";
+import { AgentPlugin, defineAgentPlugin, defineCompatExtension } from "./types";
 
 describe("T-02 HookChain", () => {
   test("priority 升序、同值按注册序", async () => {
@@ -149,6 +154,92 @@ describe("T-02 AgentPluginManager", () => {
     manager.disposeAll();
     expect(active).toBe(false);
     expect(manager.installedPlugins).toEqual([]);
+  });
+});
+
+describe("T-07 单一 plugin manager 与失败分层", () => {
+  test("legacy 字段转换为 legacy:<field> 并参与同一链，普通 hook no-throw", async () => {
+    const manager = new AgentPluginManager();
+    const seen: string[] = [];
+    manager.setLegacy("prepareRequest", (input) => {
+      seen.push("legacy");
+      return input;
+    });
+    manager.addHook<string>("prepareRequest", () => { throw "boom-as-string"; }, 10, "broken");
+    manager.addHook<string>("prepareRequest", (input) => {
+      seen.push("plugin");
+      return input;
+    }, 20, "plugin");
+
+    const chain = manager.chain<string>("prepareRequest");
+    expect(chain.snapshot().map((entry) => entry.name)).toEqual(["legacy:prepareRequest", "broken", "plugin"]);
+    expect(await manager.run("prepareRequest", "x")).toBe("x");
+    expect(seen).toEqual(["legacy", "plugin"]);
+    expect(chain.lastFailures[0]?.error.message).toBe("boom-as-string");
+  });
+
+  test("dependsOn 拓扑排序覆盖 priority 顺序", async () => {
+    const manager = new AgentPluginManager();
+    manager.addHook<string>("prepareRequest", (input) => `${input}-c`, 1, "c", { dependsOn: ["a"] });
+    manager.addHook<string>("prepareRequest", (input) => `${input}-a`, 200, "a");
+    expect(manager.chain("prepareRequest").names).toEqual(["a", "c"]);
+    expect(await manager.run("prepareRequest", "x")).toBe("x-a-c");
+  });
+
+  test("环只把目标插件标为 FAILED，其他插件继续参与同一链", async () => {
+    const manager = new AgentPluginManager();
+    const a = defineAgentPlugin("a", []);
+    const b = defineAgentPlugin("b", []);
+    const healthy = defineAgentPlugin("healthy", []);
+    manager.install(a);
+    manager.install(b);
+    manager.install(healthy);
+    manager.addHook<string>("wrap", (input) => `${input}-a`, 1, "a:first", { dependsOn: ["b:second"] });
+    manager.addHook<string>("wrap", (input) => `${input}-b`, 2, "b:second", { dependsOn: ["a:first"] });
+    manager.addHook<string>("wrap", (input) => `${input}-safe`, 3, "healthy:third");
+
+    expect(manager.syncPluginStatus(a).status).toBe("FAILED");
+    expect(manager.syncPluginStatus(b).status).toBe("FAILED");
+    expect(manager.syncPluginStatus(healthy).status).toBe("ACTIVE");
+    expect(manager.pluginStatuses.filter((record) => record.status === "FAILED")).toHaveLength(2);
+    expect(manager.cycleReport).toHaveLength(1);
+    expect(await manager.run("wrap", "x")).toBe("x-safe");
+  });
+
+  test("工具链 fail-closed：错误上抛且不再走 legacy 兜底", async () => {
+    const manager = new AgentPluginManager();
+    let legacyCalls = 0;
+    manager.setLegacy("beforeToolCall", (input) => {
+      legacyCalls += 1;
+      return input;
+    });
+    manager.addHook<string>("beforeToolCall", () => { throw new Error("hook-down"); }, 10, "broken");
+    expect(FAIL_CLOSED_HOOK_CHAINS).toContain("beforeToolCall");
+    expect(isFailClosedHookChain("beforeToolCall")).toBe(true);
+    expect(isFailClosedHookChain("prepareRequest")).toBe(false);
+
+    await expect(manager.run("beforeToolCall", "x", undefined, { failClosed: true }))
+      .rejects.toThrow("hook-down");
+    // 仅链内 baseline 一次；普通 hook 的 fallback 不得在失败后再跑一遍 legacy。
+    expect(legacyCalls).toBe(1);
+  });
+
+  test("普通链先 no-throw 后以 failClosed 运行时仍阻断", async () => {
+    const manager = new AgentPluginManager();
+    manager.addHook<string>("custom", () => { throw new Error("late-fail-closed"); }, 10, "broken");
+    expect(await manager.run("custom", "x")).toBe("x");
+    await expect(manager.run("custom", "x", undefined, { failClosed: true }))
+      .rejects.toThrow("late-fail-closed");
+  });
+
+  test("runEach 经同一管理器逐项派发", async () => {
+    const manager = new AgentPluginManager();
+    manager.addHook<string>("converter", (input) => `${input}-event`, 10, "converter");
+    const received: string[] = [];
+    await manager.runEach("converter", "raw", undefined, (value) => {
+      received.push(String(value));
+    });
+    expect(received).toEqual(["raw-event"]);
   });
 });
 

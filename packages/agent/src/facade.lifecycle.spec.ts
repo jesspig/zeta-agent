@@ -55,6 +55,42 @@ describe("T-06 公共 facade 生命周期", () => {
     expect(order.indexOf("finishTurn:end")).toBeLessThan(order.indexOf("agent_end"));
   });
 
+  test("T-07 普通 hook 抛错归一化，legacy prepareRequest 屏障仍完整", async () => {
+    const gate = deferred();
+    const order: string[] = [];
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* () {
+        streams += 1;
+        order.push(`stream:${streams}`);
+        yield "ok";
+      },
+      loopHooks: {
+        prepareRequest: async (request) => {
+          order.push("legacy:start");
+          await gate.promise;
+          order.push("legacy:end");
+          return request;
+        },
+      },
+    });
+    agent.api.addPrepareRequest(() => { throw new Error("ordinary hook down"); });
+    agent.api.addPrepareRequest((request) => {
+      order.push("healthy");
+      return request;
+    });
+    const running = agent.prompt("go");
+    await waitUntil(() => order.includes("legacy:start"));
+    expect(streams).toBe(0);
+    gate.resolve();
+    await running;
+    expect(order.indexOf("legacy:end")).toBeLessThan(order.indexOf("healthy"));
+    expect(order.indexOf("healthy")).toBeLessThan(order.indexOf("stream:1"));
+    expect(streams).toBe(1);
+  });
+
   test("prompt/reset 互斥，idle 等待 agent_end listener", async () => {
     const runGate = deferred();
     const endGate = deferred();

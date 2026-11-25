@@ -966,3 +966,37 @@ for (const item of cases) {
     });
   });
 }
+
+// T-07：12 条不变量的生产 hook 链必须单一 manager 化，环/no-throw 分层不得击穿 runtime。
+describe("T-07 manager 链与不变量", () => {
+  test("inv-core-hook-no-throw: 抛错 hook 被归一化，健康 hook 与终局继续", async () => {
+    let broken = false;
+    let healthy = false;
+    const { runtime, manager, order } = makePluginRuntime({
+      decisionPlugin: () => {
+        broken = true;
+        throw new Error("decision hook down");
+      },
+    });
+    manager.addHook<PluginDecisionInput>("decision", (input) => {
+      healthy = true;
+      return input;
+    }, 200, "healthy");
+
+    await runLoop(runtime);
+    expect(broken).toBe(true);
+    expect(healthy).toBe(true);
+    expect(manager.chain("decision").lastFailures).toHaveLength(1);
+    expect(order).toContain("agent_end");
+  });
+
+  test("inv-core-hook-cycle: 环内条目隔离，其他 hook 与终局继续", async () => {
+    const manager = new AgentPluginManager();
+    manager.addHook<string>("decision", (input) => `${input}-a`, 1, "a", { dependsOn: ["b"] });
+    manager.addHook<string>("decision", (input) => `${input}-b`, 2, "b", { dependsOn: ["a"] });
+    manager.addHook<string>("decision", (input) => `${input}-safe`, 3, "safe");
+
+    expect(manager.cycleReport).toHaveLength(1);
+    expect(await manager.run("decision", "x")).toBe("x-safe");
+  });
+});

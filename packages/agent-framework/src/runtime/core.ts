@@ -120,6 +120,7 @@ export class Agent {
   private readonly loopHooks: CoreLoopHooks;
   private readonly turnBudget: number | undefined;
   private readonly inbox: Inbox = createInbox();
+  private activeSignal: AbortSignal | undefined;
 
   private abortedValue = false;
   private generation = 0;
@@ -142,6 +143,30 @@ export class Agent {
     this.systemPrompt = options.systemPrompt;
     this.loopHooks = options.loopHooks ?? {};
     this.turnBudget = options.turnBudget;
+
+    // legacy 字段 hook 经 setLegacy 进入同一链（最低优先级），生产路径不再旁路调用。
+    const legacyHooks = this.loopHooks;
+    if (legacyHooks.prepareRequest !== undefined) {
+      this.manager.setLegacy("prepareRequest", (input) =>
+        legacyHooks.prepareRequest!(input, this.activeSignal) ?? input);
+    }
+    if (legacyHooks.prepareNextTurn !== undefined) {
+      this.manager.setLegacy("prepareNextTurn", (input) =>
+        legacyHooks.prepareNextTurn!(input, this.activeSignal));
+    }
+    if (legacyHooks.finishTurn !== undefined) {
+      this.manager.setLegacy("turnBoundary", (input) => {
+        const event = input as AgentEvent;
+        const turn: LastTurn = event.type === "turn_end"
+          ? { message: event.message, toolResults: event.toolResults }
+          : { message: { role: "assistant", content: "" }, toolResults: [] };
+        return legacyHooks.finishTurn!(turn, this.activeSignal);
+      });
+    }
+    if (legacyHooks.pollFollowUp !== undefined) {
+      this.manager.setLegacy("pollFollowUp", async () =>
+        (await legacyHooks.pollFollowUp!(this.activeSignal)) ?? undefined);
+    }
 
     for (const tool of options.tools ?? []) this.tools.set(tool.name, tool);
 
@@ -324,6 +349,7 @@ export class Agent {
 
   private async executeRun(lease: RunLease, userText?: string): Promise<readonly AgentMessage[]> {
     const signal = lease.controller.signal;
+    this.activeSignal = signal;
     if (userText === undefined && this.stream.getState().messages.length === 0) return this.stream.getState().messages;
     await this.stream.emit({ type: "agent_start" }, signal);
 
@@ -350,11 +376,8 @@ export class Agent {
       turnBudget: this.turnBudget,
       emit: (event) => this.stream.emit(event, signal),
       getState: () => this.stream.getState(),
-      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> => {
-        const chained = asNextTurnUpdate(await this.manager.run("prepareNextTurn", this.stream.getState(), signal));
-        const hooked = asNextTurnUpdate(await this.loopHooks.prepareNextTurn?.(this.stream.getState(), signal));
-        return hooked ?? chained;
-      },
+      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> =>
+        asNextTurnUpdate(await this.manager.run("prepareNextTurn", this.stream.getState(), signal)),
       pollSources: async (phase: SourcePollPhase): Promise<void> => {
         await this.pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
@@ -367,14 +390,12 @@ export class Agent {
             ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
             : (base.messages ?? []),
         };
-        const prepared = await this.manager.run("prepareRequest", seeded, signal);
-        return await this.loopHooks.prepareRequest?.(prepared, signal) ?? prepared;
+        return await this.manager.run("prepareRequest", seeded, signal);
       },
       finishTurn: async (turn: LastTurn): Promise<LoopDecision | undefined> => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-        await this.manager.run("turnBoundary", event, signal);
-        const legacy = await this.loopHooks.finishTurn?.(turn, signal);
-        if (legacy !== undefined) return legacy;
+        const outcome = await this.manager.run("turnBoundary", event, signal);
+        if (isLoopDecision(outcome)) return outcome;
         // 原生工具结果必须被下一轮消费：显式 continue；否则 natural end 交给 runLoop 外层。
         if (this.lastTurnHadNativeTools && turn.toolResults.length > 0) return CONTINUE_DECISION;
         // 非原生 toolCalls（兼容文本标记等）保持单轮收束，避免默认续跑反复解析。
@@ -383,7 +404,7 @@ export class Agent {
       },
       pollFollowUp: async () => {
         const followUps = inbox.poll("followUp").map((item) => item.body);
-        return await this.loopHooks.pollFollowUp?.(signal) ?? followUps;
+        return await this.manager.run("pollFollowUp", followUps, signal);
       },
       streamAssistant: async (request): Promise<AssistantResult> => this.streamAssistant(request, signal),
       toolPipeline: createToolPipeline({
@@ -461,6 +482,12 @@ export class Agent {
     };
   }
 
+}
+
+function isLoopDecision(value: unknown): value is LoopDecision {
+  if (typeof value !== "object" || value === null) return false;
+  const action = (value as { readonly action?: unknown }).action;
+  return action === "continue" || action === "end";
 }
 
 function isStopReason(value: unknown): value is AssistantResult["stopReason"] {
