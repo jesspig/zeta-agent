@@ -82,31 +82,39 @@ describe("T-26 quality gate report model", () => {
 });
 
 describe("T-26 test authenticity scan", () => {
-  const files = [
-    {
-      path: "a.spec.ts",
-      content: `import { createX } from "@zeta-agent/agent";
+  function fixtures() {
+    return [
+      {
+        path: "a.spec.ts",
+        content: `import { createX } from "@zeta-agent/agent";
 test("x", async () => { await createX(); expect(1).toBe(1); });`,
-    },
-    {
-      path: "b.spec.ts",
-      content: `test("p", async () => { await Promise.all([f(), g()]); expect(1).toBe(1); });
+      },
+      {
+        path: "b.spec.ts",
+        content: `test("p", async () => { await Promise.all([f(), g()]); expect(1).toBe(1); });
 rmSync(path, { recursive: true });`,
-    },
-    {
-      path: "c.spec.ts",
-      content: `test("fake", () => { const f = mock(() => 1); });`,
-    },
-    {
-      path: "d.spec.ts",
-      content: `test("time", async () => { setSystemTime(0); await tick(); expect(1).toBe(1); });`,
-    },
-  ];
+      },
+      {
+        path: "c.spec.ts",
+        content: `test("fake", () => { const f = mock(() => 1); });`,
+      },
+      {
+        path: "d.spec.ts",
+        content: `test("time", async () => { setSystemTime(0); await tick(); expect(1).toBe(1); });`,
+      },
+    ];
+  }
 
   test("从真实源码文本统计公共 API、真实异步、并行与故障注入标记", () => {
+    const files = fixtures();
     const scan = scanAuthenticity(files);
+    const diagnostics = files.map((file) => ({
+      path: file.path,
+      content: file.content,
+      publicApiImports: scanAuthenticity([file]).publicApiImports,
+    }));
     expect(scan.files).toBe(4);
-    expect(scan.publicApiImports).toBe(1);
+    expect(scan.publicApiImports, JSON.stringify(diagnostics)).toBe(1);
     expect(scan.realAsyncFiles).toBe(3);
     expect(scan.parallelFiles).toBe(1);
     expect(scan.faultInjectionFiles).toBe(1);
@@ -125,7 +133,7 @@ rmSync(path, { recursive: true });`,
   });
 
   test("基线是棘轮：只允许增长，mock-only 必须为零", () => {
-    const current = scanAuthenticity(files.slice(0, 2));
+    const current = scanAuthenticity(fixtures().slice(0, 2));
     expect(() =>
       assertAuthenticityBaseline(current, {
         files: 1,
