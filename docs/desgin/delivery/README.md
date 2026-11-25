@@ -49,7 +49,7 @@ flowchart TD
 
 ## 深度差距分析与本批处置（2026-11-23）
 
-> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。当前基线为 `develop @ 3c2ec55`，全量 `bun test` 1419 pass / 1 skip / 0 fail / 286 files；默认装配、公共 API、端到端验收与平台矩阵以 [capability-matrix.md](./capability-matrix.md) 为准，生成报告位于被忽略的 `reports/`。
+> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。当前基线为 `develop@af37607`；当前 CI 证据为三平台 39/39 job、全量 `bun test` 1421 pass / 1 skip / 287 files。acceptance v2 契约（T-01）已冻结但尚未在该基线重跑，不能宣称当前 40/40 可复现。`develop @ 3c2ec55` / 1419 pass / 1 skip / 286 files 为 2026-11-25 historical 数据。默认装配、公共 API、端到端验收与平台矩阵以 [capability-matrix.md](./capability-matrix.md) 为准，生成报告位于被忽略的 `reports/`。
 
 ### 六类差距的当前处置结果（2026-11-25 复核）
 
@@ -60,16 +60,16 @@ flowchart TD
 | 工具流水线 | hook 字段赋值尚未升级为插件管线 | 统一 `createToolPipeline`（T-08），保留 legacy 兼容层，双版不变量 24 项全绿 |
 | 安全接线 | 权限 / 发射 / egress / 凭证 / 审计未端到端接线 | T-09/T-14 已接线；默认 shell/sandbox 能力仍 unsupported 且失败关闭，不写 active |
 | TUI seam | 唯一发布实现与可替换后端边界 | `RendererBackend` + `createTui({ backend })` 可接管完整交互；OpenTUI 仍为默认且唯一发布实现 |
-| 阶段 5/6 | HMR / 对象运行时 / 研究轨此前失实 | T-15/T-18/T-19/T-24/T-25 已实现并通过专测；默认装配边界按能力矩阵描述 |
+| 阶段 5/6 | HMR / 对象运行时 / 研究轨此前失实 | HMR/对象运行时/研究轨护栏有组件与专测（historical，2026-11-25）；T-24（12 target 运行态）与 T-25（最终验收）属本轮未完成项，不得写已实现；默认装配边界按能力矩阵描述 |
 
 ### 当前范围与门禁（2026-11-25）
 
 - **已落地**：facade 归位、插件管线、内核接口、安全接线、真实 HMR、对象运行时（host/facet/Reference、SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 协议、三态部署、研究轨护栏。
-- **持续门禁**：测试去伪棘轮、架构守护、链接守护（0 断链 / 0 断锚）、质量门（`bun run gates`：43 pass / 11 skipped / 1 unverified）。
-- **验收口径**：`bun scripts/acceptance-report.mjs` 逐项记录 A1–A40 的 pass/fail；A30 已补齐真实 gRPC 并转 pass，A36（11 个非宿主 target）仍如实记 fail/待 CI 补证，不写 pass。
+- **持续门禁**：测试去伪棘轮、架构守护、链接守护（当前 36 文件 / 744 链接 / 492 锚点 / 0 断链 / 0 断锚）、质量门（`bun run gates`：43 pass / 11 skipped / 1 unverified 为 2026-11-25 historical 数据）。
+- **验收口径**：`bun scripts/acceptance-report.mjs` v2 逐项记录 A1–A40 的 pass/fail，但当前基线尚未重跑，不宣称 40/40。A30 事实为“真实 gRPC transport 组件存在 + 默认 remote 仍 HTTP + 完整控制面未完成”；A35 默认 shell/隔离 unsupported 且失败关闭；A36 的 CI 36 job 只做构建/静态校验，12 target 运行证据未完成（T-24）。三者均不写 pass。
 
 ### 后续阶段边界
 
 - **默认 profile**：`local-safe` 收敛、`local-full` 显式 opt-in；研究轨、daemon/remote、跨进程对象默认禁用，启用路径不可绕过护栏。
 - **对象运行时**：IPC 使用 worker_threads（非 OS 子进程），WS 为 loopback；完整跨主机拓扑与真实隔离执行器属于后续平台阶段。
-- **发布平台**：本机仅 win32-x64 完成安装/启动/升级/回滚冒烟，其余 11 target 由 CI 三平台矩阵覆盖，未在本机执行的部分一律 skipped。
+- **发布平台**：本机仅 win32-x64 跑过生命周期；CI `release-matrix` 的 36 job（3 OS × 12 target）只执行 `build-local.ts` 与 `gate-platform.mjs`（构建/静态校验），没有 install/start/upgrade/rollback 运行证据。未在本机或 CI 运行的部分一律不写 pass（A36 未完成，T-24）。

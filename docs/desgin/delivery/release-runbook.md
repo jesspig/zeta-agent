@@ -1,7 +1,7 @@
 # 发布、迁移与回滚 Runbook
 
 > **适用范围**：zeta-agent 本地单文件发布物（12 target 矩阵）与 local/daemon/remote 三态的升级/回滚操作。
-> **基线**：`develop @ 3c2ec55`（全部阶段已归并），2026-11-25。质量报告与发布候选由 `bun run check`、`bun scripts/release-check.mjs` 生成在被忽略的 `reports/`；生成物不作为源码版本控制内容。
+> **基线**：`develop@af37607`（2026-11-26）。当前 CI 证据为三平台 39/39 job、1421 pass / 1 skip / 287 files；acceptance v2 契约已冻结（T-01）但当前基线尚未重跑，不宣称 40/40。`develop @ 3c2ec55`（2026-11-25）为 historical 基线。质量报告与发布候选由 `bun run check`、`bun scripts/release-check.mjs` 生成在被忽略的 `reports/`；生成物不作为源码版本控制内容。
 
 ## 前置校验
 
@@ -34,6 +34,6 @@
 ## 平台矩阵与已知限制
 
 - 支持 target：linux-{x64,arm64,x64-musl,arm64-musl,x64-baseline,arm64-baseline}、darwin-{x64,arm64,x64-baseline}、win32-{x64,arm64,x64-baseline}。
-- 本机仅 win32-x64 有可运行产物；其余 11 个 target 在最终报告中为 **skipped**，不计 pass，由 `.github/workflows/quality-gates.yml` 的三平台矩阵覆盖。
-- `remote` 为 HTTP JSON-RPC + gRPC 风格状态码映射，不是 wire-level gRPC（A30 待裁决）。
-- `release-age` 有 3 个过新直接依赖（`@opentui/solid`、`solid-js`、`turbo`），T-26 如实标为 unverified，未篡改阈值，待裁决。
+- 本机仅 win32-x64 跑过生命周期；CI `.github/workflows/quality-gates.yml` 的 `release-matrix` 共 36 job（3 OS × 12 target），但只执行 `build-local.ts` 与 `gate-platform.mjs`（构建/静态校验），不执行 install/start/upgrade/rollback。其余 11 target 无运行证据，不计 pass（A36 未完成，T-24）。
+- `remote` 默认仍是 HTTP JSON-RPC + gRPC 风格状态码映射；`packages/deploy/src/grpc.ts` 已有真实 wire-level gRPC server/client 组件，但完整 gRPC 控制面/remote 拓扑未完成（T-24 后续），A30 不写 pass。
+- `release-age` 有 3 个过新直接依赖（`@opentui/solid`、`solid-js`、`turbo`），历史裁决标为 unverified（2026-11-25，historical），未篡改阈值；本轮无 T-26，后续窗口待评估。

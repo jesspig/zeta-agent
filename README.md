@@ -42,12 +42,21 @@ bun run zeta --headless "提示词"   # 无 TTY 打印模式（CI 可用）
 
 产品 profile：`local-safe`（默认）与 `local-full`（显式 opt-in），未知值直接失败关闭；研究轨、daemon/remote 与跨进程对象默认不装配，启用路径不可绕过护栏。公开 API 与 profile 明细见 [API 与测试](docs/desgin/framework/api-and-testing.md)。
 
+## 当前基线（2026-11-26）
+
+- 当前代码基线为 `develop@af37607`。验收/发布证据 v2 契约已冻结（`scripts/evidence-v2-format.md`，T-01），但**尚未在该基线重跑全量 acceptance**，不能宣称当前 40/40 可复现。
+- 当前 CI 证据：三平台 39/39 job，全量测试 1421 pass / 1 skip / 287 files（`develop@af37607`）。本地 `feature/evidence-trust-baseline` 分支在 T-01 后可复现 1441 pass / 1 skip / 0 fail / 289 files，属分支态，不等于 CI 基线。
+- A30：`packages/deploy/src/grpc.ts` 已有真实 wire-level gRPC server/client；默认 remote 仍是 HTTP JSON-RPC，完整 gRPC 控制面/remote 拓扑未完成（T-24 后续任务）。
+- A35：默认 shell/隔离仍 unsupported 且失败关闭；真实隔离执行器未完成（T-13），不写 pass。
+- A36：CI `release-matrix` 36 job（3 OS × 12 target）只做构建与静态校验；只有原生宿主跑生命周期，12 target 运行证据未完成（T-24）。
+- RED 反例门：`bun scripts/red-gates.mjs`（默认不参与 `bun test`）；当前 7/7 RED、退出码 1；needs-fixture 见 `scripts/red-cases/needs-fixture.md`。
+
 ## 发布与验收
 
 - 发布候选版本：`zeta 0.1.0`（CLI `--version` 实测）；校验：`bun scripts/release-check.mjs`，产物说明与回滚步骤见 [release-runbook.md](docs/desgin/delivery/release-runbook.md)。
 - 发布校验：运行 `bun scripts/release-check.mjs` 生成版本、架构、SHA-256、SBOM、迁移/回滚与平台矩阵报告；生成物位于被 Git 忽略的 `reports/`。
-- 最终验收：运行 `bun scripts/acceptance-report.mjs` 生成 A1–A40 逐项 pass/fail 与命令证据；生成物位于 `reports/`，能力现状见 [capability-matrix.md](docs/desgin/delivery/capability-matrix.md)。
-- 本机仅 `win32-x64` 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，需 CI 三平台矩阵补证。`remote` 已补齐 wire-level gRPC transport；release-age 的 3 个过新依赖按用户裁决接受为已知风险。
+- 最终验收：运行 `bun scripts/acceptance-report.mjs` 生成 A1–A40 逐项 pass/fail 与命令证据；生成物位于 `reports/`，能力现状见 [capability-matrix.md](docs/desgin/delivery/capability-matrix.md)。当前 v2 报告未重跑，历史报告不得当作当前结论。
+- 本机仅 `win32-x64` 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，不计 pass。release-age 的 3 个过新依赖按历史裁决接受为已知风险（historical，2026-11-25）。
 
 ## 历史归档
 

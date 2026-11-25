@@ -1,8 +1,8 @@
 # 能力四态矩阵
 
 > **用途**：区分“组件存在”“显式注入可用”“默认启用”“验收通过”，避免把孤立测试或 seam 当作完整交付。
-> **基线**：`develop @ 3c2ec55`（全部阶段已归并），2026-11-25 复核；取代原 `develop f36f457` 基线。
-> **总验收**：运行 `bun scripts/acceptance-report.mjs` 与 `bun scripts/release-check.mjs`，生成物位于被忽略的 `reports/`；发布流程见 [release-runbook](./release-runbook.md)。
+> **基线**：`develop@af37607`（2026-11-26）。当前 CI 证据：三平台 39/39 job、1421 pass / 1 skip / 287 files。`develop @ 3c2ec55` / `develop f36f457` 为 historical 基线，不再表示当前状态。
+> **总验收**：运行 `bun scripts/acceptance-report.mjs` 与 `bun scripts/release-check.mjs`，生成物位于被忽略的 `reports/`；v2 契约已冻结（T-01）但尚未在当前基线重跑，不能宣称 40/40。发布流程见 [release-runbook](./release-runbook.md)。
 
 ## 状态口径
 
@@ -40,8 +40,8 @@
 | MCP | 是 | 是 | 部分 | 部分 | `packages/agent/src/plugins/mcp/{protocol,transport,oauth-grant,plugin-projection,conformance}.spec.ts`；握手/OAuth/schema/双结果投影通过，默认不装配，真实 OAuth token endpoint 由宿主注入 |
 | TUI/OpenTUI | 是 | 是 | 是 | 部分 | `packages/tui/src/{backend.contract,slots,runtime,pty,platform-matrix}.spec.ts*`；自定义 backend 接管、slots/keymap 热更新、虚拟滚动；本机仅 win32 PTY 可跑，macOS/Linux 分支由状态机+测试覆盖 |
 | CLI print/json/rpc | 是 | 是 | 是 | 部分 | `apps/zeta-cli/src/{headless-isolation,print-e2e}.spec.ts`、`packages/deploy/src/rpc.spec.ts`；RPC session control 为内存实现，真实 SessionStore 适配器可注入 |
-| Deploy local/daemon/remote | 是 | 是 | 部分 | 部分 | `packages/deploy/src/{daemon,remote,rpc,artifact,canonical,runtime-probes}.spec.ts`；daemon HTTP/token/heartbeat 与 remote SDK 真实可运行，remote 为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC，A30 待裁决） |
-| Research/Promotion/Fitness | 是 | 是 | 否 | 是 | `packages/agent/src/research/{frozen,promotion,guardrails,experience-library,fitness}.spec.ts`、`packages/deploy/src/fitness.budget-identity.spec.ts`；四道护栏与 A/B/回归门禁通过独立 profile 验收，默认不装配 |
+| Deploy local/daemon/remote | 是 | 是 | 部分 | 部分 | `packages/deploy/src/{daemon,remote,rpc,artifact,canonical,runtime-probes,grpc}.spec.ts`；daemon HTTP/token/heartbeat 与 remote SDK 真实可运行；默认 remote 仍是 HTTP JSON-RPC + gRPC 风格状态码；`packages/deploy/src/grpc.ts` 已有真实 wire-level gRPC server/client 组件，但完整 gRPC 控制面/remote 拓扑未完成（T-24 后续），A30 不写 pass |
+| Research/Promotion/Fitness | 是 | 是 | 否 | 部分 | `packages/agent/src/research/{frozen,promotion,guardrails,experience-library,fitness}.spec.ts`、`packages/deploy/src/fitness.budget-identity.spec.ts`；四道护栏与 A/B/回归门禁有独立 profile 专测，但证据库持久不可变、真实 effect span/OTLP 与两轮研究闭环（AC-22/T-22）未完成，默认不装配；不写“验收通过” |
 | Observability | 是 | 是 | 部分 | 部分 | `packages/components/observability/src/index.spec.ts`、`packages/agent/src/facade.a21a22.spec.ts`；logger/redactor 与 fiber 归因存在，OTLP 故障降级与 effect 树全量接线仍为 seam |
 
 ## 机器可读装配清单（A39 自动一致的依据）
@@ -100,9 +100,10 @@
 
 当前未闭环项（按事实保留，不计 pass）：
 
-| 缺口 | 现状 | 处理 |
+| 缺口 | 现状（2026-11-26） | 处理 |
 | --- | --- | --- |
-| wire-level gRPC | remote 为 HTTP JSON-RPC + gRPC 风格状态码 | A30 记 fail，待裁决是否要求真实 gRPC wire |
-| 非宿主 target | 本机仅 win32-x64 有可运行产物，11 个 target skipped | A36 记 fail（含 skipped），由 CI 三平台矩阵补证 |
-| release-age | 3 个直接依赖发布不足 7 天 | T-26 标 unverified，未改阈值，待裁决 |
-| 默认 sandbox backend | shell/seccomp 类操作 unsupported | 保持失败关闭，不写 active |
+| 完整 gRPC 控制面/remote 拓扑 | `packages/deploy/src/grpc.ts` 已有真实 wire-level server/client 组件；默认 remote 仍 HTTP JSON-RPC，完整拓扑未接线 | A30 不写 pass；组件存在 ≠ 默认启用 ≠ 验收通过；由 T-24 及后续任务补齐 |
+| 非宿主 target 运行态 | 本机仅 win32-x64 跑生命周期；CI `release-matrix` 36 job（3 OS × 12 target）只 build + `gate-platform` 静态校验，无运行证据 | A36 不写 pass；12 target 运行证据由 T-24 补齐 |
+| release-age | 3 个直接依赖发布不足 7 天（historical，2026-11-25 裁决） | 如实记录为已知风险，未改阈值；本轮任务列表止于 T-25，无 T-26，后续窗口待评估 |
+| 默认 sandbox backend | shell/seccomp 类操作在 Windows/Linux/Darwin 均 unsupported 且失败关闭，无真实隔离执行器 | 保持失败关闭，不写 active/pass；真实隔离执行器由 T-13 补齐 |
+| 证据 v2 当前可复现性 | v2 契约冻结（T-01），当前基线尚未重跑全量 acceptance | 不宣称当前 40/40；须绑定 `develop@af37607` 与三平台 39/39 证据后重跑 |

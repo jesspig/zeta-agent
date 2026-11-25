@@ -3,6 +3,7 @@
 > **文档定位**：迁移路线与验收（从 `08-迁移路线与验收.md` 拆分/重命名而来，内容保持原样，链接已按新结构重写）。
 > **所属索引**：[本目录索引](./README.md) · [总索引](../README.md)
 > **来源分级**：一手来源为 [在线论文](https://arxiv.org/abs/2608.25512v1) 与 [GitHub 源码](https://github.com/earendil-works/pi)（逐文件链接见正文）；汇总见 [事实登记](../architecture/fact-registry.md)。
+> **当前基线（2026-11-26）**：`develop@af37607`；CI 证据三平台 39/39 job、1421 pass / 1 skip / 287 files。下表 A1–A40 是**判据**，不是当前逐项结论；acceptance v2 契约已冻结但尚未在该基线重跑，不宣称 40/40。A30/A35/A36 当前事实见 [capability-matrix.md](./capability-matrix.md)。
 
 ## 目录
 
@@ -217,7 +218,7 @@ flowchart LR
 | 两套扩展兼容层复杂 | 3/5 | 旧扩展加载失败 | 延后兼容门面到阶段 5；先保内部统一 |
 | 权限策略破坏习惯 | 3 | 用户抱怨工具被挡 | 权限门禁默认沿用 pi 无限制行为（[fact-registry C5](../architecture/fact-registry.md#4-矛盾与争议显式并列)）——注意这是**权限维度**，与 O-9（发射交付维度，默认 withhold）不同 |
 | 发布产物架构/摘要不匹配 | 发布 | `release-check` 报 BINARY/EMBEDDED_ARCH_MISMATCH 或 SHA-256 不一致 | 停止发布，重建目标产物并按 [release-runbook.md](./release-runbook.md) 回退上一版 |
-| 非宿主 target 未实测 | 发布 | 报告中平台门为 skipped | 不写 pass；由 CI 三平台 12 target 矩阵补证后再裁决 A36 |
+| 非宿主 target 未实测 | 发布 | 报告中平台门为 skipped | 不写 pass；CI `release-matrix` 36 job 只做构建/静态校验，不提供运行证据；12 target 运行态由 T-24 补齐后再裁决 A36 |
 
 
 ## 7 开放问题与决策点
