@@ -12,6 +12,21 @@ import { createEffectHost, effect, execute, NOOP, toIterator, unloadHost, type E
 
 export const PROVIDER_DUPLICATE = "PROVIDER_DUPLICATE";
 
+/** guard 等待 consumer 去活的默认有界超时；超时记诊断并继续 teardown，绝不强等。 */
+export const DEFAULT_GUARD_TIMEOUT_MS = 200;
+
+export interface FiberSystemOptions {
+  readonly observer?: EffectObserver;
+  /** 可配置的 guard 超时（毫秒），用于撤回等待与刷新门的有界诊断。 */
+  readonly guardTimeoutMs?: number;
+}
+
+export interface GuardTimeoutDiagnostic {
+  readonly uid: string;
+  readonly waitedMs: number;
+  readonly dependents: readonly string[];
+}
+
 export function key<T = unknown>(name: string): CoeffectKey<T> {
   return { namespace: "@zeta-agent/testing", name, symbol: Symbol(name) } as CoeffectKey<T>;
 }
@@ -61,8 +76,18 @@ export class FiberSystem {
   private readonly subscribers = new Map<symbol, Map<symbol, Set<Fiber>>>();
   private readonly pending = new Set<Promise<void>>();
   private readonly failures: unknown[] = [];
+  readonly diagnostics: GuardTimeoutDiagnostic[] = [];
+  readonly guardTimeoutMs: number;
 
-  constructor(readonly observer?: EffectObserver) {}
+  constructor(readonly observer?: EffectObserver, options: FiberSystemOptions = {}) {
+    this.guardTimeoutMs = options.guardTimeoutMs ?? DEFAULT_GUARD_TIMEOUT_MS;
+  }
+
+  /** guard 有界超时：记录结构化诊断并显式记错，交由 drain 汇总上报。 */
+  recordGuardTimeout(diagnostic: GuardTimeoutDiagnostic, error: Error): void {
+    this.diagnostics.push(diagnostic);
+    this.failures.push(error);
+  }
 
   create(spec: FiberSpec): Fiber {
     const fiber = new Fiber(this, spec);
@@ -260,7 +285,12 @@ export class Fiber {
     this.realm = spec.realm ?? system.defaultRealm;
     this.host = createEffectHost(spec.uid, this.system.observer);
     this.host.effect = (callback, label) => effect(this.host, callback, label);
-    spec.parent?.children.add(this);
+    if (spec.parent) {
+      spec.parent.children.add(this);
+      // 子 fiber 的退役登记在父 effect/host 上：父 update/依赖撤回时 unloadHost 会
+      // 执行它，旧子 fiber 逆各一次；父重新 apply 时按新 uid 创建新子 fiber 并重新登记。
+      (spec.parent.host.effects as Disposer[]).push(() => this.remove());
+    }
     if (spec.autoProvide ?? true) {
       for (const key of spec.provide) {
         this.provide(key, spec.values?.get(key.symbol) ?? key.name, {
@@ -287,7 +317,11 @@ export class Fiber {
 
   async refresh(): Promise<void> {
     if (this.removeRequested || this.state.kind === "DISPOSED" || this.state.kind === "FAILED") return;
-    if (this.inertia) await this.inertia;
+    const prior = this.inertia;
+    if (prior) {
+      await prior;
+      if (this.inertia === prior) this.inertia = null;
+    }
     if (this.removeRequested || this.isDisposed() || this.isFailed()) return;
     const target = this.system.viewFor(this.spec.inject, this.realm, this.uid);
     if (sameView(target, this.target)) return;
@@ -295,6 +329,14 @@ export class Fiber {
     const previous = this.state;
     const committed = "committed" in previous ? previous.committed : target ?? new Map();
     if (target === null) {
+      this.state = {
+        kind: "UNLOADING",
+        dispose: "dispose" in previous ? previous.dispose : NOOP,
+        committed,
+      };
+      this.inertia = this.unload();
+    } else if (previous.kind === "ACTIVE") {
+      // 非空 target 替换：先执行旧逆，再由 unload 尾部的 target 触发新 apply。
       this.state = {
         kind: "UNLOADING",
         dispose: "dispose" in previous ? previous.dispose : NOOP,
@@ -328,6 +370,7 @@ export class Fiber {
       await this.refresh();
     } finally {
       this.updating = false;
+      this.inertia = null;
     }
   }
 
@@ -358,6 +401,7 @@ export class Fiber {
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
         .map((result) => result.reason);
       if (errors.length > 0) throw new AggregateError(errors, "child fiber teardown 失败");
+      this.inertia = null;
     })();
     this.system.track(this.removing);
     return this.removing;
@@ -372,6 +416,8 @@ export class Fiber {
         this.commitDependencies(target);
         this.loaded = true;
         this.state = { kind: "ACTIVE", dispose, committed: target };
+        // 旧 committed view 已切换，回收此刻已无人引用的 retired binding。
+        for (const binding of this.dependencies.values()) binding.provider.finalizeRetiredBindings();
         this.system.notify(this.spec.provide, this.realm);
       } else {
         const previous = this.state;
@@ -401,15 +447,34 @@ export class Fiber {
   }
 
   private async unload(): Promise<void> {
+    // 保留旧 committed view：非空 target 替换时 unload 尾部的 reload 读取的仍是旧值，
+    // 直到新 effect 成功提交后才切换，避免 teardown/apply 中途看到半更新状态。
+    const previousCommitted: View = "committed" in this.state ? this.state.committed : new Map();
     this.releaseProvided();
+    const deadline = Date.now() + this.system.guardTimeoutMs;
     while (true) {
-      const stillActive = [...this.dependents].some((fiber) =>
+      const activeDependents = [...this.dependents].filter((fiber) =>
         "committed" in fiber.state &&
         [...fiber.state.committed.values()].some((impl) =>
           [...this.retiredBindings].some((binding) => binding.impl === impl)
         )
       );
-      if (!stillActive) break;
+      if (activeDependents.length === 0) break;
+      if (Date.now() >= deadline) {
+        // 有界超时：显式记错并继续 teardown，不再无限轮询；consumer 会在下一次
+        // target 变化时通过 claim 通知收到撤回，不会永久悬挂。
+        this.system.recordGuardTimeout(
+          {
+            uid: this.uid,
+            waitedMs: this.system.guardTimeoutMs,
+            dependents: activeDependents.map((fiber) => fiber.uid),
+          },
+          new Error(
+            `FIBER_GUARD_TIMEOUT: ${this.uid} 等待 ${activeDependents.map((fiber) => fiber.uid).join(",")} 去活超过 ${this.system.guardTimeoutMs}ms`
+          )
+        );
+        break;
+      }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const errors: unknown[] = [];
@@ -434,7 +499,7 @@ export class Fiber {
       this.state = { kind: "PENDING" };
       if (this.target !== null) {
         const next = this.target;
-        this.state = { kind: "LOADING", iter: toIterator(NOOP), dispose: NOOP, committed: next };
+        this.state = { kind: "LOADING", iter: toIterator(NOOP), dispose: NOOP, committed: previousCommitted };
         this.inertia = this.reload(next);
         await this.inertia;
       }
@@ -475,10 +540,16 @@ export class Fiber {
 
   private finalizeRetiredBindings(): void {
     for (const binding of this.retiredBindings) {
-      if (binding.provider.dependents.size === 0) {
-        binding.available = false;
-        this.retiredBindings.delete(binding);
-      }
+      if (binding.provider.dependents.size > 0) continue;
+      // 仍有 fiber 在 committed view 中引用该 impl（在途 reload 需读旧值）时保持可用。
+      const stillCommitted = [...this.system.fibers.values()].some(
+        (fiber) =>
+          "committed" in fiber.state &&
+          [...fiber.state.committed.values()].some((impl) => impl === binding.impl)
+      );
+      if (stillCommitted) continue;
+      binding.available = false;
+      this.retiredBindings.delete(binding);
     }
   }
 

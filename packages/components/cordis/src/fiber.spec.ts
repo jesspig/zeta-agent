@@ -226,3 +226,135 @@ describe("Fiber 六态状态机", () => {
     expect(impl.check!()).toBe(false);
   });
 });
+
+describe("T-03 Fiber 状态机闭环", () => {
+  test("provider update 有 ACTIVE consumer 时有界完成并记录 guard 超时诊断", async () => {
+    const system = new FiberSystem(undefined, { guardTimeoutMs: 30 });
+    const provider = system.create(spec({ uid: "t03-update-provider", provide: [svc] }));
+    const consumer = system.create(spec({ uid: "t03-update-consumer", inject: [svc] }));
+    await provider.refresh();
+    await consumer.refresh();
+    expect(provider.state.kind).toBe("ACTIVE");
+    expect(consumer.state.kind).toBe("ACTIVE");
+
+    const started = Date.now();
+    await provider.update();
+    expect(Date.now() - started).toBeLessThan(400);
+    expect(system.diagnostics.length).toBe(1);
+    expect(system.diagnostics[0]!.uid).toBe("t03-update-provider");
+    expect(system.diagnostics[0]!.waitedMs).toBe(30);
+    await system.drain(1000).catch(() => undefined);
+  });
+
+  test("非空 target 变化先执行旧 disposer，再执行新 apply", async () => {
+    const system = new FiberSystem();
+    const events: string[] = [];
+    const provider = system.create(spec({ uid: "t03-target-provider", provide: [svc], autoProvide: false }));
+    const binding = system.claim(svc, system.defaultRealm, "v1", provider);
+    let applyCount = 0;
+    const consumer = system.create(
+      spec({
+        uid: "t03-target-consumer",
+        inject: [svc],
+        apply: () => {
+          const current = ++applyCount;
+          events.push(`apply-${current}`);
+          return () => {
+            events.push(`dispose-${current}`);
+          };
+        },
+      })
+    );
+    await provider.refresh();
+    await consumer.refresh();
+    expect(events).toEqual(["apply-1"]);
+
+    // 无空窗原子替换：抑制 release 的 notify，让 claim 成为唯一 target 变更信号。
+    provider.updating = true;
+    system.release(binding);
+    system.claim(svc, system.defaultRealm, "v2", provider);
+    provider.updating = false;
+    await system.drain(1000);
+
+    expect(events).toEqual(["apply-1", "dispose-1", "apply-2"]);
+    expect(consumer.state.kind).toBe("ACTIVE");
+  });
+
+  test("父 update 旧子 fiber 退役且逆各一次；父 remove 子树全部 DISPOSED", async () => {
+    const system = new FiberSystem();
+    const calls: string[] = [];
+    let generation = 0;
+    const children: Fiber[] = [];
+    const makeChild = (parent: Fiber): Fiber => {
+      const current = ++generation;
+      return system.create(
+        spec({
+          uid: `t03-child-${current}`,
+          inject: [],
+          provide: [],
+          parent,
+          apply: () => () => {
+            calls.push(`child-${current}-dispose`);
+          },
+        })
+      );
+    };
+    let parent!: Fiber;
+    parent = system.create(
+      spec({
+        uid: "t03-parent",
+        inject: [],
+        provide: [],
+        apply: () => {
+          children.push(makeChild(parent));
+          return NOOP;
+        },
+      })
+    );
+    await parent.refresh();
+    await children[0]!.refresh();
+    expect(children[0]!.state.kind).toBe("ACTIVE");
+
+    await parent.update();
+    expect(calls).toEqual(["child-1-dispose"]);
+    expect(children[0]!.state.kind).toBe("DISPOSED");
+    expect(children).toHaveLength(2);
+    expect(children[1]!.uid).not.toBe(children[0]!.uid);
+    await children[1]!.refresh();
+    expect(children[1]!.state.kind).toBe("ACTIVE");
+
+    await parent.remove();
+    expect(calls).toEqual(["child-1-dispose", "child-2-dispose"]);
+    expect(children[1]!.state.kind).toBe("DISPOSED");
+  });
+
+  test("refresh/update/remove 转换结束后 inertia 归零", async () => {
+    const system = new FiberSystem();
+    const fiber = system.create(spec({ uid: "t03-inertia" }));
+    await fiber.refresh();
+    expect(fiber.state.kind).toBe("ACTIVE");
+    expect(fiber.inertia).toBeNull();
+    await fiber.update();
+    expect(fiber.state.kind).toBe("ACTIVE");
+    expect(fiber.inertia).toBeNull();
+    await fiber.remove();
+    expect(fiber.state.kind).toBe("DISPOSED");
+    expect(fiber.inertia).toBeNull();
+  });
+
+  test("guard 超时诊断可配置且不无限轮询", async () => {
+    const system = new FiberSystem(undefined, { guardTimeoutMs: 5 });
+    const provider = system.create(spec({ uid: "t03-guard-provider", provide: [svc] }));
+    const consumer = system.create(spec({ uid: "t03-guard-consumer", inject: [svc] }));
+    await provider.refresh();
+    await consumer.refresh();
+
+    const started = Date.now();
+    await provider.update();
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(system.diagnostics).toHaveLength(1);
+    expect(system.diagnostics[0]!.waitedMs).toBe(5);
+    expect(system.diagnostics[0]!.dependents).toContain("t03-guard-consumer");
+    await system.drain(1000).catch(() => undefined);
+  });
+});

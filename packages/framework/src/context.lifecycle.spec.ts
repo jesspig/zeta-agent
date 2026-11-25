@@ -56,6 +56,49 @@ describe("T-05 fiber 生命周期", () => {
     expect(calls).toEqual(["apply-1", "second-1", "first-1", "apply-2", "second-2", "first-2"]);
   });
 
+  test("ctx.use 子 fiber 在父 update 时退役并以新 uid 重建", async () => {
+    const calls: string[] = [];
+    const uids: string[] = [];
+    const childReady: Array<Promise<void>> = [];
+    let generation = 0;
+    const ctx = createContext();
+    const child = defineComponent({
+      name: "retired-child",
+      apply: () => {
+        const current = ++generation;
+        return () => {
+          calls.push(`child-${current}`);
+        };
+      },
+    });
+    const parent = ctx.use(
+      defineComponent({
+        name: "retiring-parent",
+        apply: (fiber) => {
+          const handle = (fiber as Context).use(child);
+          uids.push(handle.uid);
+          childReady.push(handle.ready);
+          return () => {};
+        },
+      })
+    );
+    await parent.ready;
+    await Promise.all(childReady);
+    expect(generation).toBe(1);
+    expect(calls).toEqual([]);
+
+    await parent.update();
+    await Promise.all(childReady);
+    expect(new Set(uids).size).toBe(2);
+    expect(uids[0]).not.toBe(uids[1]);
+    expect(calls).toEqual(["child-1"]);
+
+    parent.remove();
+    await ctx.notify();
+    await ctx.dispose();
+    expect(calls).toEqual(["child-1", "child-2"]);
+  });
+
   test("provider 撤回等待 consumer teardown，且 teardown 可读旧依赖", async () => {
     const dependency = defineKey<string>("@zeta-agent/lifecycle-test", "guard-dependency");
     const service = defineKey<string>("@zeta-agent/lifecycle-test", "guard-service");
