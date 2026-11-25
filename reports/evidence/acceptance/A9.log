@@ -1,0 +1,9 @@
+===== bun test packages/tui/src/runtime.spec.tsx packages/tui/src/components/transcript.visual.spec.tsx packages/tui/src/approval-ui.spec.tsx packages/tui/src/slots.spec.ts packages/tui/src/create-tui.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 13 pass
+ 0 fail
+ 56 expect() calls
+Ran 13 tests across 5 files. [1103.00ms]
+
+exit=0

@@ -5,9 +5,9 @@
     "name": "单元测试",
     "status": "pass",
     "scope": "local",
-    "detail": "92 pass / 0 fail / 0 skip / 11 files，724ms",
+    "detail": "92 pass / 0 fail / 0 skip / 11 files，712ms",
     "exitCode": 0,
-    "durationMs": 724,
+    "durationMs": 712,
     "evidence": [
       {
         "kind": "command",
@@ -25,9 +25,9 @@
     "name": "属性测试",
     "status": "pass",
     "scope": "local",
-    "detail": "12 pass / 0 fail / 0 skip / 3 files，811ms",
+    "detail": "12 pass / 0 fail / 0 skip / 3 files，896ms",
     "exitCode": 0,
-    "durationMs": 811,
+    "durationMs": 896,
     "evidence": [
       {
         "kind": "command",
@@ -65,9 +65,9 @@
     "name": "端到端测试",
     "status": "pass",
     "scope": "local",
-    "detail": "9 pass / 0 fail / 0 skip / 5 files，656ms",
+    "detail": "9 pass / 0 fail / 0 skip / 5 files，645ms",
     "exitCode": 0,
-    "durationMs": 656,
+    "durationMs": 645,
     "evidence": [
       {
         "kind": "command",
@@ -85,9 +85,9 @@
     "name": "PTY/终端保真",
     "status": "pass",
     "scope": "local",
-    "detail": "19 pass / 0 fail / 1 skip / 3 files，520ms",
+    "detail": "19 pass / 0 fail / 1 skip / 3 files，480ms",
     "exitCode": 0,
-    "durationMs": 520,
+    "durationMs": 480,
     "evidence": [
       {
         "kind": "command",
@@ -105,9 +105,9 @@
     "name": "崩溃一致性",
     "status": "pass",
     "scope": "local",
-    "detail": "19 pass / 0 fail / 0 skip / 4 files，1208ms",
+    "detail": "19 pass / 0 fail / 0 skip / 4 files，1014ms",
     "exitCode": 0,
-    "durationMs": 1208,
+    "durationMs": 1014,
     "evidence": [
       {
         "kind": "command",
@@ -125,9 +125,9 @@
     "name": "沙箱与隔离",
     "status": "pass",
     "scope": "local",
-    "detail": "27 pass / 0 fail / 0 skip / 4 files，534ms",
+    "detail": "27 pass / 0 fail / 0 skip / 4 files，516ms",
     "exitCode": 0,
-    "durationMs": 534,
+    "durationMs": 516,
     "evidence": [
       {
         "kind": "command",
@@ -145,9 +145,9 @@
     "name": "网络与数据面",
     "status": "pass",
     "scope": "local",
-    "detail": "25 pass / 0 fail / 0 skip / 5 files，595ms",
+    "detail": "25 pass / 0 fail / 0 skip / 5 files，638ms",
     "exitCode": 0,
-    "durationMs": 595,
+    "durationMs": 638,
     "evidence": [
       {
         "kind": "command",
@@ -165,9 +165,9 @@
     "name": "协议 conformance",
     "status": "pass",
     "scope": "local",
-    "detail": "17 pass / 0 fail / 0 skip / 4 files，901ms",
+    "detail": "17 pass / 0 fail / 0 skip / 4 files，844ms",
     "exitCode": 0,
-    "durationMs": 901,
+    "durationMs": 844,
     "evidence": [
       {
         "kind": "command",

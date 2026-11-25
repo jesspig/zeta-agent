@@ -7,9 +7,12 @@
 
 | 文档 | 内容 | 粒度 |
 | --- | --- | --- |
-| [roadmap.md](./roadmap.md) | 迁移策略、阶段 0-6、关键路径、验收 A1-A30、HMR、风险与开放问题 | 实施路线 |
-| [capability-matrix.md](./capability-matrix.md) | 公开能力的组件/显式注入/默认启用/验收四态矩阵 | 现状基线 |
+| [roadmap.md](./roadmap.md) | 迁移策略、阶段 0-6、关键路径、验收 A1-A40、HMR、风险与开放问题 | 实施路线 |
+| [capability-matrix.md](./capability-matrix.md) | 公开能力的组件/显式注入/默认启用/验收四态矩阵，含机器可读装配清单 | 现状基线 |
 | [review-record.md](./review-record.md) | 全面审查记录：P0/P1/P2 发现与修复状态、复核结果 | 质量记录 |
+| [release-runbook.md](./release-runbook.md) | 安装/升级/回滚、发布校验、平台矩阵与已知限制 | 发布运维 |
+| [最终验收报告](../../../reports/acceptance-report.md) | A1–A40 逐项 pass/fail、命令与证据路径 | 验收结论 |
+| [发布候选报告](../../../reports/release-candidate.md) | 版本、架构、SHA-256、SBOM、迁移/回滚校验 | 发布证据 |
 
 ## 活动图（实施批次）
 
@@ -35,6 +38,9 @@ flowchart TD
 | A6 | 12 条不变量的 legacy/plugin 双版测试全绿 | pi-baseline.md |
 | A9 | testRender 帧快照覆盖主要交互 | tui.md |
 | A13-A15 | 事件 mode / patch 分层 / effects 幂等 | dsh-optimizations.md |
+| A16-A20 | 冻结重放、晋升单调、观察等价、无 ground truth 泄漏 | recursive-self-evolution.md |
+| A21-A30 | 可观测、隔离、egress/审计、类型/压缩/检索/租户/评测/部署 | 各专题设计文档 + [roadmap.md §4](./roadmap.md#4-验收标准) |
+| A31-A40 | 依赖图、无 stub、崩溃恢复、并发边界、平台矩阵、conformance、性能门、文档一致、研究护栏 | [roadmap.md §4](./roadmap.md#4-验收标准) + [最终验收报告](../../../reports/acceptance-report.md) |
 
 ## 跨目录关系
 
@@ -43,28 +49,27 @@ flowchart TD
 
 ## 深度差距分析与本批处置（2026-11-23）
 
-> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。阶段 0-6 的组件级能力已存在并通过 849 个测试，但默认装配、公共 API、端到端验收与完整平台能力尚未闭环；当前基线以 [capability-matrix.md](./capability-matrix.md) 为准。
+> 本节交付状态与代码现实对齐的方法论结论；具体 finding、处置流水与证据见执行文档（不在版本库内）。当前基线为 `9b6f231`，全量 `bun test` 1409 pass / 1 skip / 0 fail / 284 files；默认装配、公共 API、端到端验收与平台矩阵以 [capability-matrix.md](./capability-matrix.md) 和 [最终验收报告](../../../reports/acceptance-report.md) 为准。
 
-### 六类差距结论
+### 六类差距的当前处置结果（2026-11-25 复核）
 
-| 类别 | 差距结论 | 本批对应动作 |
+| 类别 | 原差距 | 当前结果（证据见 [capability-matrix.md](./capability-matrix.md)） |
 | --- | --- | --- |
-| 架构边界 | facade 依赖方向与 `exports` 子路径声明不完整，应用对组件包的直接依赖缺少守护 | **facade 归位**：补齐 facade 出口与子路径声明，架构守护脚本纳入 `bun run check` |
-| 内核接口 | effect / coefficient / fiber 内核接口与 facade 表面未完全对齐，组件可替换性缺少验证 | 对齐内核接口与 facade 出口，保持组件包独立可测、可替换 |
-| 工具流水线 | pi 基线中的 hook 字段赋值尚未升级为插件管线，monkey-patch 链仍是重构首要目标（见 [pi-baseline.md](../research/pi-baseline.md)） | **插件管线**：以插件管线替代字段赋值，保留 legacy 兼容层 |
-| 安全接线 | 权限门禁、发射策略（withhold / enqueue）、egress 默认拒绝、凭证不持明文、进程外审计尚未端到端接线（见 [security.md](../agent/security.md)） | **权限 / 发射 / egress / 凭证 / 审计接线**：按契约逐项落地门禁与审计完整性 |
-| TUI seam | 唯一发布实现与可替换后端 seam 的边界须在文档与实现两侧同时成立（见 [tui.md](../agent/tui.md)） | 保持 `RendererBackend` seam 与 `createTui({ backend })`，OpenTUI 仍为默认且唯一发布实现 |
-| 阶段 5/6 | HMR 核心与 unit 快照恢复、对象运行时最小集、研究轨护栏均已实现并测试；此前交付文档存在失实表述 | **文档纠偏**：状态描述与代码现实对齐，延后项按设计边界重新界定 |
+| 架构边界 | facade 依赖方向与 `exports` 子路径声明不完整 | `scripts/check-facade-exports.mjs`、`scripts/guard-architecture.mjs` 纳入 `bun run check`，全绿 |
+| 内核接口 | effect / coeffect / fiber 与 facade 表面未完全对齐 | provider/effect/guard 与 6 态状态机通过 `context.spec.ts`、`fiber.spec.ts`、`properties.spec.ts` |
+| 工具流水线 | hook 字段赋值尚未升级为插件管线 | 统一 `createToolPipeline`（T-08），保留 legacy 兼容层，双版不变量 24 项全绿 |
+| 安全接线 | 权限 / 发射 / egress / 凭证 / 审计未端到端接线 | T-09/T-14 已接线；默认 shell/sandbox 能力仍 unsupported 且失败关闭，不写 active |
+| TUI seam | 唯一发布实现与可替换后端边界 | `RendererBackend` + `createTui({ backend })` 可接管完整交互；OpenTUI 仍为默认且唯一发布实现 |
+| 阶段 5/6 | HMR / 对象运行时 / 研究轨此前失实 | T-15/T-18/T-19/T-24/T-25 已实现并通过专测；默认装配边界按能力矩阵描述 |
 
-### 本批处置范围（固本与门禁）
+### 当前范围与门禁（2026-11-25）
 
-- **固本**：facade 归位、插件管线、内核接口对齐、安全接线（权限 / 发射 / egress / 凭证 / 审计）。
-- **门禁**：测试去伪（消除循环论证，确保不变量 legacy/plugin 双版行为独立性）、架构守护脚本、链接守护脚本 `scripts/check_docs_links.mjs`（0 断链 / 0 断锚）。
-- **文档纠偏**：交付状态、索引与差距记录同步；不改动 [roadmap.md](./roadmap.md) 的阶段编号与验收语义。
+- **已落地**：facade 归位、插件管线、内核接口、安全接线、真实 HMR、对象运行时（host/facet/Reference、SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 协议、三态部署、研究轨护栏。
+- **持续门禁**：测试去伪棘轮、架构守护、链接守护（0 断链 / 0 断锚）、质量门（`bun run gates`：43 pass / 11 skipped / 1 unverified）。
+- **验收口径**：[最终验收报告](../../../reports/acceptance-report.md) 逐项记录 A1–A40 的 pass/fail；A30（wire-level gRPC）与 A36（11 个非宿主 target）如实记 fail/待裁决，不写 pass。
 
-### 完整路线后续阶段
+### 后续阶段边界
 
-- **HMR / 对象运行时 / 研究轨护栏**：组件级最小实现已存在；完整 HMR、跨进程对象和研究轨纳入完整系统执行计划，不再作为永久延后项。
-- **对象运行时后续项**：host / facet / Reference、IPC / WS、SQLite、group commit、outbox、jobs / derive / rollout 尚未实现。
-- **研究轨边界**：promotion / experience / fitness 与四道护栏当前为可选 seam，默认不装配；完整实现后仍保持默认禁用，但启用路径不可绕过护栏。
-- **部署平台**：local / daemon / remote 三态当前只有数据模型与 local 路径，真实 daemon/remote 纳入完整平台阶段。
+- **默认 profile**：`local-safe` 收敛、`local-full` 显式 opt-in；研究轨、daemon/remote、跨进程对象默认禁用，启用路径不可绕过护栏。
+- **对象运行时**：IPC 使用 worker_threads（非 OS 子进程），WS 为 loopback；完整跨主机拓扑与真实隔离执行器属于后续平台阶段。
+- **发布平台**：本机仅 win32-x64 完成安装/启动/升级/回滚冒烟，其余 11 target 由 CI 三平台矩阵覆盖，未在本机执行的部分一律 skipped。

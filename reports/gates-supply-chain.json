@@ -5,7 +5,7 @@
     "name": "SBOM 组件完整性与摘要",
     "status": "pass",
     "scope": "local",
-    "detail": "120 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock",
+    "detail": "150 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock",
     "evidence": [
       {
         "kind": "file",

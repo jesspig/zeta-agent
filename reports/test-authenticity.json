@@ -1,9 +1,9 @@
 {
-  "generatedAt": "2026-11-25T06:44:02.487Z",
+  "generatedAt": "2026-11-25T07:48:57.925Z",
   "scan": {
-    "files": 284,
+    "files": 286,
     "publicApiImports": 59,
-    "realAsyncFiles": 189,
+    "realAsyncFiles": 190,
     "parallelFiles": 33,
     "faultInjectionFiles": 40,
     "mockOnlyFiles": 0,
@@ -190,6 +190,7 @@
     "packages/deploy/src/deployment.spec.ts",
     "packages/deploy/src/fitness.budget-identity.spec.ts",
     "packages/deploy/src/fitness.spec.ts",
+    "packages/deploy/src/grpc.spec.ts",
     "packages/deploy/src/lifecycle.spec.ts",
     "packages/deploy/src/remote.spec.ts",
     "packages/deploy/src/rpc.spec.ts",
@@ -293,6 +294,7 @@
     "packages/tui/src/usage.spec.ts",
     "packages/tui/src/viewport-layout.spec.tsx",
     "packages/tui/src/virtual.spec.ts",
-    "scripts/guard-architecture.spec.mjs"
+    "scripts/guard-architecture.spec.mjs",
+    "scripts/release-check.spec.mjs"
   ]
 }

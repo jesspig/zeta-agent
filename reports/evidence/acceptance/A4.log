@@ -1,0 +1,9 @@
+===== bun test packages/testing/src/properties.spec.ts packages/components/cordis/src/fiber.spec.ts packages/components/cordis/src/effect.cleanup.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 18 pass
+ 0 fail
+ 148 expect() calls
+Ran 18 tests across 3 files. [772.00ms]
+
+exit=0

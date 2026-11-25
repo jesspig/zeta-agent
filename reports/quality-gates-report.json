@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generatedAt": "2026-11-25T06:44:51.676Z",
+  "generatedAt": "2026-11-25T07:49:27.747Z",
   "environment": {
     "platform": "win32",
     "arch": "x64",
@@ -13,9 +13,9 @@
       "name": "单元测试",
       "status": "pass",
       "scope": "local",
-      "detail": "92 pass / 0 fail / 0 skip / 11 files，724ms",
+      "detail": "92 pass / 0 fail / 0 skip / 11 files，712ms",
       "exitCode": 0,
-      "durationMs": 724,
+      "durationMs": 712,
       "evidence": [
         {
           "kind": "command",
@@ -33,9 +33,9 @@
       "name": "属性测试",
       "status": "pass",
       "scope": "local",
-      "detail": "12 pass / 0 fail / 0 skip / 3 files，811ms",
+      "detail": "12 pass / 0 fail / 0 skip / 3 files，896ms",
       "exitCode": 0,
-      "durationMs": 811,
+      "durationMs": 896,
       "evidence": [
         {
           "kind": "command",
@@ -73,9 +73,9 @@
       "name": "端到端测试",
       "status": "pass",
       "scope": "local",
-      "detail": "9 pass / 0 fail / 0 skip / 5 files，656ms",
+      "detail": "9 pass / 0 fail / 0 skip / 5 files，645ms",
       "exitCode": 0,
-      "durationMs": 656,
+      "durationMs": 645,
       "evidence": [
         {
           "kind": "command",
@@ -93,9 +93,9 @@
       "name": "PTY/终端保真",
       "status": "pass",
       "scope": "local",
-      "detail": "19 pass / 0 fail / 1 skip / 3 files，520ms",
+      "detail": "19 pass / 0 fail / 1 skip / 3 files，480ms",
       "exitCode": 0,
-      "durationMs": 520,
+      "durationMs": 480,
       "evidence": [
         {
           "kind": "command",
@@ -113,9 +113,9 @@
       "name": "崩溃一致性",
       "status": "pass",
       "scope": "local",
-      "detail": "19 pass / 0 fail / 0 skip / 4 files，1208ms",
+      "detail": "19 pass / 0 fail / 0 skip / 4 files，1014ms",
       "exitCode": 0,
-      "durationMs": 1208,
+      "durationMs": 1014,
       "evidence": [
         {
           "kind": "command",
@@ -133,9 +133,9 @@
       "name": "沙箱与隔离",
       "status": "pass",
       "scope": "local",
-      "detail": "27 pass / 0 fail / 0 skip / 4 files，534ms",
+      "detail": "27 pass / 0 fail / 0 skip / 4 files，516ms",
       "exitCode": 0,
-      "durationMs": 534,
+      "durationMs": 516,
       "evidence": [
         {
           "kind": "command",
@@ -153,9 +153,9 @@
       "name": "网络与数据面",
       "status": "pass",
       "scope": "local",
-      "detail": "25 pass / 0 fail / 0 skip / 5 files，595ms",
+      "detail": "25 pass / 0 fail / 0 skip / 5 files，638ms",
       "exitCode": 0,
-      "durationMs": 595,
+      "durationMs": 638,
       "evidence": [
         {
           "kind": "command",
@@ -173,9 +173,9 @@
       "name": "协议 conformance",
       "status": "pass",
       "scope": "local",
-      "detail": "17 pass / 0 fail / 0 skip / 4 files，901ms",
+      "detail": "17 pass / 0 fail / 0 skip / 4 files，844ms",
       "exitCode": 0,
-      "durationMs": 901,
+      "durationMs": 844,
       "evidence": [
         {
           "kind": "command",
@@ -193,9 +193,9 @@
       "name": "权限排列",
       "status": "pass",
       "scope": "local",
-      "detail": "23 pass / 0 fail / 0 skip / 5 files，459ms",
+      "detail": "23 pass / 0 fail / 0 skip / 5 files，455ms",
       "exitCode": 0,
-      "durationMs": 459,
+      "durationMs": 455,
       "evidence": [
         {
           "kind": "command",
@@ -213,9 +213,9 @@
       "name": "egress 不可绕过",
       "status": "pass",
       "scope": "local",
-      "detail": "18 pass / 0 fail / 0 skip / 3 files，468ms",
+      "detail": "18 pass / 0 fail / 0 skip / 3 files，516ms",
       "exitCode": 0,
-      "durationMs": 468,
+      "durationMs": 516,
       "evidence": [
         {
           "kind": "command",
@@ -233,9 +233,9 @@
       "name": "凭证泄露",
       "status": "pass",
       "scope": "local",
-      "detail": "15 pass / 0 fail / 0 skip / 4 files，425ms",
+      "detail": "15 pass / 0 fail / 0 skip / 4 files，423ms",
       "exitCode": 0,
-      "durationMs": 425,
+      "durationMs": 423,
       "evidence": [
         {
           "kind": "command",
@@ -253,9 +253,9 @@
       "name": "审计与重启恢复",
       "status": "pass",
       "scope": "local",
-      "detail": "20 pass / 0 fail / 0 skip / 5 files，1531ms",
+      "detail": "20 pass / 0 fail / 0 skip / 5 files，1468ms",
       "exitCode": 0,
-      "durationMs": 1531,
+      "durationMs": 1468,
       "evidence": [
         {
           "kind": "command",
@@ -273,9 +273,9 @@
       "name": "扩展沙箱",
       "status": "pass",
       "scope": "local",
-      "detail": "24 pass / 0 fail / 0 skip / 4 files，509ms",
+      "detail": "24 pass / 0 fail / 0 skip / 4 files，534ms",
       "exitCode": 0,
-      "durationMs": 509,
+      "durationMs": 534,
       "evidence": [
         {
           "kind": "command",
@@ -293,9 +293,9 @@
       "name": "红队用例",
       "status": "pass",
       "scope": "local",
-      "detail": "15 pass / 0 fail / 0 skip / 4 files，522ms",
+      "detail": "15 pass / 0 fail / 0 skip / 4 files，512ms",
       "exitCode": 0,
-      "durationMs": 522,
+      "durationMs": 512,
       "evidence": [
         {
           "kind": "command",
@@ -313,7 +313,7 @@
       "name": "首帧：真实 --version 子进程三次中位数",
       "status": "pass",
       "scope": "local",
-      "detail": "发布二进制 184/188/1782ms，中位 188ms",
+      "detail": "发布二进制 190/244/1932ms，中位 244ms",
       "evidence": [
         {
           "kind": "measurement",
@@ -327,9 +327,9 @@
       "name": "effect 生命周期耗时",
       "status": "pass",
       "scope": "local",
-      "detail": "6 pass / 0 fail / 0 skip / 2 files，412ms",
+      "detail": "6 pass / 0 fail / 0 skip / 2 files，410ms",
       "exitCode": 0,
-      "durationMs": 412,
+      "durationMs": 410,
       "evidence": [
         {
           "kind": "command",
@@ -347,9 +347,9 @@
       "name": "插件/HMR reload 耗时",
       "status": "pass",
       "scope": "local",
-      "detail": "14 pass / 0 fail / 0 skip / 3 files，693ms",
+      "detail": "14 pass / 0 fail / 0 skip / 3 files，676ms",
       "exitCode": 0,
-      "durationMs": 693,
+      "durationMs": 676,
       "evidence": [
         {
           "kind": "command",
@@ -367,9 +367,9 @@
       "name": "guard/审批等待耗时",
       "status": "pass",
       "scope": "local",
-      "detail": "12 pass / 0 fail / 0 skip / 2 files，447ms",
+      "detail": "12 pass / 0 fail / 0 skip / 2 files，411ms",
       "exitCode": 0,
-      "durationMs": 447,
+      "durationMs": 411,
       "evidence": [
         {
           "kind": "command",
@@ -387,9 +387,9 @@
       "name": "长会话虚拟滚动/外置耗时",
       "status": "pass",
       "scope": "local",
-      "detail": "15 pass / 0 fail / 0 skip / 2 files，477ms",
+      "detail": "15 pass / 0 fail / 0 skip / 2 files，382ms",
       "exitCode": 0,
-      "durationMs": 477,
+      "durationMs": 382,
       "evidence": [
         {
           "kind": "command",
@@ -407,7 +407,7 @@
       "name": "性能预算 firstFrameMs",
       "status": "pass",
       "scope": "local",
-      "detail": "实测 188 / 阈值 2000",
+      "detail": "实测 244 / 阈值 2000",
       "evidence": [
         {
           "kind": "file",
@@ -421,7 +421,7 @@
       "name": "性能预算 effectMs",
       "status": "pass",
       "scope": "local",
-      "detail": "实测 412 / 阈值 1300",
+      "detail": "实测 410 / 阈值 1300",
       "evidence": [
         {
           "kind": "file",
@@ -435,7 +435,7 @@
       "name": "性能预算 reloadMs",
       "status": "pass",
       "scope": "local",
-      "detail": "实测 693 / 阈值 2400",
+      "detail": "实测 676 / 阈值 2400",
       "evidence": [
         {
           "kind": "file",
@@ -449,7 +449,7 @@
       "name": "性能预算 guardWaitMs",
       "status": "pass",
       "scope": "local",
-      "detail": "实测 447 / 阈值 1600",
+      "detail": "实测 411 / 阈值 1600",
       "evidence": [
         {
           "kind": "file",
@@ -463,7 +463,7 @@
       "name": "性能预算 longSessionMs",
       "status": "pass",
       "scope": "local",
-      "detail": "实测 477 / 阈值 1400",
+      "detail": "实测 382 / 阈值 1400",
       "evidence": [
         {
           "kind": "file",
@@ -477,7 +477,7 @@
       "name": "性能预算 memBytes",
       "status": "pass",
       "scope": "local",
-      "detail": "实测 80384000 / 阈值 268435456",
+      "detail": "实测 79269888 / 阈值 268435456",
       "evidence": [
         {
           "kind": "file",
@@ -505,7 +505,7 @@
       "name": "去伪棘轮：公共 API / 真实异步 / 真实并行 / 真实故障注入",
       "status": "pass",
       "scope": "local",
-      "detail": "284 files / publicApi 59 / async 189 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1",
+      "detail": "286 files / publicApi 59 / async 190 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1",
       "evidence": [
         {
           "kind": "file",
@@ -847,7 +847,7 @@
       "name": "SBOM 组件完整性与摘要",
       "status": "pass",
       "scope": "local",
-      "detail": "120 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock",
+      "detail": "150 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock",
       "evidence": [
         {
           "kind": "file",

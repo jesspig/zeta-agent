@@ -5,7 +5,7 @@
     "name": "首帧：真实 --version 子进程三次中位数",
     "status": "pass",
     "scope": "local",
-    "detail": "发布二进制 184/188/1782ms，中位 188ms",
+    "detail": "发布二进制 175/185/235ms，中位 185ms",
     "evidence": [
       {
         "kind": "measurement",
@@ -19,9 +19,9 @@
     "name": "effect 生命周期耗时",
     "status": "pass",
     "scope": "local",
-    "detail": "6 pass / 0 fail / 0 skip / 2 files，412ms",
+    "detail": "6 pass / 0 fail / 0 skip / 2 files，414ms",
     "exitCode": 0,
-    "durationMs": 412,
+    "durationMs": 414,
     "evidence": [
       {
         "kind": "command",
@@ -39,9 +39,9 @@
     "name": "插件/HMR reload 耗时",
     "status": "pass",
     "scope": "local",
-    "detail": "14 pass / 0 fail / 0 skip / 3 files，693ms",
+    "detail": "14 pass / 0 fail / 0 skip / 3 files，696ms",
     "exitCode": 0,
-    "durationMs": 693,
+    "durationMs": 696,
     "evidence": [
       {
         "kind": "command",
@@ -59,9 +59,9 @@
     "name": "guard/审批等待耗时",
     "status": "pass",
     "scope": "local",
-    "detail": "12 pass / 0 fail / 0 skip / 2 files，447ms",
+    "detail": "12 pass / 0 fail / 0 skip / 2 files，445ms",
     "exitCode": 0,
-    "durationMs": 447,
+    "durationMs": 445,
     "evidence": [
       {
         "kind": "command",
@@ -79,9 +79,9 @@
     "name": "长会话虚拟滚动/外置耗时",
     "status": "pass",
     "scope": "local",
-    "detail": "15 pass / 0 fail / 0 skip / 2 files，477ms",
+    "detail": "15 pass / 0 fail / 0 skip / 2 files，422ms",
     "exitCode": 0,
-    "durationMs": 477,
+    "durationMs": 422,
     "evidence": [
       {
         "kind": "command",
@@ -99,7 +99,7 @@
     "name": "性能预算 firstFrameMs",
     "status": "pass",
     "scope": "local",
-    "detail": "实测 188 / 阈值 2000",
+    "detail": "实测 185 / 阈值 2000",
     "evidence": [
       {
         "kind": "file",
@@ -113,7 +113,7 @@
     "name": "性能预算 effectMs",
     "status": "pass",
     "scope": "local",
-    "detail": "实测 412 / 阈值 1300",
+    "detail": "实测 414 / 阈值 1300",
     "evidence": [
       {
         "kind": "file",
@@ -127,7 +127,7 @@
     "name": "性能预算 reloadMs",
     "status": "pass",
     "scope": "local",
-    "detail": "实测 693 / 阈值 2400",
+    "detail": "实测 696 / 阈值 2400",
     "evidence": [
       {
         "kind": "file",
@@ -141,7 +141,7 @@
     "name": "性能预算 guardWaitMs",
     "status": "pass",
     "scope": "local",
-    "detail": "实测 447 / 阈值 1600",
+    "detail": "实测 445 / 阈值 1600",
     "evidence": [
       {
         "kind": "file",
@@ -155,7 +155,7 @@
     "name": "性能预算 longSessionMs",
     "status": "pass",
     "scope": "local",
-    "detail": "实测 477 / 阈值 1400",
+    "detail": "实测 422 / 阈值 1400",
     "evidence": [
       {
         "kind": "file",
@@ -169,7 +169,7 @@
     "name": "性能预算 memBytes",
     "status": "pass",
     "scope": "local",
-    "detail": "实测 80384000 / 阈值 268435456",
+    "detail": "实测 82079744 / 阈值 268435456",
     "evidence": [
       {
         "kind": "file",

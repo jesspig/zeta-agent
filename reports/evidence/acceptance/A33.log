@@ -1,0 +1,9 @@
+===== bun test packages/agent/src/session/jsonl.store.spec.ts packages/agent/src/session/sqlite.store.spec.ts packages/agent/src/plugins/effects/durable.crash.spec.ts packages/components/security/src/outbox.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 39 pass
+ 0 fail
+ 210 expect() calls
+Ran 39 tests across 4 files. [1.84s]
+
+exit=0

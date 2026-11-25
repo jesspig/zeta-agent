@@ -1,0 +1,9 @@
+===== bun test packages/components/security/src/egress.dataplane.spec.ts packages/components/security/src/audit.integrity.spec.ts packages/components/security/src/audit.socket.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 13 pass
+ 0 fail
+ 55 expect() calls
+Ran 13 tests across 3 files. [830.00ms]
+
+exit=0

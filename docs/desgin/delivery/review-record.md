@@ -150,3 +150,9 @@
 - **HMR / 对象运行时 / 研究轨护栏**：均已实现并测试；HMR unit 快照恢复见 `packages/components/loader/src/hmr.spec.ts`，对象运行时最小集见 `packages/framework/src/objects/`，研究护栏见 `packages/agent/src/research/guardrails.spec.ts`。
 - **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 在 2026-11-23 批次中未实现；现已纳入完整系统后续阶段，不再作为永久不实现项。
 - **研究轨边界**：promotion / experience / fitness 与四道护栏均为可选 seam，不进入默认装配，默认仍为 no-op seam；仅在具备可重放任务与评估器时启用。
+
+### 8.4 2026-11-25 复核结论
+
+- 上表 8.1/8.3 的“尚未升级 / 尚未接线 / 延后未实现”均为 2026-11-23 的历史口径；T-08/T-09/T-14/T-15/T-18/T-19/T-24/T-25 已逐项落地并通过专测，当前状态以 [capability-matrix.md](./capability-matrix.md) 为准。
+- 安全维度仍保持失败关闭：无真实隔离执行器时 shell/seccomp 一律 unsupported；egress 默认拒绝；凭证不持明文；审计显式 sink 可签名/封存。
+- 发布与平台：本机仅 win32-x64 完成安装/启动/升级/回滚；11 个非宿主 target 与 wire-level gRPC 未通过 A36/A30，结论见 [最终验收报告](../../../reports/acceptance-report.md)。

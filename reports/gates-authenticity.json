@@ -5,7 +5,7 @@
     "name": "去伪棘轮：公共 API / 真实异步 / 真实并行 / 真实故障注入",
     "status": "pass",
     "scope": "local",
-    "detail": "284 files / publicApi 59 / async 189 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1",
+    "detail": "286 files / publicApi 59 / async 190 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1",
     "evidence": [
       {
         "kind": "file",

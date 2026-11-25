@@ -1,39 +1,39 @@
 # 全量质量门报告
 
-- 生成时间：2026-11-25T06:44:51.676Z
+- 生成时间：2026-11-25T07:49:27.747Z
 - 环境：win32/x64 · bun 1.4.2
 - 总计：55 个门；pass 43 / fail 0 / skipped 11 / unverified 1
 
 | 类别 | 门 | 状态 | 范围 | 说明 |
 | --- | --- | --- | --- | --- |
-| tests | tests:unit | pass | local | 92 pass / 0 fail / 0 skip / 11 files，724ms |
-| tests | tests:property | pass | local | 12 pass / 0 fail / 0 skip / 3 files，811ms |
+| tests | tests:unit | pass | local | 92 pass / 0 fail / 0 skip / 11 files，712ms |
+| tests | tests:property | pass | local | 12 pass / 0 fail / 0 skip / 3 files，896ms |
 | tests | tests:contract | pass | local | 28 pass / 0 fail / 0 skip / 5 files，696ms |
-| tests | tests:e2e | pass | local | 9 pass / 0 fail / 0 skip / 5 files，656ms |
-| tests | tests:pty | pass | local | 19 pass / 0 fail / 1 skip / 3 files，520ms |
-| tests | tests:crash | pass | local | 19 pass / 0 fail / 0 skip / 4 files，1208ms |
-| tests | tests:sandbox | pass | local | 27 pass / 0 fail / 0 skip / 4 files，534ms |
-| tests | tests:network | pass | local | 25 pass / 0 fail / 0 skip / 5 files，595ms |
-| tests | tests:conformance | pass | local | 17 pass / 0 fail / 0 skip / 4 files，901ms |
-| security | security:permissions | pass | local | 23 pass / 0 fail / 0 skip / 5 files，459ms |
-| security | security:egress | pass | local | 18 pass / 0 fail / 0 skip / 3 files，468ms |
-| security | security:credentials | pass | local | 15 pass / 0 fail / 0 skip / 4 files，425ms |
-| security | security:audit | pass | local | 20 pass / 0 fail / 0 skip / 5 files，1531ms |
-| security | security:extensionSandbox | pass | local | 24 pass / 0 fail / 0 skip / 4 files，509ms |
-| security | security:redTeam | pass | local | 15 pass / 0 fail / 0 skip / 4 files，522ms |
-| performance | perf-first-frame | pass | local | 发布二进制 184/188/1782ms，中位 188ms |
-| performance | perf-effect | pass | local | 6 pass / 0 fail / 0 skip / 2 files，412ms |
-| performance | perf-reload | pass | local | 14 pass / 0 fail / 0 skip / 3 files，693ms |
-| performance | perf-guard-wait | pass | local | 12 pass / 0 fail / 0 skip / 2 files，447ms |
-| performance | perf-long-session | pass | local | 15 pass / 0 fail / 0 skip / 2 files，477ms |
-| performance | perf-budget:firstFrameMs | pass | local | 实测 188 / 阈值 2000 |
-| performance | perf-budget:effectMs | pass | local | 实测 412 / 阈值 1300 |
-| performance | perf-budget:reloadMs | pass | local | 实测 693 / 阈值 2400 |
-| performance | perf-budget:guardWaitMs | pass | local | 实测 447 / 阈值 1600 |
-| performance | perf-budget:longSessionMs | pass | local | 实测 477 / 阈值 1400 |
-| performance | perf-budget:memBytes | pass | local | 实测 80384000 / 阈值 268435456 |
+| tests | tests:e2e | pass | local | 9 pass / 0 fail / 0 skip / 5 files，645ms |
+| tests | tests:pty | pass | local | 19 pass / 0 fail / 1 skip / 3 files，480ms |
+| tests | tests:crash | pass | local | 19 pass / 0 fail / 0 skip / 4 files，1014ms |
+| tests | tests:sandbox | pass | local | 27 pass / 0 fail / 0 skip / 4 files，516ms |
+| tests | tests:network | pass | local | 25 pass / 0 fail / 0 skip / 5 files，638ms |
+| tests | tests:conformance | pass | local | 17 pass / 0 fail / 0 skip / 4 files，844ms |
+| security | security:permissions | pass | local | 23 pass / 0 fail / 0 skip / 5 files，455ms |
+| security | security:egress | pass | local | 18 pass / 0 fail / 0 skip / 3 files，516ms |
+| security | security:credentials | pass | local | 15 pass / 0 fail / 0 skip / 4 files，423ms |
+| security | security:audit | pass | local | 20 pass / 0 fail / 0 skip / 5 files，1468ms |
+| security | security:extensionSandbox | pass | local | 24 pass / 0 fail / 0 skip / 4 files，534ms |
+| security | security:redTeam | pass | local | 15 pass / 0 fail / 0 skip / 4 files，512ms |
+| performance | perf-first-frame | pass | local | 发布二进制 190/244/1932ms，中位 244ms |
+| performance | perf-effect | pass | local | 6 pass / 0 fail / 0 skip / 2 files，410ms |
+| performance | perf-reload | pass | local | 14 pass / 0 fail / 0 skip / 3 files，676ms |
+| performance | perf-guard-wait | pass | local | 12 pass / 0 fail / 0 skip / 2 files，411ms |
+| performance | perf-long-session | pass | local | 15 pass / 0 fail / 0 skip / 2 files，382ms |
+| performance | perf-budget:firstFrameMs | pass | local | 实测 244 / 阈值 2000 |
+| performance | perf-budget:effectMs | pass | local | 实测 410 / 阈值 1300 |
+| performance | perf-budget:reloadMs | pass | local | 实测 676 / 阈值 2400 |
+| performance | perf-budget:guardWaitMs | pass | local | 实测 411 / 阈值 1600 |
+| performance | perf-budget:longSessionMs | pass | local | 实测 382 / 阈值 1400 |
+| performance | perf-budget:memBytes | pass | local | 实测 79269888 / 阈值 268435456 |
 | performance | perf-budget:tokenCost | pass | local | 实测 24595 / 阈值 32000（token 为同源估算器结果） |
-| authenticity | authenticity-ratchet | pass | local | 284 files / publicApi 59 / async 189 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1 |
+| authenticity | authenticity-ratchet | pass | local | 286 files / publicApi 59 / async 190 / parallel 33 / fault 40 / mockOnly 0 / fakeTimer 1 |
 | authenticity | authenticity:packages/agent/src/plugins/mcp/conformance.spec.ts | pass | local | packages/agent/src/plugins/mcp/conformance.spec.ts 命中 createMcpProtocol, await, expect( |
 | authenticity | authenticity:packages/components/security/src/egress.dataplane.spec.ts | pass | local | packages/components/security/src/egress.dataplane.spec.ts 命中 assertEgressAllowed, await, expect( |
 | authenticity | authenticity:packages/agent/src/tools/backend.contract.spec.ts | pass | local | packages/agent/src/tools/backend.contract.spec.ts 命中 await, expect(, rmSync |
@@ -57,7 +57,7 @@
 | platform | platform:win32-arm64 | skipped | cross-platform | 本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass |
 | platform | platform:win32-x64-baseline | skipped | cross-platform | 本机无该 target 的真实构建产物，未构建也未运行；由 CI 三平台矩阵覆盖，不计为 pass |
 | platform | platform:host-lifecycle | pass | local | PASS install 1.0.0 digest=c658a85c3849 start=ok \| PASS upgrade 1.0.0 -> 1.1.0 digest=c658a85c3849 start=ok \| PASS rollback 1.1.0 -> 1.0.0 digest=c658a85c3849 start=ok \| smoke-local: 安装/升级/rollback 均通过真实单文件启动（exit=0） |
-| supply-chain | supply:sbom | pass | local | 120 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock |
+| supply-chain | supply:sbom | pass | local | 150 个第三方组件（下限 120），全部带 sha512 完整性摘要；来源 bun.lock |
 | supply-chain | supply:dependency-policy | pass | local | 16 个 package.json 无禁用依赖 |
 | supply-chain | supply:frozen-lockfile | pass | local | bun install --frozen-lockfile exit=0 |
 | supply-chain | supply:release-age | unverified | network | 已核验 5 / 跳过 0；过新 @opentui/solid@0.9.3, solid-js@1.9.20, turbo@2.11.13 |

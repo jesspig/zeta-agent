@@ -1,0 +1,9 @@
+===== bun test packages/framework/src/loader/plugin-transaction.spec.ts packages/agent/src/facade.tool-boundary.spec.ts packages/agent/src/plugins/permissions/policy.spec.ts =====
+bun test v1.4.2 (744846f84)
+
+ 15 pass
+ 0 fail
+ 73 expect() calls
+Ran 15 tests across 3 files. [569.00ms]
+
+exit=0

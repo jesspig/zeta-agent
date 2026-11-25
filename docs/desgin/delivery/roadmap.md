@@ -181,6 +181,16 @@ flowchart LR
 | A28 | 多租户 realm 隔离：per-tenant 资源经 realm 解析；跨租户事件不串；配额作为 coeffect 可 reserve | [security.md §7](../agent/security.md#7-多租户identity-与-realm) | 3-5 |
 | A29 | 评测体系：fitness seam 可插拔；A/B 与回归门禁可运行；实验隔离与 search/test 分离 | [engineering.md §9.3](../architecture/engineering.md#93-评测与基准体系缺口-5-补全)、SE-M11 | 5-6 |
 | A30 | 部署三态均为真实拓扑：local 单文件、daemon HTTP/token/heartbeat、remote SDK/gRPC + 远程 backend；readiness/liveness/configDigest 接入真实 runtime/RPC；configDigest 使用 canonical encoding + SHA-256；启动/发布校验主二进制与嵌入资源架构 | [engineering.md §9.1](../architecture/engineering.md#91-部署拓扑与三态运行缺口-7-补全) | 5 |
+| A31 | package graph 无环、跨包相对 import 被拒 | `scripts/check-core-dependencies.mjs`、`scripts/guard-architecture.mjs`、`scripts/guard-architecture.spec.mjs` | 0-5 |
+| A32 | 公开 API 无未实现 stub / 静默 no-op | `scripts/check-api-stubs.mjs`、`scripts/check-facade-exports.mjs`、backend 契约测试 | 0-5 |
+| A33 | 持久化三类崩溃与未知结果可恢复 | `packages/agent/src/session/`、`packages/components/security/src/outbox.spec.ts` | 3-5 |
+| A34 | run/tool/session 并发生命周期完备 | `packages/agent-framework/src/runtime/`、`packages/agent/src/session/tree.atomic.spec.ts` | 2-5 |
+| A35 | 文件/进程/网络/凭证/审计由真实边界强制 | `packages/components/security/`、`packages/agent/src/tools/backend.contract.spec.ts` | 3-5 |
+| A36 | local/daemon/remote 与三平台 12 target 矩阵通过 | `scripts/gate-platform.mjs`、`scripts/smoke-local.ts`、`reports/release-candidate.md` | 5 |
+| A37 | Provider/MCP/RPC/CLI conformance 全绿 | `packages/agent/src/providers/conformance.spec.ts`、`packages/agent/src/plugins/mcp/conformance.spec.ts`、`packages/deploy/src/rpc.spec.ts` | 3-5 |
+| A38 | 性能预算与资源增长有回归门 | `scripts/gate-performance.mjs`、`packages/deploy/src/budget.spec.ts` | 5 |
+| A39 | 文档能力矩阵与代码装配自动一致 | `scripts/check-capability-matrix.mjs`、`capability-matrix.md` 机器可读块 | 5 |
+| A40 | 研究轨所有晋升路径强制经过四道护栏 | `packages/agent/src/research/guardrails.spec.ts`、`promotion.spec.ts`、`fitness.budget-identity.spec.ts` | 6 |
 
 
 ## 5 运行时 HMR 与测试
@@ -206,6 +216,8 @@ flowchart LR
 | 插件缓存无法驱逐 | 5 | HMR 换代码后行为未变 | 改用独立构建产物 URL + vm/digest（[04 O-4](../framework/api-and-testing.md#13-风险与开放问题)） |
 | 两套扩展兼容层复杂 | 3/5 | 旧扩展加载失败 | 延后兼容门面到阶段 5；先保内部统一 |
 | 权限策略破坏习惯 | 3 | 用户抱怨工具被挡 | 权限门禁默认沿用 pi 无限制行为（[fact-registry C5](../architecture/fact-registry.md#4-矛盾与争议显式并列)）——注意这是**权限维度**，与 O-9（发射交付维度，默认 withhold）不同 |
+| 发布产物架构/摘要不匹配 | 发布 | `release-check` 报 BINARY/EMBEDDED_ARCH_MISMATCH 或 SHA-256 不一致 | 停止发布，重建目标产物并按 [release-runbook.md](./release-runbook.md) 回退上一版 |
+| 非宿主 target 未实测 | 发布 | 报告中平台门为 skipped | 不写 pass；由 CI 三平台 12 target 矩阵补证后再裁决 A36 |
 
 
 ## 7 开放问题与决策点

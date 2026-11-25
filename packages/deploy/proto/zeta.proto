@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package zeta.control.v1;
+
+service ZetaControl {
+  rpc Invoke (InvokeRequest) returns (InvokeResponse);
+}
+
+message InvokeRequest {
+  string token = 1;
+  int32 generation = 2;
+  string method = 3;
+  bytes params_json = 4;
+}
+
+message InvokeResponse {
+  int32 status = 1;
+  bytes response_json = 2;
+  string error = 3;
+}

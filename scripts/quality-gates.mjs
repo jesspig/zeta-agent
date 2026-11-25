@@ -56,7 +56,7 @@ writeJson("reports/quality-gates-commands.json", {
 });
 const markdown = renderMarkdown(report);
 mkdirSync(join(root, "reports"), { recursive: true });
-writeFileSync(join(root, "reports", "quality-gates-report.md"), `${markdown}\n`, "utf8");
+writeFileSync(join(root, "reports", "quality-gates-report.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");
 process.stdout.write(`\n${markdown}\n`);
 
 const summary = summarizeReport(report);

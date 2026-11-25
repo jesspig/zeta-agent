@@ -1,23 +1,23 @@
 {
-  "generatedAt": "2026-11-25T06:44:02.312Z",
+  "generatedAt": "2026-11-25T07:52:46.752Z",
   "method": "合成长会话：真实 VariableLayout/FiberSystem/BudgetTracker；token 使用仓库同源的 JSON 字节数/4 估算器",
   "metrics": {
-    "firstFrameMs": 188,
-    "effectMs": 412,
-    "reloadMs": 693,
-    "guardWaitMs": 447,
-    "longSessionMs": 477,
-    "memBytes": 80384000,
+    "firstFrameMs": 185,
+    "effectMs": 414,
+    "reloadMs": 696,
+    "guardWaitMs": 445,
+    "longSessionMs": 422,
+    "memBytes": 82079744,
     "tokenCost": 24595
   },
   "samples": [
-    183.65300000000002,
-    187.5699999999997,
-    1782.2846
+    174.62710000000004,
+    184.88759999999996,
+    235.10019999999997
   ],
   "sampler": {
     "capacity": 4096,
     "samples": 0,
-    "rssBytes": 80375808
+    "rssBytes": 82079744
   }
 }

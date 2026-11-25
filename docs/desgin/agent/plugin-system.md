@@ -244,7 +244,7 @@ stateDiagram-v2
 ## 9 MCP 与 provider 插件
 
 - MCP：pi 的 `createMcpExtension()` 把 MCP server 的工具注册为 `mcp__<server>__<tool>`，监听 `session_start/before_agent_start/tool_call/turn_start/mcp_servers_change/session_shutdown`（[pi-baseline §5.2](../research/pi-baseline.md)）。我们做成 `mcp` 插件：server 配置是一个 coeffect（`@zeta-agent/mcp:servers`），工具注册是逆可撤销的 effect，server 变化时工具自动重激活。
-  **实现状态（2026-11-24）**：最小插件已落地于 `packages/agent/src/plugins/mcp/`，自实现 JSON-RPC 客户端（无外部 SDK）；工具注册、tools_changed 重激活与卸载清理已实现，并复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定（证据：`packages/agent/src/plugins/mcp/mcp.spec.ts`）。当前尚未实现 initialize/initialized 握手、OAuth、分页、resources/prompts/roots、inputSchema/outputSchema 双结果投影；动态/MCP 工具也尚未进入原生 provider function-calling schema。真实 stdio/socket 字节传输由宿主注入 transport。
+  **实现状态（2026-11-25）**：`packages/agent/src/plugins/mcp/` 已实现 initialize/initialized 握手、JSON-RPC 取消与超时、stdio/HTTP+SSE/socket transport、OAuth grant（复用 T-14 CredentialBroker）、tools_changed generation/debounce、resources/prompts/roots 与 inputSchema/outputSchema 双结果投影；复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定。证据：`packages/agent/src/plugins/mcp/{protocol,transport,connection,oauth-grant,plugin-projection,conformance,mcp-e2e}.spec.ts`。MCP 默认不装配；真实 OAuth token endpoint 与 stdio/socket 字节传输仍由宿主注入，provider function-calling schema 对动态工具的投影按最终 active registry 生成。
 - Provider：`registerProvider`/`registerNativeProvider`/`registerVirtualModel` 保留；底层走 `@zeta-agent/agent-framework` 的 `StreamFn` broker（[agent-framework §12](../agent-framework/state-and-events.md#12-模型服务作为-broker)）。模型目录由生成式 catalog + `accepts` 版本映射管理。
 
 
