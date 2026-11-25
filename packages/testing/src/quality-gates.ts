@@ -140,7 +140,7 @@ export interface AuthenticityScan {
   readonly fakeTimerFiles: number;
 }
 
-const PUBLIC_API = /from\s+["'](@zeta-agent\/[\w-]+|(?:^|\/)\.\.\/(?:src\/)?index)["']/;
+const PUBLIC_API = /from\s+["'](?:@zeta-agent\/[\w-]+|(?:\.{1,2}\/)+(?:src\/)?index)["']/;
 const REAL_ASYNC = /\bawait\s/;
 const PARALLEL = /\b(?:Promise\.(?:all|allSettled)|Bun\.spawn|spawnSync|new Worker|worker_threads)\b/;
 const FAULT_INJECTION =

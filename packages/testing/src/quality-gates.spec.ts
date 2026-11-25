@@ -112,6 +112,16 @@ describe("T-26 test authenticity scan", () => {
     expect(scan.fakeTimerFiles).toBe(1);
   });
 
+  test("公共 API 扫描兼容单引号与多层相对 index 导入", () => {
+    const scan = scanAuthenticity([
+      {
+        path: "public-api.spec.ts",
+        content: "import { createX } from '@zeta-agent/agent';\nimport { createY } from '../../src/index';",
+      },
+    ]);
+    expect(scan.publicApiImports).toBe(1);
+  });
+
   test("基线是棘轮：只允许增长，mock-only 必须为零", () => {
     const current = scanAuthenticity(files.slice(0, 2));
     expect(() =>
