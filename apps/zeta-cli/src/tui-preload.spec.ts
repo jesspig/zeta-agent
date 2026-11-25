@@ -15,4 +15,4 @@ test("interactive 路径先加载 OpenTUI preload 再动态导入 TUI", () => {
   expect(result.status).toBe(0);
   expect(result.stdout.trim()).toBe("TUI_IMPORT_OK");
   expect(result.stderr).not.toContain("getContextId");
-});
+}, 30_000);

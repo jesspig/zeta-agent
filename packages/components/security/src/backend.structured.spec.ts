@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createLocalSafeBackend, type LocalSafeBackendOptions } from "./backend.local-safe";
 
 /** T-09：结构化文件事务——validate-all、dry-run、单文件 capability、故障回滚。 */
@@ -60,7 +60,7 @@ describe("T-09 structured apply_patch", () => {
     writeFileSync(a, "first", "utf8");
     writeFileSync(b, "second", "utf8");
     const backend = make({
-      failWrite: (path) => path === b,
+      failWrite: (path) => basename(path) === "b.txt",
     });
 
     const result = await backend.file.applyPatch([
