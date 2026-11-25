@@ -1,4 +1,4 @@
-import type { FiberId } from "@zeta-agent/framework";
+import type { FiberId } from "@zeta-agent/cordis/types";
 import { isDisabled, type Entry } from "./config";
 
 export type ReconcileActionKind = "insert" | "unload" | "reload" | "realm" | "intercept" | "notify";

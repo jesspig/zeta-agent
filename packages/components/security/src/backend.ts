@@ -1,4 +1,4 @@
-import type { Disposer } from "@zeta-agent/framework";
+import type { Disposer } from "@zeta-agent/cordis/types";
 import { isAbsolute as isAbsoluteLike, relative as relativeLike, resolve as resolveLike } from "node:path";
 import type { EgressPolicy, EgressTarget } from "./egress";
 import { isEgressAllowed } from "./egress";

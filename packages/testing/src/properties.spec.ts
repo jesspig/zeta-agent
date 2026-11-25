@@ -335,6 +335,7 @@ describe("A5 guard 撤回延迟", () => {
           value: "svc-value",
           dependents: new Set<string>(),
           isolate: Symbol("a5"),
+          generation: 1,
           check: () => !withdrawn,
         });
         root.keys.set(svcKey.symbol, svcKey);

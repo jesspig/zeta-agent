@@ -1,4 +1,4 @@
-import type { FiberId } from "@zeta-agent/framework";
+import type { FiberId } from "@zeta-agent/cordis/types";
 
 export interface JsExpr {
   readonly __jsExpr: string;

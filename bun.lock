@@ -89,7 +89,6 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/cordis": "workspace:*",
-        "@zeta-agent/framework": "workspace:*",
       },
     },
     "packages/components/observability": {
@@ -104,7 +103,6 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/cordis": "workspace:*",
-        "@zeta-agent/framework": "workspace:*",
       },
     },
     "packages/deploy": {
@@ -123,6 +121,8 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/cordis": "workspace:*",
+        "@zeta-agent/events": "workspace:*",
+        "@zeta-agent/observability": "workspace:*",
       },
     },
     "packages/testing": {

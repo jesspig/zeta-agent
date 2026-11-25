@@ -73,6 +73,7 @@ export class FiberSystem {
   readonly defaultRealm = Symbol("cordis:default-realm");
   private readonly bindings = new Map<symbol, Map<symbol, ProviderBinding>>();
   private readonly latestBindings = new Map<symbol, Map<symbol, ProviderBinding>>();
+  private readonly revisions = new Map<symbol, Map<symbol, number>>();
   private readonly subscribers = new Map<symbol, Map<symbol, Set<Fiber>>>();
   private readonly pending = new Set<Promise<void>>();
   private readonly failures: unknown[] = [];
@@ -101,7 +102,8 @@ export class FiberSystem {
     realm: symbol,
     value: unknown,
     provider: Fiber,
-    check?: () => boolean
+    check?: () => boolean,
+    consult?: (metadata: unknown) => boolean
   ): ProviderBinding {
     const realmBindings = this.bindings.get(realm) ?? new Map<symbol, ProviderBinding>();
     const previous = realmBindings.get(key.symbol);
@@ -109,17 +111,24 @@ export class FiberSystem {
       throw new Error(`${PROVIDER_DUPLICATE}: ${key.symbol.description ?? key.name}@${realm.toString()}`);
     }
     const binding = {} as ProviderBinding;
+    const realmRevisions = this.revisions.get(realm) ?? new Map<symbol, number>();
+    const generation = (realmRevisions.get(key.symbol) ?? 0) + 1;
+    realmRevisions.set(key.symbol, generation);
+    this.revisions.set(realm, realmRevisions);
     const impl: Impl = {
       uid: provider.uid,
       value,
       dependents: provider.committedDependents,
       isolate: realm,
+      generation,
       check: () => binding.available && (check?.() ?? true),
+      ...(consult ? { consult } : {}),
     };
     const rootImpl: Impl = {
       ...impl,
       check: () =>
-        (provider.state.kind === "ACTIVE" || (provider.state.kind === "LOADING" && !binding.released)) &&
+        !binding.released &&
+        (provider.state.kind === "ACTIVE" || provider.state.kind === "LOADING") &&
         (check?.() ?? true),
     };
     Object.assign(binding, { key, realm, provider, impl, rootImpl, available: true, released: false });
@@ -146,6 +155,11 @@ export class FiberSystem {
     return this.latestBindings.get(realm)?.get(key.symbol)?.rootImpl;
   }
 
+  /** 可观察的按 realm/键绑定序号；同值重新 provide 也会递增。 */
+  revisionOf(key: CoeffectKey<any>, realm: symbol): number {
+    return this.revisions.get(realm)?.get(key.symbol) ?? 0;
+  }
+
   forget(key: CoeffectKey<any>, realm: symbol): void {
     this.latestBindings.get(realm)?.delete(key.symbol);
   }
@@ -157,6 +171,7 @@ export class FiberSystem {
   disposeRealm(realm: symbol): void {
     this.bindings.delete(realm);
     this.latestBindings.delete(realm);
+    this.revisions.delete(realm);
     this.subscribers.delete(realm);
   }
 
@@ -303,7 +318,7 @@ export class Fiber {
   provide<T>(key: CoeffectKey<T>, value: T, options: ProvideOptions = {}): Disposer {
     const previous = this.provided.get(key.symbol);
     if (previous) this.releaseBinding(previous);
-    const binding = this.system.claim(key, this.realm, value, this, options.check);
+    const binding = this.system.claim(key, this.realm, value, this, options.check, options.consult);
     this.provided.set(key.symbol, binding);
     let armed = true;
     return () => {

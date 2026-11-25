@@ -28,6 +28,10 @@ export interface Impl {
   check?(): boolean;
   dependents: Set<FiberId>;
   isolate: symbol;
+  /** 每次绑定递增的可观察身份；同值重新 provide 也有不同的 generation。 */
+  generation: number;
+  /** provider 对 intercept 对象元数据的访问裁决；返回 false 视作能力失效。 */
+  consult?(metadata: unknown): boolean;
 }
 
 export interface EffectMeta {
@@ -44,12 +48,18 @@ export interface EffectObserver {
 
 export interface ProvideOptions {
   readonly check?: () => boolean;
+  readonly consult?: (metadata: unknown) => boolean;
 }
 
+/**
+ * 统一读取契约：默认严格访问（未声明/未激活/能力失效均抛错），
+ * 显式 strict=false 为不失败的查询（任何不可用都返回 undefined）。
+ */
 export interface FiberContext {
   readonly uid: FiberId;
   effect(callback: EffectCallback, label?: string): Disposer;
-  get<T>(key: CoeffectKey<T>): T;
+  get<T>(key: CoeffectKey<T>, strict?: true): T;
+  get<T>(key: CoeffectKey<T>, strict: false): T | undefined;
   set<T>(key: CoeffectKey<T>, value: T): Disposer;
   isolate<T>(key: CoeffectKey<T>, realm?: symbol): FiberContext;
   intercept<T>(key: CoeffectKey<T>, metadata: unknown): FiberContext;

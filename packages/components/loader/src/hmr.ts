@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
-import type { FiberId } from "@zeta-agent/framework";
+import type { FiberId } from "@zeta-agent/cordis/types";
 
 /**
  * 组件级 unit 快照恢复的最小原语（遗留兼容入口）。

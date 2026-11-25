@@ -22,7 +22,7 @@ export interface EventBus {
   on<N extends EventName>(name: N, listener: Listener<N>, opts?: DispatchOptions): Disposer;
   emit<N extends EventName>(name: N, payload: Events[N], opts?: DispatchOptions): void;
   parallel<N extends EventName>(name: N, payload: Events[N], opts?: DispatchOptions): Promise<void>;
-  serial<N extends EventName>(name: N, payload: Events[N], opts?: DispatchOptions): Promise<void>;
+  serial<N extends EventName>(name: N, payload: Events[N], opts?: DispatchOptions): Promise<unknown>;
   bail<N extends EventName>(name: N, payload: Events[N], opts?: DispatchOptions): Promise<boolean>;
   waterfall<N extends EventName>(
     name: N,

@@ -5,8 +5,10 @@ import { join } from "node:path";
 import {
   collectPackageGraph,
   detectPackageCycles,
+  findComponentFacadeDependencies,
   findCoreTypeDeclarations,
   findCrossPackageRelativeImports,
+  findDisallowedComponentSubpaths,
   inventoryRootContextReads,
   validateSharedPeerIdentity,
 } from "./guard-architecture.mjs";
@@ -101,6 +103,56 @@ describe("package graph guard", () => {
       expect(findCoreTypeDeclarations(root)).toEqual([
         { name: "CoeffectKey", file: "packages/framework/src/types.ts", line: 1 },
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects component -> facade reverse dependency but allows component -> component", () => {
+    const negative = fixture({
+      "package.json": JSON.stringify({ name: "root", private: true, workspaces: ["packages/*", "packages/components/*"] }),
+      "packages/components/cordis/package.json": manifest("@zeta-agent/cordis"),
+      "packages/components/events/package.json": manifest("@zeta-agent/events", {
+        "@zeta-agent/cordis": "workspace:*",
+        "@zeta-agent/framework": "workspace:*",
+      }),
+      "packages/components/events/src/index.ts": `import type { Disposer } from "@zeta-agent/framework";`,
+    });
+    const positive = fixture({
+      "package.json": JSON.stringify({ name: "root", private: true, workspaces: ["packages/*", "packages/components/*"] }),
+      "packages/components/cordis/package.json": manifest("@zeta-agent/cordis"),
+      "packages/components/events/package.json": manifest("@zeta-agent/events", { "@zeta-agent/cordis": "workspace:*" }),
+    });
+    try {
+      expect(findComponentFacadeDependencies(negative)).toEqual([
+        expect.stringContaining('禁止反向依赖 facade "@zeta-agent/framework"'),
+        expect.stringContaining('组件源码禁止反向依赖 facade "@zeta-agent/framework"'),
+      ]);
+      expect(findComponentFacadeDependencies(positive)).toEqual([]);
+    } finally {
+      rmSync(negative, { recursive: true, force: true });
+      rmSync(positive, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects direct component internals while allowing declared stable subpaths", () => {
+    const root = fixture({
+      "package.json": JSON.stringify({ name: "root", private: true, workspaces: ["packages/*", "packages/components/*"] }),
+      "packages/components/events/package.json": JSON.stringify({
+        name: "@zeta-agent/events",
+        private: true,
+        exports: { ".": "./src/index.ts", "./types": "./src/types.ts", "./package.json": "./package.json" },
+      }),
+      "packages/app/package.json": manifest("@zeta-agent/app"),
+      "packages/app/src/index.ts": [
+        `import { createEventBus } from "@zeta-agent/events/src/events";`,
+        `import type { Events } from "@zeta-agent/events/types";`,
+      ].join("\n"),
+    });
+    try {
+      const violations = findDisallowedComponentSubpaths(root);
+      expect(violations).toHaveLength(1);
+      expect(violations[0]).toContain('@zeta-agent/events/src/events');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
