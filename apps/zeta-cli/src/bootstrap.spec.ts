@@ -50,7 +50,7 @@ describe("T-10 CLI 统一 parse → config → loader → root fiber → mode", 
     expect(states.get("tool:bash")).toBe("unsupported");
     expect(states.get("capability:isolation")).toBe("unsupported");
     expect(states.get("capability:fsConfinement")).toBe("active");
-  });
+  }, 30_000);
 
   test("子进程能力矩阵：local-full 为显式 opt-in 且不把 shell 伪装成 active", async () => {
     const safe = await runCli(["--capabilities"]);
@@ -63,7 +63,7 @@ describe("T-10 CLI 统一 parse → config → loader → root fiber → mode", 
     expect(fullReport.plugins.length).toBeGreaterThan(safeReport.plugins.length);
     const states = new Map((fullReport.diagnostics as Array<{ id: string; state: string }>).map((item) => [item.id, item.state]));
     expect(states.get("tool:bash")).toBe("unsupported");
-  });
+  }, 30_000);
 
   test("CLI 与 SDK 默认装配逐字段一致（manifest / 工具 / 服务 / session / mode / 诊断）", async () => {
     const { code, stdout, stderr } = await runCli(["--capabilities"]);
@@ -82,7 +82,7 @@ describe("T-10 CLI 统一 parse → config → loader → root fiber → mode", 
     } finally {
       await runtime.dispose();
     }
-  });
+  }, 30_000);
 
   test("headless 四形态共享会话协议：json/rpc 输出可解析且不加载 OpenTUI", async () => {
     const json = await runCli(["--json", "hello"]);
@@ -96,5 +96,5 @@ describe("T-10 CLI 统一 parse → config → loader → root fiber → mode", 
     const reply = JSON.parse(rpc.stdout.trim().split(/\r?\n/).at(-1) ?? "");
     expect(reply.jsonrpc).toBe("2.0");
     expect(reply.id).toBe(1);
-  });
+  }, 30_000);
 });

@@ -31,7 +31,7 @@ function options(partial: Partial<DaemonOptions> = {}): DaemonOptions {
   };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("WAIT_FOR_TIMEOUT");

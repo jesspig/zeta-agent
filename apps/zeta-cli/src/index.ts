@@ -435,7 +435,7 @@ async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> 
     writer.diagnostic(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo`);
   }
   const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
-  const stdinText = mode === "rpc" && !process.stdin.isTTY ? await readStdinFrames() : "";
+  const stdinText = mode === "rpc" && args.prompt === undefined && !process.stdin.isTTY ? await readStdinFrames() : "";
   const controlLines: string[] = [];
   for (const line of mode === "rpc"
     ? collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
@@ -514,7 +514,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     }
     if (args.mode === "daemon") return runDaemonMode(args, bundle);
     if (args.mode === "remote") {
-      const stdinText = process.stdin.isTTY === true ? "" : await readStdinFrames();
+      const stdinText = args.prompt === undefined && process.stdin.isTTY === false ? await readStdinFrames() : "";
       return runRemoteMode(
         args,
         collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
