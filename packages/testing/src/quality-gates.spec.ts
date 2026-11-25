@@ -85,19 +85,21 @@ describe("T-26 test authenticity scan", () => {
   const files = [
     {
       path: "a.spec.ts",
-      content: 'import { createX } from "@zeta-agent/agent";\ntest("x", async () => { await createX(); expect(1).toBe(1); });',
+      content: `import { createX } from "@zeta-agent/agent";
+test("x", async () => { await createX(); expect(1).toBe(1); });`,
     },
     {
       path: "b.spec.ts",
-      content: 'test("p", async () => { await Promise.all([f(), g()]); expect(1).toBe(1); });\nrmSync(path, { recursive: true });',
+      content: `test("p", async () => { await Promise.all([f(), g()]); expect(1).toBe(1); });
+rmSync(path, { recursive: true });`,
     },
     {
       path: "c.spec.ts",
-      content: 'test("fake", () => { const f = mock(() => 1); });',
+      content: `test("fake", () => { const f = mock(() => 1); });`,
     },
     {
       path: "d.spec.ts",
-      content: 'test("time", async () => { setSystemTime(0); await tick(); expect(1).toBe(1); });',
+      content: `test("time", async () => { setSystemTime(0); await tick(); expect(1).toBe(1); });`,
     },
   ];
 
