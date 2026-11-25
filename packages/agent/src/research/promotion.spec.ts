@@ -6,9 +6,29 @@ import {
   replayPromotion,
   type Candidate,
 } from "./promotion";
+import { issuePromotionSeal } from "./seal";
 
 function candidate(overrides: Partial<Candidate> = {}): Candidate {
-  return { id: "c1", fitness: 0.5, qualified: true, ...overrides };
+  const body: Omit<Candidate, "seal"> = {
+    id: "c1",
+    fitness: 0.5,
+    qualified: true,
+    fingerprint: undefined,
+    ...overrides,
+  };
+  return {
+    ...body,
+    seal: issuePromotionSeal({
+      candidateId: body.id || "spec",
+      identityDigest: "spec",
+      body: {
+        id: body.id,
+        fitness: body.fitness,
+        qualified: body.qualified,
+        fingerprint: body.fingerprint,
+      },
+    }),
+  };
 }
 
 describe("T-30 monotonic promotion and replay invariants", () => {

@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname } from "node:path";
+import { realmForSpace, type Principal } from "@zeta-agent/capabilities";
+import type { ResearchMode } from "./frozen";
 
 export interface ExperienceEntry {
   readonly id: string;
@@ -93,6 +95,10 @@ export const GRADER_VERDICT_MARKERS: readonly string[] = Object.freeze([
   "deterministicEvalSummary",
   "deterministic_eval_summary",
   "deterministic_eval_result",
+  "testResult",
+  "testResultSummary",
+  "testPassRate",
+  "heldOutAnswer",
 ]);
 
 const MARKER_SCAN_SUFFIXES = new Set([
@@ -169,6 +175,19 @@ function assertEntry(entry: ExperienceEntry): void {
   assertNoGraderVerdicts(entryEvidence(entry));
 }
 
+/** realm 是 symbol，标准结构化克隆无法复制；按结构复制并保留 symbol 引用。 */
+function cloneExperienceValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(cloneExperienceValue) as T;
+  if (value !== null && typeof value === "object") {
+    const copy: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      copy[key] = cloneExperienceValue(child);
+    }
+    return copy as T;
+  }
+  return value;
+}
+
 function stableStringify(value: unknown): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
@@ -189,7 +208,7 @@ export function createInMemoryExperiencePersistence(): ExperiencePersistence {
   return {
     load: () => stored,
     save: (entries) => {
-      stored = structuredClone(entries) as ExperienceEntry[];
+      stored = cloneExperienceValue(entries) as ExperienceEntry[];
     },
   };
 }
@@ -216,7 +235,7 @@ export function createExperienceStore(options: ExperienceStoreOptions = {}): Exp
   if (restored !== undefined) {
     for (const item of restored) {
       assertEntry(item);
-      entries.set(item.id, structuredClone(item) as ExperienceEntry);
+      entries.set(item.id, cloneExperienceValue(item) as ExperienceEntry);
     }
   }
   const persist = (): void => {
@@ -232,7 +251,7 @@ export function createExperienceStore(options: ExperienceStoreOptions = {}): Exp
   return {
     put(entry) {
       assertEntry(entry);
-      entries.set(entry.id, structuredClone(entry) as ExperienceEntry);
+      entries.set(entry.id, cloneExperienceValue(entry) as ExperienceEntry);
       persist();
     },
     get(id) {
@@ -311,4 +330,156 @@ export function replayExperience(ops: readonly ExperienceOp[]): ExperienceStore 
     store.put(op.entry);
   }
   return store;
+}
+
+export interface ExperienceScope {
+  readonly tenant: string;
+  readonly domain: string;
+  readonly mode: ResearchMode;
+  readonly realm: symbol;
+}
+
+export interface ExperienceScopeInput {
+  readonly tenant: string;
+  readonly domain: string;
+  readonly mode: ResearchMode;
+  readonly principal?: Principal;
+}
+
+/** T-13 realm 绑定：scope 只属于一个 tenant/domain/mode，principal 不得跨 space。 */
+export function createExperienceScope(input: ExperienceScopeInput): ExperienceScope {
+  if (input === null || typeof input !== "object") throw new Error("INVALID_EXPERIENCE_SCOPE");
+  for (const field of ["tenant", "domain"] as const) {
+    if (typeof input[field] !== "string" || input[field].length === 0) {
+      throw new Error(`INVALID_EXPERIENCE_SCOPE: ${field}`);
+    }
+  }
+  if (input.mode !== "live" && input.mode !== "replay") {
+    throw new Error("INVALID_EXPERIENCE_SCOPE: mode");
+  }
+  const realm = input.principal?.realm ?? realmForSpace(input.tenant);
+  if (
+    input.principal !== undefined &&
+    (input.principal.spaceId !== input.tenant || realm !== realmForSpace(input.tenant))
+  ) {
+    throw new Error("EXPERIENCE_SCOPE_MISMATCH: principal realm");
+  }
+  return Object.freeze({ tenant: input.tenant, domain: input.domain, mode: input.mode, realm });
+}
+
+function inScope(entry: ExperienceEntry, scope: ExperienceScope): boolean {
+  return (
+    entry.tenant === scope.tenant &&
+    entry.domain === scope.domain &&
+    entry.mode === scope.mode &&
+    entry.realm === scope.realm
+  );
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (value === null || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
+
+export interface ExperienceQueryWithTransfer extends ExperienceQuery {
+  readonly transferable?: boolean;
+}
+
+export interface ScopedExperienceLibrary {
+  readonly scope: ExperienceScope;
+  put(entry: ExperienceEntry): void;
+  get(id: string): ExperienceEntry | undefined;
+  all(): readonly ExperienceEntry[];
+  query(criteria: ExperienceQueryWithTransfer): readonly ExperienceEntry[];
+  frontier(metric: string): readonly ExperienceEntry[];
+  diff(a: string, b: string): ExperienceDiff;
+  snapshot(): string;
+}
+
+/** SE-H10：只读更早任务的经验，cue/lesson/evidence 齐全才可迁移。 */
+export function hasTransferableExperience(entry: ExperienceEntry): boolean {
+  return (
+    typeof entry.cue === "string" && entry.cue.length > 0 &&
+    typeof entry.lesson === "string" && entry.lesson.length > 0 &&
+    typeof entry.evidence === "string" && entry.evidence.length > 0
+  );
+}
+
+/**
+ * 不可变 ExperienceLibrary：条目深冻结、同 id 不可覆写；
+ * 每个 domain/mode/tenant 只看到自己的条目，检索覆盖全部历史而非最近一步。
+ */
+export function createExperienceLibrary(
+  store: ExperienceStore,
+  scope: ExperienceScope
+): ScopedExperienceLibrary {
+  if (scope === null || typeof scope !== "object" || typeof scope.realm !== "symbol") {
+    throw new Error("INVALID_EXPERIENCE_SCOPE");
+  }
+  const scopedEntries = (): readonly ExperienceEntry[] =>
+    store.all().filter((entry) => inScope(entry, scope));
+
+  return {
+    scope,
+    put(entry) {
+      if (!inScope(entry, scope)) throw new Error("EXPERIENCE_SCOPE_MISMATCH");
+      if (store.get(entry.id) !== undefined) throw new Error(`EXPERIENCE_IMMUTABLE: ${entry.id}`);
+      store.put(cloneExperienceValue(entry) as ExperienceEntry);
+      deepFreeze(store.get(entry.id));
+    },
+    get(id) {
+      const found = store.get(id);
+      return found !== undefined && inScope(found, scope) ? deepFreeze(found) : undefined;
+    },
+    all() {
+      return Object.freeze(scopedEntries().map((entry) => deepFreeze(entry)));
+    },
+    query(criteria) {
+      const transferable = criteria.transferable;
+      const base = store.query({ candidate: criteria.candidate, kind: criteria.kind, regex: criteria.regex });
+      return Object.freeze(
+        base
+          .filter(
+            (entry) =>
+              inScope(entry, scope) && (transferable !== true || hasTransferableExperience(entry))
+          )
+          .map((entry) => deepFreeze(entry))
+      );
+    },
+    frontier(metric) {
+      let best: number | undefined;
+      for (const entry of scopedEntries()) {
+        const value = entry.scores[metric];
+        if (typeof value === "number" && Number.isFinite(value)) {
+          best = best === undefined || value > best ? value : best;
+        }
+      }
+      if (best === undefined) return Object.freeze([]);
+      return Object.freeze(
+        scopedEntries().filter((entry) => entry.scores[metric] === best).map((entry) => deepFreeze(entry))
+      );
+    },
+    diff(a, b) {
+      const left = store.get(a);
+      const right = store.get(b);
+      if (left === undefined || right === undefined || !inScope(left, scope) || !inScope(right, scope)) {
+        throw new Error("EXPERIENCE_NOT_FOUND");
+      }
+      return store.diff(a, b);
+    },
+    snapshot() {
+      const ordered = [...scopedEntries()].sort((left, right) => left.id.localeCompare(right.id));
+      return stableStringify(ordered);
+    },
+  };
+}
+
+/** 非马尔可夫检索：按任意历史条件取回，可选仅保留可迁移条目。 */
+export function retrieveExperience(
+  library: ScopedExperienceLibrary,
+  criteria: ExperienceQueryWithTransfer
+): readonly ExperienceEntry[] {
+  return library.query(criteria);
 }
