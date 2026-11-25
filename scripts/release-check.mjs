@@ -1,8 +1,10 @@
 /**
- * T-27 发布候选校验：版本、架构、SBOM、迁移/回滚说明与平台冒烟证据。
+ * T-01 发布候选校验 v2：版本、架构、SBOM、迁移/回滚说明与平台冒烟证据。
  *
- * 只读取真实产物与已落盘报告；本机未覆盖的 target 记为 skipped，绝不写成 pass。
- * 运行：bun scripts/release-check.mjs
+ * v2 报告绑定 baseline commit、source tree hash、runId、buildCommand、generatedAt
+ * 与 worktreeClean；commit 来自 git 实测或 --baseline 显式传入，绝不硬编码。
+ * 本机未覆盖的 target 记为 skipped，绝不写成 pass。
+ * 运行：bun scripts/release-check.mjs [--baseline=<sha>] [--run-id=<id>]
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,6 +20,7 @@ import {
 } from "../packages/deploy/src/index.ts";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export const RELEASE_SCHEMA = "zeta-release/2";
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -124,7 +127,53 @@ function checkVersion(root, expected) {
   return { id: "version", status: ok ? "pass" : "fail", detail: `exit=${result.status} output=${output}` };
 }
 
-export async function buildReport(root = ROOT) {
+export function defaultRunGit(root = ROOT) {
+  return (args) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8", shell: false });
+    if (result.error !== undefined || result.status !== 0) {
+      throw new Error(`GIT_FAILED: ${args.join(" ")} (${result.error?.message ?? result.stderr?.trim() ?? result.status})`);
+    }
+    return result.stdout;
+  };
+}
+
+export function parseReleaseArgs(argv = []) {
+  let baseline;
+  let runId;
+  for (const arg of argv) {
+    if (arg.startsWith("--baseline=")) baseline = arg.slice("--baseline=".length);
+    else if (arg.startsWith("--run-id=")) runId = arg.slice("--run-id=".length);
+    else if (arg.startsWith("--")) throw new Error(`UNKNOWN_OPTION: ${arg}`);
+  }
+  return { baseline, runId };
+}
+
+export function collectReleaseBaseline(options = {}) {
+  const {
+    root = ROOT,
+    baselineArg,
+    runGit = defaultRunGit(root),
+  } = options;
+  const commit = (baselineArg ?? runGit(["rev-parse", "HEAD"])).trim();
+  if (commit.length === 0) throw new Error("RELEASE_BASELINE_COMMIT_UNAVAILABLE");
+  const ref = runGit(["rev-parse", "--abbrev-ref", "HEAD"]).trim() || "unknown";
+  const sourceTreeHash = runGit(["rev-parse", `${commit}^{tree}`]).trim();
+  if (sourceTreeHash.length === 0) throw new Error("RELEASE_SOURCE_TREE_HASH_UNAVAILABLE");
+  const status = runGit(["status", "--porcelain"]).trim();
+  return { ref, commit, sourceTreeHash, worktreeClean: status.length === 0 };
+}
+
+export async function buildReport(root = ROOT, options = {}) {
+  const {
+    baselineArg,
+    runIdArg,
+    runGit = defaultRunGit(root),
+    now = () => new Date(),
+    buildCommand = "bun run build",
+  } = options;
+  const baseline = collectReleaseBaseline({ root, baselineArg, runGit });
+  const timestamp = now().toISOString().replace(/[:.]/g, "-");
+  const runId = runIdArg || `zeta-release-${timestamp}-${baseline.commit.slice(0, 8)}`;
   const host = hostTargetLocal();
   const checks = [];
 
@@ -170,7 +219,14 @@ export async function buildReport(root = ROOT) {
     skipped: skippedTargets.length,
   };
   return {
-    generatedAt: new Date().toISOString(),
+    schema: RELEASE_SCHEMA,
+    generatedAt: now().toISOString(),
+    baselineCommit: baseline.commit,
+    baselineRef: baseline.ref,
+    sourceTreeHash: baseline.sourceTreeHash,
+    worktreeClean: baseline.worktreeClean,
+    runId,
+    buildCommand,
     version,
     hostTarget: host ?? "unknown",
     binarySha256: artifact.sha256,
@@ -181,11 +237,21 @@ export async function buildReport(root = ROOT) {
   };
 }
 
+export function exitCodeForReleaseReport(report) {
+  return report.summary.fail === 0 ? 0 : 1;
+}
+
 export function renderMarkdown(report) {
   const lines = [
-    "# 发布候选校验报告",
+    "# 发布候选校验报告（v2）",
     "",
+    `- Schema：\`${report.schema}\``,
     `- 生成时间：${report.generatedAt}`,
+    `- Run ID：\`${report.runId}\``,
+    `- 基线：${report.baselineRef} @ \`${report.baselineCommit}\``,
+    `- 源树哈希：\`${report.sourceTreeHash}\``,
+    `- 工作树干净：${report.worktreeClean ? "yes" : "no"}`,
+    `- 构建命令：\`${report.buildCommand}\``,
     `- 发布版本：zeta ${report.version}（来源 apps/zeta-cli/src/index.ts 的 VERSION 与二进制 --version 实测）`,
     `- 宿主 target：${report.hostTarget}`,
     `- 二进制 SHA-256：${report.binarySha256 || "未取得"}`,
@@ -208,18 +274,27 @@ export function renderMarkdown(report) {
   return lines.join("\n");
 }
 
-export async function main() {
-  const report = await buildReport();
-  const dir = join(ROOT, "reports");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "release-candidate.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  writeFileSync(join(dir, "release-candidate.md"), renderMarkdown(report), "utf8");
+export async function main(argv = process.argv.slice(2), deps = {}) {
+  const args = parseReleaseArgs(argv);
+  const {
+    root = ROOT,
+    reportDir = join(root, "reports"),
+    now = () => new Date(),
+    runGit = defaultRunGit(root),
+    writeText = (path, text) => writeFileSync(path, text, "utf8"),
+    mkdir = (path) => mkdirSync(path, { recursive: true }),
+  } = deps;
+  const report = await buildReport(root, { baselineArg: args.baseline, runIdArg: args.runId, now, runGit });
+  mkdir(reportDir);
+  writeText(join(reportDir, "release-candidate.json"), `${JSON.stringify(report, null, 2)}\n`);
+  writeText(join(reportDir, "release-candidate.md"), renderMarkdown(report));
   for (const item of report.checks) {
     console.log(`${item.status.toUpperCase()} ${item.id}: ${item.detail}`);
   }
+  console.log(`baseline=${report.baselineCommit} tree=${report.sourceTreeHash} run=${report.runId} clean=${report.worktreeClean}`);
   console.log(`SKIPPED 非宿主 target: ${report.skippedTargets.join(", ")}`);
   console.log(`release-check: pass=${report.summary.pass} fail=${report.summary.fail} skipped=${report.summary.skipped}`);
-  return report.summary.fail === 0 ? 0 : 1;
+  return exitCodeForReleaseReport(report);
 }
 
 if (import.meta.main) {

@@ -24,7 +24,7 @@
 
 这些 API 是 [framework-model/engineering §12 验收](../architecture/engineering.md#12-验收标准) 的落地手段。
 
-### 11.1 当前公开 API 与产品 profile（2026-11-25）
+### 11.1 当前公开 API 与产品 profile（2026-11-26，基线 `develop@af37607`）
 
 | 入口 | 公开 API | 说明 |
 | --- | --- | --- |
@@ -38,7 +38,9 @@
 
 - 共有：read/edit/find/grep/ls/powershell/write/bash 工具、skills registry、session store、interactive/json/print/rpc 四种 mode。
 - 仅 `local-full`：prompts registry、themes registry。
-- 默认不装配：研究轨、daemon/remote、跨进程对象；`remote` 通过显式 SDK 注入，且为 HTTP JSON-RPC + gRPC 风格状态码（非 wire-level gRPC）。
+- 默认不装配：研究轨、daemon/remote、跨进程对象；`remote` 通过显式 SDK 注入，默认仍是 HTTP JSON-RPC + gRPC 风格状态码。真实 wire-level gRPC transport 组件已存在（`packages/deploy/src/grpc.ts`），但完整 gRPC 控制面/remote 拓扑未完成（A30 不写 pass，T-24 后续）。
+- 四态口径：研究轨/MCP/压缩均处于“组件存在 + 显式可注入”，默认不启用；压缩只有 surface/血缘与专测，尚未投影到 provider 请求（AC-18 未完成）；MCP 的真实 OAuth token endpoint 与 stdio/socket 字节传输仍由宿主注入（AC-19 未完成）。以上均不写“验收通过”。
+- 当前基线 `develop@af37607`，acceptance v2 契约已冻结但尚未重跑，不宣称 40/40。
 
 CLI：`zeta`、`zeta --headless "提示词"`、`zeta --print`、`zeta --json`、`zeta --rpc`、`zeta --version`（返回 `zeta 0.1.0`）。发布与升级步骤见 [release-runbook.md](../delivery/release-runbook.md)。
 

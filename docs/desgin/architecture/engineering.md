@@ -164,7 +164,7 @@ flowchart TB
     GW --> SDK
 ```
 
-**实现状态（2026-11-25）**：local 单文件发布物由 `scripts/build-local.ts` 以 Bun compile 生成 12 target，manifest 记录 SHA-256 与主二进制/嵌入资源架构；daemon 为 HTTP + token + IPC heartbeat/autoRestart（`packages/deploy/src/daemon.ts`）；remote 提供 SDK 与远程 backend（`packages/deploy/src/remote.ts`），走 `/rpc` 的 HTTP JSON-RPC 并映射 gRPC 风格状态码，**不是 wire-level gRPC**（A30 待裁决）。readiness/liveness/configDigest 接真实 runtime/RPC，configDigest 由 `canonical.ts` 的 canonical encoding + SHA-256 生成。默认装配仅 local；daemon/remote 需显式启用。逐项状态见 [capability-matrix.md](../delivery/capability-matrix.md) 与 [release-runbook.md](../delivery/release-runbook.md)。
+**实现状态（2026-11-26，当前基线 `develop@af37607`）**：local 单文件发布物由 `scripts/build-local.ts` 以 Bun compile 生成 12 target，manifest 记录 SHA-256 与主二进制/嵌入资源架构；daemon 为 HTTP + token + IPC heartbeat/autoRestart（`packages/deploy/src/daemon.ts`）；remote 默认提供 SDK 与远程 backend（`packages/deploy/src/remote.ts`），走 `/rpc` 的 HTTP JSON-RPC 并映射 gRPC 风格状态码。真实 wire-level gRPC server/client 组件已存在于 `packages/deploy/src/grpc.ts`，但完整 gRPC 控制面/remote 拓扑未接线，A30 不写 pass（组件存在 ≠ 默认启用 ≠ 验收通过，T-24 后续）。readiness/liveness/configDigest 接真实 runtime/RPC，configDigest 由 `canonical.ts` 的 canonical encoding + SHA-256 生成。默认装配仅 local；daemon/remote 需显式启用。CI `release-matrix` 36 job 只做构建/静态校验，12 target 运行证据未完成（A36/T-24）。逐项状态见 [capability-matrix.md](../delivery/capability-matrix.md) 与 [release-runbook.md](../delivery/release-runbook.md)。
 
 **运营契约（以 coze 为反面教材）**：
 - 框架暴露 `AgentRuntime.readiness() / liveness() / configDigest()` seam，`--rpc` 可直接查询（coze 后端无探针、密钥明文注入）；

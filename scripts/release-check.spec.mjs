@@ -5,8 +5,14 @@ import { join } from "node:path";
 import { TARGETS } from "../packages/deploy/src/index.ts";
 import {
   ROOT,
+  RELEASE_SCHEMA,
+  buildReport,
+  collectReleaseBaseline,
   collectSkippedTargets,
+  exitCodeForReleaseReport,
   hostTargetLocal,
+  parseReleaseArgs,
+  renderMarkdown,
   verifyRunbook,
   verifySbomShape,
   versionFromSource,
@@ -79,5 +85,59 @@ describe("T-27 发布候选校验辅助函数", () => {
     const result = verifyGrpcWire();
     expect(result.ok).toBe(true);
     expect(result.detail).toContain("wire-level gRPC");
+  });
+});
+
+describe("T-01 release v2 绑定 baseline 与 source tree", () => {
+  const HEAD = "1234567890abcdef1234567890abcdef12345678";
+  const TREE = "tree1234567890abcdef1234567890abcdef1234";
+
+  function fakeGit() {
+    return (args) => {
+      if (args[0] === "rev-parse" && args[1] === "HEAD") return `${HEAD}\n`;
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return "feature/release\n";
+      if (args[0] === "rev-parse" && args[1].endsWith("^{tree}")) return `${TREE}\n`;
+      if (args[0] === "status") return "\n";
+      throw new Error(`unexpected git command: ${args.join(" ")}`);
+    };
+  }
+
+  test("显式 baseline 与 git 实测 tree 写入绑定字段", () => {
+    const baseline = collectReleaseBaseline({ baselineArg: HEAD, runGit: fakeGit() });
+    expect(baseline.commit).toBe(HEAD);
+    expect(baseline.sourceTreeHash).toBe(TREE);
+    expect(baseline.worktreeClean).toBe(true);
+    expect(parseReleaseArgs(["--baseline=" + HEAD, "--run-id=rr"])).toEqual({ baseline: HEAD, runId: "rr" });
+  });
+
+  test("未传 baseline 时从 HEAD 实测，不伪造当前 commit", () => {
+    expect(collectReleaseBaseline({ runGit: fakeGit() }).commit).toBe(HEAD);
+  });
+
+  test("buildReport 与 Markdown 均包含 baseline/tree/runId/buildCommand", async () => {
+    const report = await buildReport(ROOT, {
+      baselineArg: HEAD,
+      runIdArg: "release-run-1",
+      runGit: fakeGit(),
+      now: () => new Date("2026-11-26T01:02:03.000Z"),
+      buildCommand: "bun run build",
+    });
+    expect(report.schema).toBe(RELEASE_SCHEMA);
+    expect(report.baselineCommit).toBe(HEAD);
+    expect(report.sourceTreeHash).toBe(TREE);
+    expect(report.runId).toBe("release-run-1");
+    expect(report.buildCommand).toBe("bun run build");
+    expect(report.worktreeClean).toBe(true);
+    expect(report.generatedAt).toBe("2026-11-26T01:02:03.000Z");
+    const markdown = renderMarkdown(report);
+    expect(markdown).toContain(HEAD);
+    expect(markdown).toContain(TREE);
+    expect(markdown).toContain("release-run-1");
+    expect(markdown).toContain("bun run build");
+  });
+
+  test("fail 汇总退出码非零", () => {
+    expect(exitCodeForReleaseReport({ summary: { fail: 1 } })).toBe(1);
+    expect(exitCodeForReleaseReport({ summary: { fail: 0 } })).toBe(0);
   });
 });

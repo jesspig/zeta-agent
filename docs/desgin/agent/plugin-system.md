@@ -30,6 +30,8 @@ pi 的 `coding-agent` 把 agent-core + ai + tui + 扩展系统 + 内置工具 + 
 
 **核心命题**：pi 中已经插件化的东西（工具、provider、MCP、命令、渲染、事件、资源路径）继续是插件；pi 中**硬编码**的东西（内置工具、模式、CLI 子命令、压缩策略、会话存储、资源解析器）也改造为插件（[pi-baseline §8](../research/pi-baseline.md#8-已插件化-vs-仍硬编码)）。
 
+> **当前状态口径（2026-11-26，基线 `develop@af37607`）**：本文件的机制描述不等于当前验收结论。研究轨（§8）、MCP（§9）、压缩（§5.1）目前都只达到“组件存在 + 显式可注入”，默认不启用：MCP 的真实 OAuth token endpoint 与 stdio/socket 字节传输仍由宿主注入；压缩只在 `agent_end` 写 surface/血缘，尚未投影到 provider 请求；研究轨的两轮闭环与不可变证据库未完成。以上均不写“验收通过”。
+
 
 ## 2 插件清单与分类
 
@@ -244,7 +246,7 @@ stateDiagram-v2
 ## 9 MCP 与 provider 插件
 
 - MCP：pi 的 `createMcpExtension()` 把 MCP server 的工具注册为 `mcp__<server>__<tool>`，监听 `session_start/before_agent_start/tool_call/turn_start/mcp_servers_change/session_shutdown`（[pi-baseline §5.2](../research/pi-baseline.md)）。我们做成 `mcp` 插件：server 配置是一个 coeffect（`@zeta-agent/mcp:servers`），工具注册是逆可撤销的 effect，server 变化时工具自动重激活。
-  **实现状态（2026-11-25）**：`packages/agent/src/plugins/mcp/` 已实现 initialize/initialized 握手、JSON-RPC 取消与超时、stdio/HTTP+SSE/socket transport、OAuth grant（复用 T-14 CredentialBroker）、tools_changed generation/debounce、resources/prompts/roots 与 inputSchema/outputSchema 双结果投影；复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定。证据：`packages/agent/src/plugins/mcp/{protocol,transport,connection,oauth-grant,plugin-projection,conformance,mcp-e2e}.spec.ts`。MCP 默认不装配；真实 OAuth token endpoint 与 stdio/socket 字节传输仍由宿主注入，provider function-calling schema 对动态工具的投影按最终 active registry 生成。
+  **实现状态（historical，2026-11-25）**：`packages/agent/src/plugins/mcp/` 已实现 initialize/initialized 握手、JSON-RPC 取消与超时、stdio/HTTP+SSE/socket transport、OAuth grant（复用 T-14 CredentialBroker）、tools_changed generation/debounce、resources/prompts/roots 与 inputSchema/outputSchema 双结果投影；复用权限门禁、withhold/durable、egress 默认拒绝与 ExecutionBackend 会话绑定。证据：`packages/agent/src/plugins/mcp/{protocol,transport,connection,oauth-grant,plugin-projection,conformance,mcp-e2e}.spec.ts`。四态：组件存在 + 显式可注入，**默认不装配**，验收未通过（AC-19/T-19 未完成）；真实 OAuth token endpoint 与 stdio/socket 字节传输仍由宿主注入，provider function-calling schema 对动态工具的投影按最终 active registry 生成。
 - Provider：`registerProvider`/`registerNativeProvider`/`registerVirtualModel` 保留；底层走 `@zeta-agent/agent-framework` 的 `StreamFn` broker（[agent-framework §12](../agent-framework/state-and-events.md#12-模型服务作为-broker)）。模型目录由生成式 catalog + `accepts` 版本映射管理。
 
 

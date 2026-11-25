@@ -1,7 +1,7 @@
 # zeta-agent 设计文档集
 
 > **文档定位**：总入口。按 6 个主题目录组织，每个目录自带 `README.md` 索引。文档之间用相对链接交叉引用，并配有 UML 图（用例/类/组件/部署/对象/时序/活动/状态机）。
-> **检索截止**：2026-11-25（交付状态与发布证据复核）。**组织规范**：无数字前缀；每个子目录一个 `README.md`；文档颗粒度对齐（总览/机制/组件/API/取舍四档）。
+> **检索截止**：2026-11-26（当前基线 `develop@af37607`；T-01 的 acceptance/release 证据 v2 契约已冻结，尚未在该基线重跑全量 acceptance）。**组织规范**：无数字前缀；每个子目录一个 `README.md`；文档颗粒度对齐（总览/机制/组件/API/取舍四档）。
 
 ## 目录导航
 
@@ -132,7 +132,7 @@ flowchart TB
 1. 事实来源与分级 → [architecture/fact-registry.md](./architecture/fact-registry.md)
 2. 矛盾与未验证项 → [fact-registry.md §4/§5](./architecture/fact-registry.md#4-矛盾与争议显式并列)
 3. 验收判据 → [delivery/roadmap.md §4](./delivery/roadmap.md#4-验收标准)（A1–A40）
-4. 最终逐项结论 → 运行 `bun scripts/acceptance-report.mjs` 与 `bun scripts/release-check.mjs`；生成物位于被忽略的 `reports/`
+4. 最终逐项结论 → 运行 `bun scripts/acceptance-report.mjs` 与 `bun scripts/release-check.mjs`；生成物位于被忽略的 `reports/`。当前 v2 契约已冻结（T-01）但尚未在 `develop@af37607` 重跑，历史报告不作当前 40/40 结论
 5. 每条设计的交叉引用 → 各文档末尾"文档关系"表
 
 ## 待用户裁决的问题（汇总）
@@ -145,10 +145,10 @@ flowchart TB
 ## 交付状态
 
 - ✅ 文档集已按 6 目录重构；每目录带 README 索引；文档无数字前缀。
-- ✅ 交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。链接守护脚本实跑统计：35 文件 / 733 链接 / 490 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）。
+- ✅ 交叉引用按新路径重写；UML 图覆盖用例/类/组件/部署/对象/时序/活动/状态机。当前链接守护脚本实跑统计：36 文件 / 744 链接 / 492 锚点 / 0 断链 / 0 断锚（2026-11-26，以 `bun scripts/check_docs_links.mjs` 输出为准；35/733/490 为 2026-11-25 historical 数据）。
 - ✅ 事实来源 S1-S24 集中登记于 [fact-registry.md](./architecture/fact-registry.md)。
 - ✅ 7 个覆盖缺口已全部补齐：可观测性（observability.md）、安全+多租户（security.md）、自演化（recursive-self-evolution.md）、错误模型（security.md §8）、性能预算+部署拓扑+评测（engineering.md §9.1-9.3）、压缩/SSSM（plugin-system.md §5.1 + harness-optimization-papers.md）；并用 cordis 官方源码对照验证复刻设计（13 处纠正）。
 - ✅ 两篇新论文（Meta-Harness / 短上下文）补强经验检索 seam 与 typed recap 方案。
-- ✅ 阶段 0-6 的能力已落地并通过全量测试（1409 pass / 1 skip）：真实文件 HMR、对象运行时（含 SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 握手/OAuth/双结果投影、持久会话、ExecutionBackend、多租户 facade、daemon/remote 与研究轨四道护栏。
-- ⏳ 默认 profile 仍保持安全收敛：研究轨、daemon/remote、跨进程对象默认不装配；shell/sandbox 操作 unsupported 时失败关闭；remote 同时提供 HTTP JSON-RPC 与 wire-level gRPC transport。现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，逐项结论由 `bun scripts/acceptance-report.mjs` 生成。
-- ⏳ 本机仅 win32-x64 完成安装/启动/升级/回滚冒烟；其余 11 个 target 为 skipped，需 CI 三平台矩阵补证；release-age 的 3 个过新依赖按用户裁决接受为已知风险。发布校验见 [release-runbook.md](./delivery/release-runbook.md)。
+- ✅ **组件存在/显式可注入**（不等于默认启用或验收通过）：真实文件 HMR、对象运行时最小集（SQLite/WAL/outbox、IPC/WS、jobs/derive/rollout）、MCP 握手/OAuth/双结果投影、持久会话、ExecutionBackend、多租户 facade、daemon/remote 与研究轨四道护栏均有组件与专测。当前 CI 证据为 1421 pass / 1 skip / 287 files（historical，2026-11-26 记录于 `develop@af37607`）；1409 pass / 1 skip 为更早 historical 数据。
+- ⏳ 默认 profile 仍保持安全收敛：研究轨、daemon/remote、跨进程对象默认不装配；shell/sandbox 默认 unsupported 且失败关闭，真实隔离执行器未完成（T-13），不得写 pass。remote 默认走 HTTP JSON-RPC；真实 wire-level gRPC transport 组件已存在（`packages/deploy/src/grpc.ts`），但完整 gRPC 控制面/remote 拓扑未完成（T-24 后续）。现状以 [delivery/capability-matrix.md](./delivery/capability-matrix.md) 为准，逐项结论须由当前基线的 `bun scripts/acceptance-report.mjs` 重跑生成（尚未重跑，不宣称 40/40）。
+- ⏳ 本机仅 win32-x64 跑过生命周期；CI `release-matrix` 36 job（3 OS × 12 target）只做构建与静态校验，其余 11 target 无运行证据（A36 未完成，T-24）。release-age 的 3 个过新依赖为 historical 已知风险。发布校验见 [release-runbook.md](./delivery/release-runbook.md)。

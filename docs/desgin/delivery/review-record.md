@@ -49,7 +49,7 @@
 
 ## 5 复核结果
 
-- 机械校验：链接守护脚本实跑统计 34 文件 / 727 链接 / 486 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）；另 0 章节错指 / 0 旧数字残留。
+- 机械校验（historical，2026-11-20）：链接守护脚本实跑统计 34 文件 / 727 链接 / 486 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）；另 0 章节错指 / 0 旧数字残留。当前统计为 36 文件 / 744 链接 / 492 锚点。
 - 结论：P0 全部修复，阶段 0-1 的开工阻断已消除；P1/P2 剩余项为文档打磨，可在开发并行处理。
 
 ## 6 设计漂移修复轮（2026-11-20）
@@ -64,7 +64,7 @@
 | 工程收尾 | 根 README / index.ts 去除 bun init 残留；TUI 设计文档标注唯一实现 + 公开 seam；overview 标注 exports 落地状态 | AC-09 / AC-10 |
 
 - 零回归：核心语义既有测试全绿（234 → 253 pass，0 fail）；全量 `bun run build/typecheck/test` 与 `tsc --noEmit` 全绿。
-- 链接复核：`scripts/check_docs_links.mjs`（GitHub slug 规则）实跑统计 34 文件 / 727 链接 / 486 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）；修复了 8 处历史遗留错锚（跨文档章节号误用纯锚点）。
+- 链接复核（historical，2026-11-20）：`scripts/check_docs_links.mjs`（GitHub slug 规则）实跑统计 34 文件 / 727 链接 / 486 锚点 / 0 断链 / 0 断锚（以 `bun scripts/check_docs_links.mjs` 输出为准）；修复了 8 处历史遗留错锚（跨文档章节号误用纯锚点）。
 - 历史归档：上一轮 `.handoff` 快照只读保留于 `.handoff/archive/2026-11-20-1659-zeta-agent-harness/`（85 文件 + manifest）。
 
 **总索引**：[README.md](../README.md)
@@ -151,8 +151,8 @@
 - **对象运行时延后项**：IPC / WS / SQLite / group commit / outbox / host / facet / Reference / rollout 在 2026-11-23 批次中未实现；现已纳入完整系统后续阶段，不再作为永久不实现项。
 - **研究轨边界**：promotion / experience / fitness 与四道护栏均为可选 seam，不进入默认装配，默认仍为 no-op seam；仅在具备可重放任务与评估器时启用。
 
-### 8.4 2026-11-25 复核结论
+### 8.4 2026-11-25 复核结论（historical）
 
-- 上表 8.1/8.3 的“尚未升级 / 尚未接线 / 延后未实现”均为 2026-11-23 的历史口径；T-08/T-09/T-14/T-15/T-18/T-19/T-24/T-25 已逐项落地并通过专测，当前状态以 [capability-matrix.md](./capability-matrix.md) 为准。
-- 安全维度仍保持失败关闭：无真实隔离执行器时 shell/seccomp 一律 unsupported；egress 默认拒绝；凭证不持明文；审计显式 sink 可签名/封存。
-- 发布与平台：本机仅 win32-x64 完成安装/启动/升级/回滚；wire-level gRPC 已补齐并通过 A30，11 个非宿主 target 仍使 A36 fail，需 CI 三平台补证；逐项结论由 `bun scripts/acceptance-report.mjs` 生成。
+- 上表 8.1/8.3 的“尚未升级 / 尚未接线 / 延后未实现”均为 2026-11-23 的历史口径；T-08/T-09/T-14/T-15/T-18/T-19 有组件与专测。T-24（12 target 运行态）与 T-25（最终验收）属本轮未完成项，不得写入“已逐项落地”。当前状态以 [capability-matrix.md](./capability-matrix.md) 为准。
+- 安全维度仍保持失败关闭：无真实隔离执行器时 shell/seccomp 一律 unsupported；egress 默认拒绝；凭证不持明文；审计显式 sink 可签名/封存。真实隔离执行器未完成（T-13），不写 pass。
+- 发布与平台（historical，2026-11-25）：本机仅 win32-x64 完成安装/启动/升级/回滚。wire-level gRPC server/client 组件已存在（`packages/deploy/src/grpc.ts`），但“通过 A30”不是当前结论：默认 remote 仍 HTTP，完整控制面未完成；A36 的 CI 36 job 只做构建/静态校验，12 target 运行证据未完成。当前基线为 `develop@af37607`，acceptance v2 尚未重跑，逐项结论不得沿用历史报告当作当前 40/40。
