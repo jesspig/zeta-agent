@@ -30,12 +30,18 @@ function run(cmd, args) {
 }
 
 const bunTest = run("bun", ["test"]);
-if (bunTest.code !== 0) fail(`bun test 退出码非 0: ${bunTest.code}`);
+if (bunTest.code !== 0) {
+  console.error(bunTest.out);
+  fail(`bun test 退出码非 0: ${bunTest.code}`);
+}
 
 const passMatch = /(\d+)\s+pass/.exec(bunTest.out);
 const failMatch = /(\d+)\s+fail/.exec(bunTest.out);
 const filesMatch = /Ran\s+\d+\s+tests across\s+(\d+)\s+files/.exec(bunTest.out);
-if (!passMatch || !failMatch || !filesMatch) fail("无法从 bun test 输出解析 pass/fail/files");
+if (!passMatch || !failMatch || !filesMatch) {
+  console.error(bunTest.out);
+  fail("无法从 bun test 输出解析 pass/fail/files");
+}
 
 const current = {
   pass: Number(passMatch[1]),
@@ -50,9 +56,15 @@ if (current.pass < BASELINE.pass) fail(`通过数低于基线: ${current.pass} <
 if (current.files < BASELINE.files) fail(`测试文件数低于基线: ${current.files} < ${BASELINE.files}`);
 
 const turboTest = run("bun", ["x", "turbo", "run", "test"]);
-if (turboTest.code !== 0) fail(`turbo run test 退出码非 0: ${turboTest.code}`);
+if (turboTest.code !== 0) {
+  console.error(turboTest.out);
+  fail(`turbo run test 退出码非 0: ${turboTest.code}`);
+}
 for (const pkg of CORE_PACKAGES) {
-  if (!turboTest.out.includes(pkg)) fail(`turbo run test 输出缺少核心包: ${pkg}`);
+  if (!turboTest.out.includes(pkg)) {
+    console.error(turboTest.out);
+    fail(`turbo run test 输出缺少核心包: ${pkg}`);
+  }
 }
 
 console.log("PASS 核心语义零回归：通过数/文件数不低于基线，核心包测试均存在且全绿");

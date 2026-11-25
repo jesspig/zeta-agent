@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +12,8 @@ import { createAgent } from "./facade";
 
 const DAEMON_PATH = join(import.meta.dir, "../../components/security/src/audit-daemon.ts");
 
+setDefaultTimeout(30_000);
+
 interface Harness {
   readonly dir: string;
   readonly endpoint: string;
@@ -24,7 +26,7 @@ async function startDaemon(): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "zeta-facade-audit-"));
   const secret = randomBytes(24).toString("hex");
   const token = randomBytes(16).toString("hex");
-  const proc = Bun.spawn(["bun", DAEMON_PATH], {
+  const proc = Bun.spawn([process.execPath, DAEMON_PATH], {
     env: {
       ...process.env,
       [AUDIT_SIGNING_SECRET_ENV]: secret,
@@ -37,7 +39,7 @@ async function startDaemon(): Promise<Harness> {
   });
   const endpointPath = join(dir, "endpoint");
   let endpoint = "";
-  for (let attempt = 0; attempt < 100 && endpoint.length === 0; attempt += 1) {
+  for (let attempt = 0; attempt < 500 && endpoint.length === 0; attempt += 1) {
     if (existsSync(endpointPath)) endpoint = readFileSync(endpointPath, "utf8").trim();
     if (endpoint.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
   }

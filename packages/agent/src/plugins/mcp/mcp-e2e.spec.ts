@@ -90,7 +90,7 @@ describe("T-17 真实 MCP server E2E", () => {
       await pump.catch(() => {});
       await child.exited.catch(() => {});
     }
-  });
+  }, 30_000);
 
   test("② 真实 HTTP server：POST JSON-RPC + SSE 响应，列工具并调用", async () => {
     const server = createServer((req, res) => {

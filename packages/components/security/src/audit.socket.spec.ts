@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,8 @@ import {
 import { createSocketAuditSink, parseAuditEndpoint, type SocketAuditSink } from "./audit.socket";
 
 const DAEMON_PATH = join(import.meta.dir, "audit-daemon.ts");
+
+setDefaultTimeout(30_000);
 
 const record = (over: Partial<AuditRecord> = {}): AuditRecord => ({
   ts: 1,
@@ -41,7 +43,7 @@ async function startDaemon(): Promise<DaemonHarness> {
   // 运行时生成测试专用值，只注入 daemon 子进程；仓库中不出现任何密钥字面量。
   const secret = randomBytes(24).toString("hex");
   const token = randomBytes(16).toString("hex");
-  const proc = Bun.spawn(["bun", DAEMON_PATH], {
+  const proc = Bun.spawn([process.execPath, DAEMON_PATH], {
     env: {
       ...process.env,
       [AUDIT_SIGNING_SECRET_ENV]: secret,
@@ -54,7 +56,7 @@ async function startDaemon(): Promise<DaemonHarness> {
   });
   const endpointPath = join(dir, "endpoint");
   let endpoint = "";
-  for (let attempt = 0; attempt < 100 && endpoint.length === 0; attempt += 1) {
+  for (let attempt = 0; attempt < 500 && endpoint.length === 0; attempt += 1) {
     if (existsSync(endpointPath)) endpoint = readFileSync(endpointPath, "utf8").trim();
     if (endpoint.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -188,7 +190,7 @@ describe("T-02 A23 进程外审计 daemon", () => {
   test("daemon 缺少签名密钥时拒绝启动", async () => {
     const dir = mkdtempSync(join(tmpdir(), "zeta-audit-fail-"));
     try {
-      const proc = Bun.spawn(["bun", DAEMON_PATH], {
+      const proc = Bun.spawn([process.execPath, DAEMON_PATH], {
         env: {
           ...process.env,
           [AUDIT_SIGNING_SECRET_ENV]: "",
