@@ -39,11 +39,16 @@ export function writeGates(name, gates) {
   return writeJson(`reports/gates-${name}.json`, gates);
 }
 
+export function evidenceFileName(id) {
+  return `${id.replaceAll(/[^a-zA-Z0-9._-]/g, "-")}.txt`;
+}
+
 export function writeEvidence(id, text) {
-  const target = join(evidenceDir, `${id}.txt`);
+  const file = evidenceFileName(id);
+  const target = join(evidenceDir, file);
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, text, "utf8");
-  return `reports/evidence/${id}.txt`;
+  return `reports/evidence/${file}`;
 }
 
 export function readConfig() {
