@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertPromotionBody, assertPromotionSeal, type PromotionSeal } from "./seal";
 
 export type PromotionArtifact = string | Uint8Array;
 
@@ -6,11 +7,18 @@ export interface Candidate {
   readonly id: string;
   readonly fitness: number;
   readonly qualified: boolean;
+  /** 只有晋升 pipeline 能签发；裸候选无法调用 promote 及其变体。 */
+  readonly seal: PromotionSeal;
   /** 可选观察等价指纹；未注入时默认晋升路径保持原状。 */
   readonly fingerprint?: string;
 }
 
-export type PromotionRejectionReason = "digest-mismatch";
+export type PromotionRejectionReason =
+  | "digest-mismatch"
+  | "held-out-below-threshold"
+  | "pareto-dominated"
+  | "regression-failed"
+  | "not-strictly-better";
 
 export interface PromotionDecision {
   readonly candidate: Candidate;
@@ -27,6 +35,13 @@ export interface PromotionState {
 
 function assertCandidate(candidate: Candidate): void {
   if (candidate === null || typeof candidate !== "object") throw new Error("INVALID_CANDIDATE");
+  assertPromotionSeal(candidate.seal);
+  assertPromotionBody(candidate.seal, {
+    id: candidate.id,
+    fitness: candidate.fitness,
+    qualified: candidate.qualified,
+    fingerprint: candidate.fingerprint,
+  });
   if (typeof candidate.id !== "string" || candidate.id.length === 0) {
     throw new Error("INVALID_CANDIDATE: id required");
   }
@@ -69,6 +84,27 @@ function applyPromotion(
   });
   return Object.freeze({
     incumbent: nextIncumbent,
+    history: Object.freeze([...state.history, decision]),
+  });
+}
+
+/** 只记录拒绝，不改变 incumbent；同样要求 pipeline 签发的 seal。 */
+export function recordPromotionRejection(
+  state: PromotionState,
+  candidate: Candidate,
+  reason: PromotionRejectionReason,
+  digest?: string
+): PromotionState {
+  assertCandidate(candidate);
+  const decision: PromotionDecision = Object.freeze({
+    candidate,
+    promoted: false,
+    fitness: state.incumbent?.fitness ?? 0,
+    reason,
+    ...(digest === undefined ? {} : { digest }),
+  });
+  return Object.freeze({
+    incumbent: state.incumbent,
     history: Object.freeze([...state.history, decision]),
   });
 }

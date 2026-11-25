@@ -1,6 +1,5 @@
 export * from "./plugins/effects/durable";
-export * from "./research/frozen";
-export * from "./research/decision";
+export * from "./research/index";
 export * from "./plugins/permissions/guard";
 export * from "./plugins/permissions/policy";
 export * from "./plugins/permissions/approval";
