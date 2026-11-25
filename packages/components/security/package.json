@@ -4,8 +4,17 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./backend": "./src/backend.ts",
+    "./credentials": "./src/credentials.ts",
+    "./egress": "./src/egress.ts",
+    "./audit": "./src/audit.ts",
+    "./vault": "./src/vault.ts",
+    "./types": "./src/types.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
-    "@zeta-agent/framework": "workspace:*",
     "@zeta-agent/cordis": "workspace:*"
   },
   "scripts": {

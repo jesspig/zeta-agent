@@ -8,7 +8,7 @@ const node = "node";
 const bun = "bun";
 
 const facades = {
-  framework: ["./types", "./package.json"],
+  framework: ["./types", "./context", "./events", "./observability", "./loader", "./objects", "./package.json"],
   "agent-framework": [
     "./types", "./runtime/agent", "./runtime/loop", "./session/surface",
     "./tools/pipeline", "./plugins/manager", "./plugins/hook-chain",
@@ -75,10 +75,16 @@ for (const [name, subpaths] of Object.entries(facades)) {
 // [consumer, specifiers, 期望命名导出映射]：不仅验证路径可解析，还验证实际导入与关键命名导出。
 const importChecks = [
   ["agent", [
-    "@zeta-agent/framework", "@zeta-agent/framework/types", "@zeta-agent/framework/package.json",
+    "@zeta-agent/framework", "@zeta-agent/framework/types", "@zeta-agent/framework/context",
+    "@zeta-agent/framework/events", "@zeta-agent/framework/observability",
+    "@zeta-agent/framework/package.json",
     "@zeta-agent/agent/providers/openai-responses", "@zeta-agent/agent/providers/model-discovery",
     "@zeta-agent/agent/providers/models-dev", "@zeta-agent/agent/providers/model-catalog",
   ], {
+    "@zeta-agent/framework": ["createContext", "defineKey", "defineRegistry", "createEventBus", "createEffectBridge"],
+    "@zeta-agent/framework/context": ["createContext", "CONTEXT_DISPOSED"],
+    "@zeta-agent/framework/events": ["createEventBus"],
+    "@zeta-agent/framework/observability": ["createLogger", "createEffectBridge"],
     "@zeta-agent/agent/providers/openai-responses": ["createOpenAiResponsesStreamFn"],
     "@zeta-agent/agent/providers/model-discovery": ["fetchModelIds"],
     "@zeta-agent/agent/providers/model-catalog": ["decorateModels"],

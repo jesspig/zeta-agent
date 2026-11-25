@@ -9,11 +9,16 @@
     "./context": "./src/context.ts",
     "./objects": "./src/objects/index.ts",
     "./loader": "./src/loader/index.ts",
+    "./events": "./src/events.ts",
+    "./observability": "./src/observability.ts",
     "./types": "./src/types.ts",
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@zeta-agent/cordis": "workspace:*"
+    "@zeta-agent/cordis": "workspace:*",
+    "@zeta-agent/loader": "workspace:*",
+    "@zeta-agent/events": "workspace:*",
+    "@zeta-agent/observability": "workspace:*"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",

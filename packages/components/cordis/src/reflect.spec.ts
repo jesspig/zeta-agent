@@ -1,17 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import type { CoeffectKey } from "./types";
+import type { CoeffectKey, Impl } from "./types";
 import {
   CAPABILITY_EXPIRED,
+  INACTIVE_ACCESS,
   UNDECLARED_ACCESS,
+  bindRealm,
+  bindResolver,
   commit,
   createNode,
   createProxy,
   get,
+  getCommitted,
   intercept,
   isolate,
+  metadataOf,
+  keyRealm,
   set,
 } from "./reflect";
-import { key } from "./fiber";
+import { FiberSystem, key } from "./fiber";
 
 const svc = key<string>("svc");
 
@@ -85,5 +91,92 @@ describe("coeffect 反射", () => {
     const proxy = createProxy<{ [k: symbol]: unknown }>(node);
     expect(proxy[svc.symbol]).toBe("v");
     expect(() => proxy[Symbol("undeclared")]).toThrow(UNDECLARED_ACCESS);
+  });
+
+  test("T-04 非严格 get 查询不抛错，严格访问保持显式拒绝", () => {
+    const undeclared = createNode("root", null, []);
+    expect(get(undeclared, svc, false)).toBeUndefined();
+
+    const declared = createNode("declared", null, [svc]);
+    expect(get(declared, svc, false)).toBeUndefined();
+
+    commit(declared, svc, "secret", Symbol("default"), () => false);
+    expect(get(declared, svc, false)).toBeUndefined();
+    expect(() => get(declared, svc)).toThrow(CAPABILITY_EXPIRED);
+  });
+
+  test("T-04 Proxy 门禁只按 committed view 解析，裸 store 不可见", () => {
+    const node = createNode("root", null, [svc]);
+    const proxy = createProxy<{ [k: symbol]: unknown }>(node);
+    const restore = set(node, svc, "raw-store");
+    expect(get(node, svc)).toBe("raw-store");
+    expect(() => getCommitted(node, svc)).toThrow(INACTIVE_ACCESS);
+    expect(() => proxy[svc.symbol]).toThrow(INACTIVE_ACCESS);
+    restore();
+
+    commit(node, svc, "committed");
+    expect(getCommitted(node, svc)).toBe("committed");
+    expect(proxy[svc.symbol]).toBe("committed");
+  });
+
+  test("T-04 isolate per-key realm：派生键隔离，其他键仍解析父 realm", async () => {
+    const other = key<string>("other");
+    const parent = createNode("parent", null, [svc, other]);
+    const rootRealm = Symbol("root-realm");
+    const childRealm = Symbol("child-realm");
+    bindRealm(parent, rootRealm);
+    const system = new FiberSystem();
+    bindResolver(parent, (candidate, realm) => system.committedFor(candidate, realm));
+    const provider = system.create({
+      uid: "root-provider",
+      inject: [],
+      provide: [svc, other],
+      realm: rootRealm,
+      values: new Map<symbol, unknown>([
+        [svc.symbol, "root-svc"],
+        [other.symbol, "root-other"],
+      ]),
+    });
+    await provider.refresh();
+
+    const derived = isolate(parent, svc, childRealm);
+    expect(keyRealm(derived, svc)).toBe(childRealm);
+    expect(keyRealm(derived, other)).toBe(rootRealm);
+    expect(() => get(derived, svc)).toThrow(INACTIVE_ACCESS);
+    expect(get(derived, other)).toBe("root-other");
+  });
+
+  test("T-04 Impl generation 可观察，对象 metadata 参与 provider consult", () => {
+    const node = createNode("root", null, [svc]);
+    let allowed = true;
+    let consulted: unknown;
+    const impl: Impl = {
+      uid: "provider",
+      value: "service",
+      dependents: new Set<string>(),
+      isolate: Symbol("realm"),
+      generation: 7,
+      consult: (metadata) => {
+        consulted = metadata;
+        return allowed;
+      },
+    };
+    node.committed.set(svc, impl);
+    expect(impl.generation).toBe(7);
+    expect(get(node, svc)).toBe("service");
+    expect(consulted).toBeUndefined();
+
+    const scoped = intercept(node, svc, { allow: true });
+    expect(metadataOf(scoped, svc)).toEqual({ allow: true });
+    expect(get(scoped, svc)).toBe("service");
+    expect(consulted).toEqual({ allow: true });
+
+    allowed = false;
+    expect(() => get(scoped, svc)).toThrow(CAPABILITY_EXPIRED);
+
+    // 函数 metadata 保持 transform 兼容，不走 consult。
+    const transformed = intercept(node, svc, (value) => `${String(value)}!`);
+    expect(metadataOf(transformed, svc)).toBeUndefined();
+    expect(get(transformed, svc)).toBe("service!");
   });
 });

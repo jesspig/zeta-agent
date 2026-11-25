@@ -1,4 +1,4 @@
-import type { FiberId } from "@zeta-agent/framework";
+import type { FiberId } from "@zeta-agent/cordis/types";
 
 export interface JsExpr {
   readonly __jsExpr: string;
@@ -102,6 +102,52 @@ export function childId(parent: Entry, child: Entry): string {
   assertEntry(parent);
   assertEntry(child);
   return `${parent.id}:${child.id}`;
+}
+
+/** 递归展开后的 keyed entry：group 本身不装配，子项以 `parent:child` 为稳定 key。 */
+export interface FlatEntry {
+  readonly entry: Entry;
+  readonly parent?: string;
+  readonly group?: string;
+}
+
+/**
+ * group 递归展开为扁平 keyed entry。父级的 isolate/inject/disabled 作为缺省继承给子项，
+ * 子项显式声明优先；这样 group 内的增删只影响对应 key，不重建整个组。
+ */
+export function flattenEntries(entries: readonly Entry[]): readonly FlatEntry[] {
+  const flat: FlatEntry[] = [];
+  const visit = (entry: Entry, parent?: string, group?: string): void => {
+    assertEntry(entry);
+    if (isGroup(entry)) {
+      for (const child of subEntries(entry)) {
+        const inherited: Entry = {
+          ...child,
+          id: childId(entry, child),
+          isolate: { ...entry.isolate, ...child.isolate },
+          ...(entry.inject !== undefined && child.inject === undefined ? { inject: entry.inject } : {}),
+          ...(entry.disabled !== undefined && child.disabled === undefined ? { disabled: entry.disabled } : {}),
+        };
+        visit(inherited, entry.id, group ?? entry.id);
+      }
+      return;
+    }
+    flat.push({
+      entry,
+      ...(parent === undefined ? {} : { parent }),
+      ...(group === undefined ? {} : { group }),
+    });
+  };
+  for (const entry of entries) visit(entry);
+  return flat;
+}
+
+/** inject 的两种写法归一为服务名列表，供 key 解析器真实参与装配。 */
+export function injectedServices(entry: Entry): readonly string[] {
+  const inject = entry.inject;
+  if (inject === undefined) return [];
+  if (Array.isArray(inject)) return [...inject];
+  return Object.values(inject);
 }
 
 export function isolateValue(entry: Entry, service: string): true | string | undefined {

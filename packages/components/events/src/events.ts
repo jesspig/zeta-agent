@@ -1,4 +1,4 @@
-import type { Disposer } from "@zeta-agent/cordis/types";
+import type { Disposer, FiberContext } from "@zeta-agent/cordis/types";
 import type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener } from "./types";
 
 export type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener } from "./types";
@@ -6,6 +6,8 @@ export type { DispatchOptions, EventBus, EventName, Listener, WaterfallListener 
 export interface EventBusOptions {
   /** 同步 emit 的监听器失败（含异步拒绝）出口；未提供时仅吞掉，避免未处理拒绝。 */
   readonly onError?: (error: unknown) => void;
+  /** 提供时 listener 注册走 ctx.effect，宿主组件卸载即自动注销。 */
+  readonly ctx?: Pick<FiberContext, "effect">;
 }
 
 export function createEventBus(options: EventBusOptions = {}): EventBus {
@@ -20,13 +22,15 @@ export function createEventBus(options: EventBusOptions = {}): EventBus {
     const bucket = listeners.get(name) ?? [];
     bucket.push(entry);
     listeners.set(name, bucket);
-    return () => {
+    const detach: Disposer = () => {
       const current = listeners.get(name) ?? [];
       listeners.set(
         name,
         current.filter((item) => item !== entry)
       );
     };
+    // 宿主 ctx.effect 是唯一注册入口：组件卸载时逆自动执行，不留悬挂监听。
+    return options.ctx ? options.ctx.effect(() => detach) : detach;
   }
 
   function matching(name: EventName, opts?: DispatchOptions): Listener<EventName>[] {
@@ -60,13 +64,24 @@ export function createEventBus(options: EventBusOptions = {}): EventBus {
       if (errors.length > 0) throw new AggregateError(errors, `event ${name} parallel 失败`);
     },
     async serial(name, payload, opts) {
-      for (const listener of matching(name, opts)) await listener(payload);
+      for (const listener of matching(name, opts)) {
+        const result = await listener(payload);
+        // false/null/undefined 是"继续"信号；其余返回值立即作为串行结果返回。
+        if (result !== false && result !== null && result !== undefined) return result;
+      }
+      return undefined;
     },
     async bail(name, payload, opts) {
+      let bailed = false;
       for (const listener of matching(name, opts)) {
-        if (await listener(payload)) return true;
+        const result = await listener(payload);
+        // 显式判定：0 与空字符串也算 bailed，只有 false/null/undefined 继续。
+        if (result !== false && result !== null && result !== undefined) {
+          bailed = true;
+          break;
+        }
       }
-      return false;
+      return bailed;
     },
     async waterfall(name, payload, opts) {
       let current: unknown = payload;
@@ -77,6 +92,7 @@ export function createEventBus(options: EventBusOptions = {}): EventBus {
           advanced = true;
           current = value;
         });
+        // 不调用 next 就不推进；listener 的返回值不改变 current。
       }
       return current as never;
     },

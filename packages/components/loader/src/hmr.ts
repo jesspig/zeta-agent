@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
-import type { FiberId } from "@zeta-agent/framework";
+import type { FiberId } from "@zeta-agent/cordis/types";
 
 /**
  * 组件级 unit 快照恢复的最小原语（遗留兼容入口）。
@@ -139,19 +139,39 @@ export interface HmrWatcher {
   flush(): Promise<HmrResult>;
   ready(): Promise<void>;
   failed(): readonly string[];
+  /** auto watcher 的 flush 拒绝出口：异步失败不产生未处理 Promise。 */
+  errors(): readonly unknown[];
   stateOf(id: FiberId): UnitState | undefined;
   close(): void;
 }
 
-const inTransaction = new AsyncLocalStorage<boolean>();
-let queueTail: Promise<unknown> = Promise.resolve();
+/** 事务队列按 controller/watcher 实例隔离，避免一个实例的在途事务阻塞另一个实例。 */
+export interface ExclusiveQueue {
+  run<T>(fn: () => T | Promise<T>): Promise<T>;
+  ready(): Promise<void>;
+}
+
+export function createExclusiveQueue(): ExclusiveQueue {
+  const inTransaction = new AsyncLocalStorage<boolean>();
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    run<T>(fn: () => T | Promise<T>) {
+      if (inTransaction.getStore() === true) return Promise.reject(new Error("HMR_NESTED"));
+      const run = (): Promise<T> => inTransaction.run(true, async () => await fn());
+      const result = tail.then(run, run);
+      tail = result.then(() => undefined, () => undefined);
+      return result;
+    },
+    async ready() {
+      await tail;
+    },
+  };
+}
+
+const sharedQueue = createExclusiveQueue();
 
 export function runExclusive<T>(fn: () => T | Promise<T>): Promise<T> {
-  if (inTransaction.getStore() === true) return Promise.reject(new Error("HMR_NESTED"));
-  const run = (): Promise<T> => inTransaction.run(true, async () => await fn());
-  const result = queueTail.then(run, run);
-  queueTail = result.then(() => undefined, () => undefined);
-  return result;
+  return sharedQueue.run(fn);
 }
 
 function matchesFile(item: UnitRef, changedFiles: readonly string[]): boolean {
@@ -170,6 +190,8 @@ export function watch(root: string, opts: HmrOptions): HmrWatcher {
   const dirty = new Set<string>();
   const states = new Map<FiberId, UnitState>();
   const failedUnits = new Set<FiberId>();
+  const errors: unknown[] = [];
+  const queue = createExclusiveQueue();
   let fsWatcher: FSWatcher | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -255,7 +277,7 @@ export function watch(root: string, opts: HmrOptions): HmrWatcher {
   }
 
   function flush(): Promise<HmrResult> {
-    return runExclusive(transaction);
+    return queue.run(transaction);
   }
 
   if (opts.auto === true) {
@@ -265,7 +287,7 @@ export function watch(root: string, opts: HmrOptions): HmrWatcher {
       markDirty([filename]);
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
-        void flush();
+        void flush().catch((error: unknown) => errors.push(error));
       }, opts.debounceMs ?? 100);
     });
   }
@@ -276,9 +298,10 @@ export function watch(root: string, opts: HmrOptions): HmrWatcher {
     markDirty,
     flush,
     ready: async () => {
-      await queueTail;
+      await queue.ready();
     },
     failed: () => [...failedUnits],
+    errors: () => [...errors],
     stateOf: (id) => states.get(id),
     close: () => {
       if (debounce) clearTimeout(debounce);

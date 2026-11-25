@@ -39,6 +39,84 @@ const isModuleStatementLine = (line) =>
 
 const opentuiBusinessModules = new Set(["slots.ts", "signal.ts", "virtual.ts", "hud.ts", "frame-state.ts", "backend.ts"]);
 
+// 组件包只能依赖组件包；facade/聚合包是它的上游，不允许反向依赖。
+function componentPackageNames(workspaceRoot) {
+  const names = new Set();
+  const componentDir = join(workspaceRoot, "packages", "components");
+  for (const file of walk(componentDir, (item) => item.endsWith(`${sep}package.json`))) {
+    if (relative(componentDir, dirname(file)).split(sep).length !== 1) continue;
+    const manifest = JSON.parse(readFileSync(file, "utf8"));
+    if (typeof manifest.name === "string") names.add(manifest.name);
+  }
+  return names;
+}
+
+export function findComponentFacadeDependencies(workspaceRoot = root) {
+  const violations = [];
+  const components = componentPackageNames(workspaceRoot);
+  const componentDir = join(workspaceRoot, "packages", "components");
+  for (const file of walk(componentDir, (item) => item.endsWith(`${sep}package.json`))) {
+    if (relative(componentDir, dirname(file)).split(sep).length !== 1) continue;
+    const manifest = JSON.parse(readFileSync(file, "utf8"));
+    for (const field of dependencyFields) {
+      for (const name of Object.keys(manifest[field] ?? {})) {
+        if (name.startsWith("@zeta-agent/") && !components.has(name)) {
+          violations.push(
+            `${relative(workspaceRoot, file).split(sep).join("/")}: 组件包禁止反向依赖 facade "${name}"`
+          );
+        }
+      }
+    }
+  }
+  // 源码级：即便 manifest 未声明，组件源码也不得 import facade/聚合包。
+  for (const file of walk(componentDir, (item) => /\.[cm]?[jt]sx?$/.test(item))) {
+    const segments = relative(componentDir, file).split(sep);
+    if (segments.length < 2) continue;
+    const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+    for (const { specifier, node } of moduleSpecifiers(sourceFile)) {
+      const matched = /^(@[^/]+\/[^/]+)/.exec(specifier);
+      if (!matched || !matched[1].startsWith("@zeta-agent/") || components.has(matched[1])) continue;
+      const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+      violations.push(
+        `${relative(workspaceRoot, file).split(sep).join("/")}:${line}: 组件源码禁止反向依赖 facade "${specifier}"`
+      );
+    }
+  }
+  return violations;
+}
+
+// 组件内部只能经 package.json 声明的稳定子路径访问，禁止直连 src/ 等实现路径。
+export function findDisallowedComponentSubpaths(workspaceRoot = root) {
+  const violations = [];
+  const components = componentPackageNames(workspaceRoot);
+  const declared = new Map();
+  for (const file of packageManifests(workspaceRoot)) {
+    const manifest = JSON.parse(readFileSync(file, "utf8"));
+    if (!components.has(manifest.name)) continue;
+    const subpaths = new Set(Object.keys(manifest.exports ?? {}));
+    declared.set(manifest.name, subpaths);
+  }
+  for (const base of ["packages", "apps"]) {
+    for (const file of walk(join(workspaceRoot, base), (item) => /\.[cm]?[jt]sx?$/.test(item))) {
+      const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+      for (const { specifier, node } of moduleSpecifiers(sourceFile)) {
+        const matched = /^(@[^/]+\/[^/]+)(\/.*)?$/.exec(specifier);
+        if (!matched) continue;
+        const [, pkg, rawSubpath] = matched;
+        if (!components.has(pkg) || rawSubpath === undefined) continue;
+        const subpath = rawSubpath.startsWith("./") ? rawSubpath : `./${rawSubpath.slice(1)}`;
+        if (!(declared.get(pkg) ?? new Set()).has(subpath)) {
+          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+          violations.push(
+            `${relative(workspaceRoot, file).split(sep).join("/")}:${line}: 禁止直连组件内部 "${specifier}"（稳定入口见 ${pkg} exports）`
+          );
+        }
+      }
+    }
+  }
+  return violations;
+}
+
 // 受控 seam：仅这两个文件允许直接 import @opentui/*（运行时插件加载与官方 Solid slots 适配）。
 // facade string 槽位契约（slots.ts）与业务组件仍禁止直接依赖 OpenTUI。
 const opentuiSeamAllowlist = new Set(["runtime-plugin-loader.tsx", "slots-native.tsx"]);
@@ -309,6 +387,8 @@ export function guardArchitecture(workspaceRoot = root) {
   }
   violations.push(...findCrossPackageRelativeImports(workspaceRoot));
   violations.push(...validateSharedPeerIdentity(workspaceRoot));
+  violations.push(...findComponentFacadeDependencies(workspaceRoot));
+  violations.push(...findDisallowedComponentSubpaths(workspaceRoot));
   for (const declaration of findCoreTypeDeclarations(workspaceRoot)) {
     if (declaration.file !== "packages/components/cordis/src/types.ts") {
       violations.push(

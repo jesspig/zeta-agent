@@ -26,6 +26,8 @@ import {
   get as reflectGet,
   intercept as reflectIntercept,
   isolate as reflectIsolate,
+  set as reflectSet,
+  INACTIVE_ACCESS,
   ISOLATE,
   type ReflectNode,
 } from "@zeta-agent/cordis/reflect";
@@ -83,6 +85,9 @@ export function defineKey<T = unknown>(
 /** accepts 版本不匹配：fiber 进入 FAILED，不把错版本数据喂给消费者。 */
 export const VERSION_MISMATCH = "VERSION_MISMATCH";
 
+/** 已 disposed 的 context 再访问变更入口时的显式拒绝（不做 silent no-op）。 */
+export const CONTEXT_DISPOSED = "CONTEXT_DISPOSED";
+
 /** accepts 的键支持完整键描述（@scope:name）与短键名两种写法。 */
 function acceptedVersion(accepts: Record<string, string>, key: CoeffectKey<any>): string | undefined {
   return accepts[key.symbol.description ?? key.name] ?? accepts[key.name];
@@ -120,42 +125,88 @@ export function defineComponent<
 export interface Registry<C, V> {
   readonly name: string;
   readonly version?: number;
+  /** 贡献归属的 realm；不同 realm 的 registry 身份独立。 */
+  readonly realm?: symbol;
   readonly contributions: C[];
   readonly compose: (items: C[]) => V;
   readonly fallback: V;
+  /** compose 与 watcher 的失败被隔离在此，不向调用方抛出。 */
+  readonly errors: readonly unknown[];
+  watch(listener: (registry: Registry<C, V>) => void): Disposer;
 }
 
 export interface RegistryOptions<C, V> {
   readonly version?: number;
+  readonly realm?: symbol;
   /** 必须同步、纯净，且总有回退值。 */
   readonly compose: (items: C[]) => V;
   readonly fallback?: V;
+  /** 提供时按 compare 稳定排序；缺省保持注册顺序。 */
+  readonly compare?: (left: C, right: C) => number;
+}
+
+const registryWatchers = new WeakMap<Registry<any, any>, Set<(registry: any) => void>>();
+const registryComparators = new WeakMap<Registry<any, any>, ((left: any, right: any) => number) | undefined>();
+
+function notifyWatchers<C, V>(registry: Registry<C, V>): void {
+  for (const watcher of [...(registryWatchers.get(registry) ?? [])]) {
+    try {
+      watcher(registry);
+    } catch (error) {
+      (registry.errors as unknown[]).push(error);
+    }
+  }
 }
 
 export function defineRegistry<C, V>(name: string, options: RegistryOptions<C, V>): Registry<C, V> {
-  return {
+  const errors: unknown[] = [];
+  const registry: Registry<C, V> = {
     name,
     version: options.version,
+    realm: options.realm,
     contributions: [],
     compose: options.compose,
     fallback: options.fallback as V,
+    errors,
+    watch(listener) {
+      const watchers = registryWatchers.get(registry) ?? new Set();
+      watchers.add(listener);
+      registryWatchers.set(registry, watchers);
+      return () => {
+        watchers.delete(listener);
+      };
+    },
   };
+  registryComparators.set(registry, options.compare);
+  return registry;
 }
 
-/** 贡献值返回逆；重复 dispose 只生效一次。 */
+/** 贡献值返回逆；重复 dispose 只生效一次；增删都通知 watcher 且隔离其异常。 */
 export function contribute<C, V>(registry: Registry<C, V>, value: C): Disposer {
-  registry.contributions.push(value);
+  const compare = registryComparators.get(registry);
+  const index = compare
+    ? registry.contributions.findIndex((item) => compare(item, value) > 0)
+    : -1;
+  if (index >= 0) registry.contributions.splice(index, 0, value);
+  else registry.contributions.push(value);
+  notifyWatchers(registry);
   let armed = true;
   return () => {
     if (!armed) return;
     armed = false;
-    const index = registry.contributions.indexOf(value);
-    if (index >= 0) registry.contributions.splice(index, 1);
+    const current = registry.contributions.indexOf(value);
+    if (current >= 0) registry.contributions.splice(current, 1);
+    notifyWatchers(registry);
   };
 }
 
 export function resolveRegistry<C, V>(registry: Registry<C, V>): V {
-  return registry.compose([...registry.contributions]);
+  try {
+    return registry.compose([...registry.contributions]);
+  } catch (error) {
+    (registry.errors as unknown[]).push(error);
+    return registry.fallback;
+  }
 }
 
 /** use 返回的 fiber 句柄（不暴露 cordis 内部 Fiber 类型）。 */
@@ -164,8 +215,12 @@ export interface ContextFiber {
   readonly state: LifecycleState;
   /** 首次加载完成；若当时依赖未齐备，state 可能是 PENDING，随后由 notify 驱动。 */
   readonly ready: Promise<void>;
-  update(): Promise<void>;
-  remove(): void;
+  /** 同 fiber 原地更新；显式 config 覆盖装配配置，revision 递增。 */
+  update<P>(config?: P): Promise<void>;
+  /** 完全去活的 barrier：reconcile 等待该 Promise 后才允许 insert 同名替换。 */
+  remove(): Promise<void>;
+  /** 原地更新序号，与 uid 身份无关。 */
+  readonly revision: number;
 }
 
 /** facade 统一上下文：cordis 的 effect/coeffect/fiber 语义的单一入口。 */
@@ -196,6 +251,8 @@ interface Internals {
   readonly ownsRealm: boolean;
   /** 事件监听器按 realm 分桶：事件名 → realm → 监听器集合，避免派生 context 共享监听表。 */
   readonly listeners: Map<string, Map<symbol, Set<(payload: unknown) => void>>>;
+  /** 本 context 实例自己注册的 listener 逆：dispose 只回收自己，不碰父/兄弟 realm 的桶。 */
+  readonly ownedListeners: Map<string, Set<Disposer>>;
   readonly intercepted: Map<symbol, unknown>;
   /** 事件隔离域：root 独占一个 realm，isolate 分配新 realm，intercept/fiber 继承父 realm。 */
   readonly realm: symbol;
@@ -245,7 +302,11 @@ async function disposeInternals(internals: Internals): Promise<void> {
   for (const fiber of fibers) results.push(await settle(() => fiber.remove()));
   results.push(await settle(() => internals.host.dispose()));
 
-  for (const realms of internals.listeners.values()) realms.delete(internals.realm);
+  // 只回收本实例注册的监听；intercept/derived 与父共享 realm，不能删父亲的桶。
+  for (const offs of internals.ownedListeners.values()) {
+    for (const off of [...offs]) off();
+  }
+  internals.ownedListeners.clear();
   if (internals.ownsRealm) internals.system.disposeRealm(internals.realm);
   internals.pending.clear();
   internals.parent?.children.delete(internals);
@@ -282,28 +343,64 @@ function makeContext(
     children: new Set(),
     disposed: false,
     ownsRealm: ownsRealm ?? base.ownsRealm,
+    ownedListeners: new Map(),
     ...(attach ? { parent: base } : {}),
   };
   if (attach) base.children.add(internals);
 
-  const effect = (callback: EffectCallback, label?: string): Disposer =>
-    runEffect(internals.host, () => callback(context), label);
+  const assertActive = (): void => {
+    if (internals.disposed) throw new Error(CONTEXT_DISPOSED);
+  };
 
-  const get = <T>(key: CoeffectKey<T>): T => reflectGet(internals.node, key) as T;
+  const effect = (callback: EffectCallback, label?: string): Disposer => {
+    assertActive();
+    return runEffect(internals.host, () => callback(context), label);
+  };
 
-  /** Proxy 门禁入口：symbol 属性访问走 committed view 解析并强制声明检查。 */
-  const proxy = <T extends object>(): T => createProxy<T>(internals.node);
+  function get<T>(key: CoeffectKey<T>): T;
+  function get<T>(key: CoeffectKey<T>, strict: false): T | undefined;
+  function get<T>(key: CoeffectKey<T>, strict = true): T | undefined {
+    if (internals.disposed) {
+      if (!strict) return undefined;
+      throw new Error(INACTIVE_ACCESS);
+    }
+    return reflectGet(internals.node, key, strict) as T | undefined;
+  }
 
-  const provideValue = <T>(
+  /** Proxy 门禁入口：symbol 属性访问只按 committed view 解析并强制声明检查。 */
+  const proxy = <T extends object>(): T => {
+    assertActive();
+    return createProxy<T>(internals.node);
+  };
+
+  /** 单一 writer：set 写 realm store 并精确恢复旧值；provide 走 committed provider，保留 tombstone。 */
+  const write = <T>(
     key: CoeffectKey<T>,
     value: T,
     options: ProvideOptions | undefined,
-    keepTombstone: boolean
+    mode: "set" | "provide"
   ): Disposer => {
+    assertActive();
     for (let cursor: ReflectNode | null = internals.node; cursor; cursor = cursor.parent) {
       cursor.keys.set(key.symbol, key);
       if (cursor[ISOLATE].has(key.symbol)) break;
     }
+    if (mode === "set") {
+      const restore = reflectSet(internals.node, key, value);
+      const announce = (): void => internals.system.notify([key], realm);
+      announce();
+      let armed = true;
+      const dispose: Disposer = () => {
+        if (!armed) return;
+        armed = false;
+        internals.resources.delete(dispose);
+        restore();
+        announce();
+      };
+      internals.resources.add(dispose);
+      return dispose;
+    }
+    // provider fiber 内部调用 provide 走持有者身份，避免同一 fiber 重复 claim。
     if (internals.owner) return internals.owner.provide(key, value, options);
     const uid = `provider:${++internals.uidSeed.value}:${key.symbol.description ?? key.name}`;
     const fiber = internals.system.create({
@@ -324,30 +421,31 @@ function makeContext(
       internals.resources.delete(dispose);
       releaseValue();
       void fiber.remove();
-      if (!keepTombstone) internals.system.forget(key, realm);
+      // provide 保留 tombstone：撤销后 root/proxy 读到 CAPABILITY_EXPIRED。
     };
     internals.resources.add(dispose);
     return dispose;
   };
 
   const provide = <T>(key: CoeffectKey<T>, value: T, options?: ProvideOptions): Disposer =>
-    provideValue(key, value, options, true);
+    write(key, value, options, "provide");
 
-  const set = <T>(key: CoeffectKey<T>, value: T): Disposer => provideValue(key, value, undefined, false);
+  const set = <T>(key: CoeffectKey<T>, value: T): Disposer => write(key, value, undefined, "set");
 
   const isolate = <T>(key: CoeffectKey<T>, realm?: symbol): FiberContext => {
+    assertActive();
     const nextRealm = realm ?? Symbol(key.symbol.description ?? key.name);
     return makeContext(internals, reflectIsolate(internals.node, key, nextRealm), nextRealm, undefined, true, true);
   };
 
   const intercept = <T>(key: CoeffectKey<T>, metadata: unknown): FiberContext => {
+    assertActive();
     internals.intercepted.set(key.symbol, metadata);
-    const transform: (value: unknown) => unknown =
-      typeof metadata === "function" ? (metadata as (value: unknown) => unknown) : (value) => value;
-    return makeContext(internals, reflectIntercept(internals.node, key, transform), realm, undefined, true, false);
+    return makeContext(internals, reflectIntercept(internals.node, key, metadata), realm, undefined, true, false);
   };
 
   const use = <P>(component: Component<P>, config?: P): ContextFiber => {
+    assertActive();
     const uid = `fiber:${++internals.uidSeed.value}`;
     const fiberNode = createNode(uid, internals.node, [...component.inject, ...component.provide]);
     bindRealm(fiberNode, realm);
@@ -390,38 +488,50 @@ function makeContext(
         return fiber.state;
       },
       ready,
-      update: () => fiber.update(),
+      update: (config?: unknown) => fiber.update(config),
+      get revision() {
+        return fiber.revision;
+      },
       remove: () => {
         for (const key of component.provide) {
           if (internals.providerVersions.get(key.symbol)?.uid === uid) {
             internals.providerVersions.delete(key.symbol);
           }
         }
-        void fiber.remove();
+        return fiber.remove();
       },
     };
   };
 
   const on = (name: string, listener: (payload: unknown) => void): Disposer => {
+    assertActive();
     const realms = internals.listeners.get(name) ?? new Map<symbol, Set<(payload: unknown) => void>>();
     const bucket = realms.get(internals.realm) ?? new Set<(payload: unknown) => void>();
     bucket.add(listener);
     realms.set(internals.realm, bucket);
     internals.listeners.set(name, realms);
     let armed = true;
-    return () => {
+    const off: Disposer = () => {
       if (!armed) return;
       armed = false;
       bucket.delete(listener);
+      internals.ownedListeners.get(name)?.delete(off);
     };
+    const owned = internals.ownedListeners.get(name) ?? new Set<Disposer>();
+    owned.add(off);
+    internals.ownedListeners.set(name, owned);
+    return off;
   };
 
   const emit = (name: string, payload?: unknown): void => {
+    // 已 disposed 的 context 不再派发事件，但不抛错：emit 是发射而非变更入口。
+    if (internals.disposed) return;
     const bucket = internals.listeners.get(name)?.get(internals.realm);
     for (const listener of [...(bucket ?? [])]) listener(payload);
   };
 
   const notify = async (keys?: readonly CoeffectKey<any>[]): Promise<void> => {
+    assertActive();
     await Promise.all([...internals.pending].map((promise) => promise.catch(() => undefined)));
     internals.system.notify(keys, keys === undefined || internals.node.parent === null ? undefined : realm);
     await internals.system.drain();
@@ -471,6 +581,7 @@ export function createContext(
     disposed: false,
     ownsRealm: true,
     listeners: new Map(),
+    ownedListeners: new Map(),
     intercepted: new Map(),
     realm,
     providerVersions: new Map(),

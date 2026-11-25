@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
+import type { ComponentRegistry } from "./registry";
 
 /** 输入闭包 digest：sha256 十六进制。 */
 export function digestText(input: string | Uint8Array): string {
@@ -105,6 +106,29 @@ export function buildImportGraph(entries: readonly string[], read: FileReader): 
   };
 }
 
+/** 简单环检测：返回规范化后的环节点序列；自环与多节点环均可观察。 */
+export function detectCycles(graph: ImportGraph): readonly (readonly string[])[] {
+  const state = new Map<string, 0 | 1 | 2>();
+  const stack: string[] = [];
+  const cycles: string[][] = [];
+  const visit = (node: string): void => {
+    const status = state.get(node) ?? 0;
+    if (status === 1) {
+      const start = stack.indexOf(node);
+      if (start >= 0) cycles.push([...stack.slice(start), node]);
+      return;
+    }
+    if (status === 2) return;
+    state.set(node, 1);
+    stack.push(node);
+    for (const next of graph.edges[node] ?? []) visit(next);
+    stack.pop();
+    state.set(node, 2);
+  };
+  for (const node of graph.nodes) visit(node);
+  return cycles.map((cycle) => Object.freeze(cycle));
+}
+
 /** 入口的完整传递闭包（含入口自身），已排序去重。 */
 export function closureOf(graph: ImportGraph, entry: string): readonly string[] {
   const seen = new Set<string>();
@@ -137,7 +161,17 @@ export interface GraphAnalysis {
   readonly declined: readonly string[];
   /** 共享变更模块的连通 unit 分组（unit id）。 */
   readonly partitions: readonly (readonly string[])[];
+  /** 当前 import graph 的环；每次事务重建后重新计算。 */
+  readonly cycles: readonly (readonly string[])[];
 }
+
+const EMPTY_GRAPH: ImportGraph = { nodes: [], edges: {} };
+const EMPTY_ANALYSIS: GraphAnalysis = Object.freeze({
+  accepted: [],
+  declined: [],
+  partitions: [],
+  cycles: [],
+});
 
 /**
  * accepted/declined 不动点：变更从模块出发沿反向 import 边传播，遇到 accept 边界即停；
@@ -175,7 +209,6 @@ export function analyzeGraph(
     }
   }
 
-  // 连通分区：两个入口的闭包若共享任一 declined 模块，则必须同一事务提交。
   const closures = new Map<string, Set<string>>(
     entries.map((entry) => [normalizePath(entry), new Set(closureOf(graph, entry))])
   );
@@ -212,11 +245,17 @@ export function analyzeGraph(
     accepted: [...accepted].sort(),
     declined: [...declined].sort(),
     partitions: [...groups.values()].map((group) => [...group].sort()),
+    cycles: detectCycles(graph),
   };
 }
 
 export type HmrStatus = "ACTIVE" | "FAILED";
-export type SkipReason = "host-module" | "native-addon" | "ambiguous-import" | "ambiguous-export" | "signature-mismatch";
+export type SkipReason =
+  | "host-module"
+  | "native-addon"
+  | "ambiguous-import"
+  | "ambiguous-export"
+  | "signature-mismatch";
 
 export interface HmrUnit {
   readonly id: string;
@@ -304,16 +343,34 @@ export function snapshotAndBackup(
   };
 }
 
-const inTransaction = new AsyncLocalStorage<boolean>();
-let queueTail: Promise<unknown> = Promise.resolve();
+/** 事务队列按 controller 实例隔离；ready() 只等待本实例的在途事务。 */
+export interface HmrQueue {
+  run<T>(fn: () => T | Promise<T>): Promise<T>;
+  ready(): Promise<void>;
+}
 
-/** 单一事务队列：拒绝嵌套，保证 readiness barrier 可等待全部在途事务。 */
+export function createHmrQueue(): HmrQueue {
+  const inTransaction = new AsyncLocalStorage<boolean>();
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    run<T>(fn: () => T | Promise<T>) {
+      if (inTransaction.getStore() === true) return Promise.reject(new Error("HMR_NESTED"));
+      const execute = (): Promise<T> => inTransaction.run(true, async () => await fn());
+      const result = tail.then(execute, execute);
+      tail = result.then(() => undefined, () => undefined);
+      return result;
+    },
+    async ready() {
+      await tail;
+    },
+  };
+}
+
+const sharedQueue = createHmrQueue();
+
+/** 兼容独立工具入口的全局队列；controller 自身使用实例队列。 */
 export function runExclusive<T>(fn: () => T | Promise<T>): Promise<T> {
-  if (inTransaction.getStore() === true) return Promise.reject(new Error("HMR_NESTED"));
-  const run = (): Promise<T> => inTransaction.run(true, async () => await fn());
-  const result = queueTail.then(run, run);
-  queueTail = result.then(() => undefined, () => undefined);
-  return result;
+  return sharedQueue.run(fn);
 }
 
 function pathMatches(candidate: string, changed: string): boolean {
@@ -326,14 +383,24 @@ export interface HmrControllerOptions {
   readonly readFile: FileReader;
   readonly build: (unit: HmrUnit, version: number, digest: string) => BuildArtifact | Promise<BuildArtifact>;
   readonly evaluate: (artifact: BuildArtifact) => UnitInstance | Promise<UnitInstance>;
-  readonly apply: (unit: HmrUnit, instance: UnitInstance) => void | Promise<void>;
+  /** replace 由 controller 在 registry 中真实执行；apply 可用第三个参数重复触发同一替换。 */
+  readonly apply: (
+    unit: HmrUnit,
+    instance: UnitInstance,
+    replace?: () => void
+  ) => void | Promise<void>;
   readonly classify?: (unit: HmrUnit, changed: readonly string[]) => SkipReason | undefined;
   /** critical root：apply 前先 shadow-apply，失败触发 compensate。 */
   readonly critical?: readonly string[];
   readonly shadowApply?: (unit: HmrUnit, instance: UnitInstance) => void | Promise<void>;
   readonly compensate?: (unit: HmrUnit, previous: HmrState | undefined) => void | Promise<void>;
+  /** 真实 component registry：replace 保留 uid/parent/config，revision 递增。 */
+  readonly registry?: ComponentRegistry<any>;
+  readonly componentOf?: (unit: HmrUnit) => unknown;
+  readonly replacementOf?: (unit: HmrUnit, instance: UnitInstance) => unknown;
   readonly auto?: boolean;
   readonly debounceMs?: number;
+  readonly onError?: (error: unknown) => void;
 }
 
 export interface HmrController {
@@ -341,17 +408,22 @@ export interface HmrController {
   readonly strategy: "closure-digest-connected-unit";
   markDirty(files: readonly string[]): void;
   markDirtySigned(signatures: readonly FileSignature[]): void;
+  /** auto watcher 入口：登记脏文件并防抖调度；flush 拒绝进入 errors 出口。 */
+  notifyFile(file: string): void;
   flush(): Promise<HmrResult>;
-  /** readiness barrier：等待队列中此前登记的事务全部结束。 */
+  /** readiness barrier：等待本 controller 队列中此前登记的事务全部结束。 */
   ready(): Promise<void>;
   failed(): readonly string[];
+  /** 自动调度的 flush 拒绝均落在此，不产生未处理 Promise。 */
+  errors(): readonly unknown[];
   stateOf(id: string): HmrState | undefined;
   revisionOf(id: string): number;
   analysis(): GraphAnalysis;
+  graph(): ImportGraph;
   close(): void;
 }
 
-/** 完整 HMR 事务：输入闭包 digest → 连通 unit → 快照 → build/evaluate → 同 fiber apply。 */
+/** 完整 HMR 事务：每次重建 import graph → 输入闭包 digest → 连通 unit → 快照 → build/evaluate → 同 fiber apply。 */
 export function createHmrController(options: HmrControllerOptions): HmrController {
   const seen = new Set<string>();
   for (const unit of options.units) {
@@ -359,35 +431,60 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
     seen.add(unit.id);
   }
 
-  const graph = buildImportGraph(
-    options.units.map((unit) => unit.entry),
-    options.readFile
-  );
+  let graph = buildImportGraph(options.units.map((unit) => unit.entry), options.readFile);
   const critical = new Set(options.critical ?? []);
   const states = new Map<string, HmrState>();
   const failedUnits = new Set<string>();
+  /** 失败单元的未交付变更根：重试必须围绕这些根，不因无关文件反复触发。 */
+  const retainedRoots = new Map<string, Set<string>>();
+  const errors: unknown[] = [];
   const dirty = new Set<string>();
+  const queue = createHmrQueue();
   const pendingSignatures = new Map<string, string>();
   let fsWatcher: FSWatcher | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
-  let lastAnalysis: GraphAnalysis = { accepted: [], declined: [], partitions: [] };
+  let lastAnalysis: GraphAnalysis = EMPTY_ANALYSIS;
 
   const markDirty = (files: readonly string[]): void => {
     for (const file of files) dirty.add(normalizePath(file));
   };
 
+  const recordError = (error: unknown): void => {
+    errors.push(error);
+    options.onError?.(error);
+  };
+
   async function transaction(): Promise<HmrResult> {
-    const changed = [...dirty];
+    // 每次事务重建 graph：新增/删除 import 与环都基于当前文件内容，而非创建时的快照。
+    graph = buildImportGraph(
+      options.units.map((unit) => unit.entry),
+      options.readFile
+    );
+    const newChanges = [...dirty];
     dirty.clear();
     const signed = new Map(pendingSignatures);
     pendingSignatures.clear();
 
-    const result: HmrResult = {
-      settled: [], reused: [], aborted: [], skipped: [], retried: [],
+    const result: {
+      settled: string[];
+      reused: string[];
+      aborted: string[];
+      skipped: string[];
+      retried: string[];
+      detail: {
+        settled: HmrDetailEntry[];
+        reused: HmrDetailEntry[];
+        aborted: HmrDetailEntry[];
+        skipped: HmrDetailEntry[];
+      };
+    } = {
+      settled: [],
+      reused: [],
+      aborted: [],
+      skipped: [],
+      retried: [],
       detail: { settled: [], reused: [], aborted: [], skipped: [] },
     };
-    if (changed.length === 0 && failedUnits.size === 0) return result;
-
     const signatureCache = new Map<string, string>();
     const signatureOf = (file: string): string => {
       const cached = signatureCache.get(file);
@@ -398,15 +495,19 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
       return value;
     };
 
-    // 文件签名：登记签名须与真实内容一致，否则相关 unit abort（不污染旧状态）。
     const tampered = new Set<string>();
     const tamperedUnits = new Set<string>();
     for (const [path, digest] of signed) {
       if (signatureOf(path) !== digest) {
         tampered.add(path);
-        const id = options.units.find((unit) => pathMatches(unit.entry, path))?.id;
-        if (id !== undefined && !tamperedUnits.has(id)) {
+        const matched = options.units.find((unit) => pathMatches(unit.entry, path));
+        const id = matched?.id;
+        if (id !== undefined && matched !== undefined && !tamperedUnits.has(id)) {
           tamperedUnits.add(id);
+          const roots = closureOf(graph, matched.entry).filter((file) =>
+            [...newChanges, ...tampered].some((path) => pathMatches(file, path))
+          );
+          retainedRoots.set(id, new Set(roots.length > 0 ? roots : [normalizePath(matched.entry)]));
           result.aborted.push(id);
           result.detail.aborted.push({
             id,
@@ -417,7 +518,23 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
       }
     }
 
-    const changedPaths = new Set([...changed, ...tampered]);
+    const changedPaths = new Set([...newChanges, ...tampered]);
+    if (changedPaths.size === 0) {
+      // 无新文件时只重试此前失败且仍有未交付变更根的单元；不是任意 flush 都重试。
+      for (const roots of retainedRoots.values()) for (const root of roots) changedPaths.add(root);
+    }
+    if (changedPaths.size === 0) return result;
+    const hasNewChanges = newChanges.length > 0 || tampered.size > 0;
+    const retain = (id: string, entry: string): void => {
+      const roots = closureOf(graph, entry).filter((file) =>
+        [...changedPaths].some((path) => pathMatches(file, path))
+      );
+      retainedRoots.set(id, new Set(roots.length > 0 ? roots : [normalizePath(entry)]));
+    };
+    const clearRetained = (id: string): void => {
+      retainedRoots.delete(id);
+    };
+
     lastAnalysis = analyzeGraph(
       graph,
       [...changedPaths],
@@ -425,13 +542,26 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
       options.units.flatMap((unit) => [unit.entry, ...(unit.accepts ?? [])])
     );
 
-    const targets: Array<{ unit: HmrUnit; retry: boolean; digest: string }> = [];
+    const partitionOfEntry = new Map<string, string>();
+    lastAnalysis.partitions.forEach((group, index) => {
+      for (const entry of group) partitionOfEntry.set(normalizePath(entry), `group:${index}`);
+    });
+    const partitionOf = (unit: HmrUnit): string =>
+      partitionOfEntry.get(normalizePath(unit.entry)) ?? `solo:${unit.id}`;
+    const members = new Map<string, string[]>();
+    const targets: Array<{ unit: HmrUnit; retry: boolean; digest: string; partition: string }> = [];
     for (const unit of options.units) {
       if (tamperedUnits.has(unit.id)) continue;
       const closure = closureOf(graph, unit.entry);
-      const stale = closure.some((file) => [...changedPaths].some((changedPath) => pathMatches(file, changedPath)));
+      // 有新的变更时只看新 root；无新变更时只回放该失败单元自己的未交付 root。
+      const retained = retainedRoots.get(unit.id);
+      const stale = hasNewChanges
+        ? closure.some((file) => [...changedPaths].some((path) => pathMatches(file, path))) ||
+          (retained !== undefined &&
+            [...retained].some((root) => [...changedPaths].some((path) => pathMatches(root, path))))
+        : (retained?.size ?? 0) > 0;
+      if (!stale) continue;
       const retry = failedUnits.has(unit.id);
-      if (!stale && !retry) continue;
       const digest = closureDigest(graph, unit.entry, {
         get: (file) => signatureCache.get(file) ?? signatureOf(file),
       } as ReadonlyMap<string, string>);
@@ -441,28 +571,51 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
         result.detail.reused.push({ id: unit.id });
         continue;
       }
-      targets.push({ unit, retry, digest });
+      const partition = partitionOf(unit);
+      members.set(partition, [...(members.get(partition) ?? []), unit.id]);
+      targets.push({ unit, retry, digest, partition });
     }
 
-    const { snapshot, backup } = snapshotAndBackup(targets.map((target) => target.unit), states);
+    const { backup } = snapshotAndBackup(
+      targets.map((target) => target.unit),
+      states
+    );
     const candidates: Array<{
       unit: HmrUnit;
       state: HmrState;
       retry: boolean;
       previous: HmrState | undefined;
+      partition: string;
     }> = [];
     const abortedIds: string[] = [];
     const skippedIds: string[] = [];
+    const rolledBackIds = new Set<string>();
+    const failedPartitions = new Set<string>();
 
-    for (const { unit, retry, digest } of targets) {
-      const reason = options.classify?.(unit, [...changed]);
+    const abort = (id: string, error: unknown): void => {
+      if (abortedIds.includes(id)) return;
+      abortedIds.push(id);
+      result.detail.aborted.push({ id, error });
+    };
+    const rollBackPartition = (partition: string, origin: string, error: unknown): void => {
+      failedPartitions.add(partition);
+      for (const id of members.get(partition) ?? []) {
+        if (id === origin || abortedIds.includes(id) || rolledBackIds.has(id)) continue;
+        rolledBackIds.add(id);
+        abortedIds.push(id);
+        result.detail.aborted.push({ id, error: new Error(`PARTITION_ROLLBACK: ${partition}`) });
+      }
+    };
+
+    for (const { unit, retry, digest, partition } of targets) {
+      const reason = options.classify?.(unit, [...changedPaths]);
       if (reason !== undefined) {
         result.skipped.push(unit.id);
         skippedIds.push(unit.id);
         result.detail.skipped.push({ id: unit.id, reason });
         continue;
       }
-      const version = snapshot.get(unit.id)!.revision;
+      const version = (states.get(unit.id)?.revision ?? 0) + 1;
       try {
         const artifact = await options.build(unit, version, digest);
         const instance = await options.evaluate(artifact);
@@ -470,56 +623,106 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
           unit,
           retry,
           previous: states.get(unit.id),
+          partition,
           state: { unit, revision: version, digest, artifact, instance, status: "ACTIVE" },
         });
       } catch (error) {
-        result.aborted.push(unit.id);
-        abortedIds.push(unit.id);
-        result.detail.aborted.push({ id: unit.id, error });
+        abort(unit.id, error);
+        rollBackPartition(partition, unit.id, error);
+        retain(unit.id, unit.entry);
       }
     }
 
-    backup.restore([...abortedIds, ...skippedIds, ...tamperedUnits]);
-    for (const id of [...abortedIds, ...tamperedUnits]) failedUnits.add(id);
-    for (const id of skippedIds) failedUnits.delete(id);
+    const restoreIds = [...abortedIds, ...skippedIds, ...rolledBackIds, ...tamperedUnits];
+    backup.restore([...new Set(restoreIds)]);
+    for (const id of [...abortedIds, ...rolledBackIds, ...tamperedUnits]) failedUnits.add(id);
+    for (const id of skippedIds) {
+      failedUnits.delete(id);
+      clearRetained(id);
+    }
 
-    for (const { unit, state, retry, previous } of candidates) {
+    const settled: typeof candidates = [];
+    for (const candidate of candidates) {
+      const { unit, state, retry, previous, partition } = candidate;
+      if (failedPartitions.has(partition)) continue;
+      const replace = (): void => {
+        if (
+          options.registry === undefined ||
+          options.componentOf === undefined ||
+          options.replacementOf === undefined
+        ) {
+          return;
+        }
+        options.registry.replace(
+          options.componentOf(unit) as never,
+          options.replacementOf(unit, state.instance) as never
+        );
+      };
       try {
         if (critical.has(unit.id) && options.shadowApply !== undefined) {
           await options.shadowApply(unit, state.instance);
         }
-        await options.apply(unit, state.instance);
+        replace();
+        await options.apply(unit, state.instance, replace);
         states.set(unit.id, state);
         failedUnits.delete(unit.id);
-        result.settled.push(unit.id);
-        result.detail.settled.push({ id: unit.id });
-        if (retry) result.retried.push(unit.id);
+        clearRetained(unit.id);
+        settled.push(candidate);
       } catch (error) {
+        // apply 失败留 FAILED 可观察；同连通分区已提交的其他 unit 一起回退旧 artifact。
+        failedPartitions.add(partition);
+        for (const applied of [...settled].reverse()) {
+          if (applied.partition !== partition) continue;
+          try {
+            await options.compensate?.(applied.unit, applied.previous);
+          } catch {
+            // 补偿失败不覆盖原始 apply 错误。
+          }
+          backup.restore([applied.unit.id]);
+        }
+        for (let index = settled.length - 1; index >= 0; index -= 1) {
+          if (settled[index]!.partition === partition) settled.splice(index, 1);
+        }
         if (critical.has(unit.id)) {
           try {
             await options.compensate?.(unit, previous);
           } catch {
-            // 补偿失败不覆盖原始 apply 错误；状态仍为 FAILED。
+            // 同上。
           }
         }
         states.set(unit.id, { ...state, status: "FAILED", error });
         failedUnits.add(unit.id);
+        retain(unit.id, unit.entry);
+        rollBackPartition(partition, unit.id, error);
       }
     }
+
+    result.aborted = [...new Set([...abortedIds, ...tamperedUnits])];
+    result.settled = settled.map((item) => item.unit.id);
+    result.detail.settled = settled.map((item) => ({ id: item.unit.id }));
+    result.retried = settled.filter((item) => item.retry).map((item) => item.unit.id);
     return result;
   }
 
-  if (options.auto === true) {
-    fsWatcher = fsWatch(options.root, (_event, filename) => {
-      if (typeof filename !== "string") return;
-      markDirty([filename]);
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => void flush(), options.debounceMs ?? 100);
-    });
+  function flush(): Promise<HmrResult> {
+    return queue.run(transaction);
   }
 
-  function flush(): Promise<HmrResult> {
-    return runExclusive(transaction);
+  function scheduleFlush(): void {
+    if (debounce) clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      void flush().catch(recordError);
+    }, options.debounceMs ?? 100);
+  }
+
+  const notifyFile = (file: string): void => {
+    if (typeof file !== "string") return;
+    markDirty([file]);
+    scheduleFlush();
+  };
+
+  if (options.auto === true) {
+    fsWatcher = fsWatch(options.root, (_event, filename) => notifyFile(filename as string));
   }
 
   return {
@@ -533,14 +736,17 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
         dirty.add(path);
       }
     },
+    notifyFile,
     flush,
     ready: async () => {
-      await queueTail;
+      await queue.ready();
     },
     failed: () => [...failedUnits].sort(),
+    errors: () => [...errors],
     stateOf: (id) => states.get(id),
     revisionOf: (id) => states.get(id)?.revision ?? 0,
     analysis: () => lastAnalysis,
+    graph: () => graph,
     close: () => {
       if (debounce) clearTimeout(debounce);
       fsWatcher?.close();

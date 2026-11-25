@@ -212,4 +212,53 @@ describe("T-04 provider 与 committed view", () => {
       system.create({ uid: "duplicate", inject: [], provide: [service] })
     ).toThrow("PROVIDER_DUPLICATE");
   });
+
+  test("同值重新 provide 触发 consumer reload，Impl generation/revision 递增", async () => {
+    const service = defineKey<string>("@zeta-agent/provider-test", "same-value-generation");
+    const seen: string[] = [];
+    const ctx = createContext();
+    const release = ctx.provide(service, "same");
+    const consumer = ctx.use(
+      defineComponent({
+        name: "same-value-consumer",
+        inject: [service],
+        apply: (fiber) => {
+          seen.push(fiber.get(service));
+          return () => {};
+        },
+      })
+    );
+    await ctx.notify([service]);
+    expect(seen).toEqual(["same"]);
+    const before = consumer.state.kind === "ACTIVE" ? consumer.state.committed.get(service)?.generation : undefined;
+    expect(typeof before).toBe("number");
+
+    release();
+    ctx.provide(service, "same");
+    await ctx.notify([service]);
+    const after = consumer.state.kind === "ACTIVE" ? consumer.state.committed.get(service)?.generation : undefined;
+    expect(seen).toEqual(["same", "same"]);
+    expect(typeof after).toBe("number");
+    expect(after!).toBeGreaterThan(before!);
+    await ctx.dispose();
+  });
+
+  test("FiberSystem.revisionOf 暴露按 realm/键的绑定序号", async () => {
+    const { FiberSystem, key } = await import("@zeta-agent/cordis");
+    const service = key<string>("revision-observed");
+    const system = new FiberSystem();
+    const provider = system.create({
+      uid: "revision-provider",
+      inject: [],
+      provide: [service],
+      values: new Map([[service.symbol, "v"]]),
+    });
+    await provider.refresh();
+    const first = system.revisionOf(service, provider.realm);
+    const release = provider.provide(service, "v");
+    const second = system.revisionOf(service, provider.realm);
+    expect(second).toBe(first + 1);
+    release();
+    await provider.remove();
+  });
 });

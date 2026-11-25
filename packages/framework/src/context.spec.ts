@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CoeffectKey } from "./types";
 import type { Context } from "./index";
 import {
+  CONTEXT_DISPOSED,
   contribute,
   createContext,
   createView,
@@ -13,6 +14,7 @@ import {
   resolveRegistry,
   use,
   VERSION_MISMATCH,
+  type Disposer,
 } from "./index";
 
 describe("framework facade 运行时", () => {
@@ -500,5 +502,230 @@ describe("A28 严格 realm 事件隔离", () => {
     expect(seenA).toEqual(["a"]);
     expect(seenB).toEqual([]);
     await root.dispose();
+  });
+});
+
+describe("T-04 get/set/Proxy 单一契约", () => {
+  test("非严格 get 是可失败查询，严格 get 保持显式拒绝", async () => {
+    const key = defineKey<string>("@zeta-agent/contract", "strict-query");
+    const ctx = createContext();
+    expect(ctx.get(key, false)).toBeUndefined();
+    const release = ctx.provide(key, "v");
+    expect(ctx.get(key)).toBe("v");
+    expect(ctx.get(key, false)).toBe("v");
+    release();
+    expect(ctx.get(key, false)).toBeUndefined();
+    expect(() => ctx.get(key)).toThrow("CAPABILITY_EXPIRED");
+    await ctx.dispose();
+  });
+
+  test("set 写 realm store 并精确恢复旧值；Proxy 只看 committed view", async () => {
+    const key = defineKey<string>("@zeta-agent/contract", "store-writer");
+    const ctx = createContext();
+    const view = ctx.proxy<{ [k: symbol]: unknown }>();
+
+    const restoreSecond = ctx.set(key, "v2");
+    expect(ctx.get(key)).toBe("v2");
+    expect(ctx.get(key, false)).toBe("v2");
+    expect(() => view[key.symbol]).toThrow("INACTIVE_ACCESS");
+
+    const restoreFirst = ctx.set(key, "v1");
+    expect(ctx.get(key, false)).toBe("v1");
+    restoreFirst();
+    expect(ctx.get(key, false)).toBe("v2");
+    restoreSecond();
+    expect(ctx.get(key, false)).toBeUndefined();
+
+    const release = ctx.provide(key, "committed");
+    expect(view[key.symbol]).toBe("committed");
+    release();
+    expect(() => view[key.symbol]).toThrow("CAPABILITY_EXPIRED");
+    await ctx.dispose();
+  });
+
+  test("provider 保持 ACTIVE 时撤销 capability，root/proxy 抛 CAPABILITY_EXPIRED", async () => {
+    const key = defineKey<string>("@zeta-agent/contract", "revoke-active");
+    const ctx = createContext();
+    let revoke!: Disposer;
+    const provider = ctx.use(
+      defineComponent({
+        name: "active-holder",
+        inject: [],
+        provide: [key],
+        apply: (fiber) => {
+          revoke = fiber.provide(key, "secret");
+          return () => {};
+        },
+      })
+    );
+    await provider.ready;
+    expect(provider.state.kind).toBe("ACTIVE");
+    expect(ctx.get(key)).toBe("secret");
+    revoke();
+    expect(provider.state.kind).toBe("ACTIVE");
+    expect(() => ctx.get(key)).toThrow("CAPABILITY_EXPIRED");
+    expect(() => ctx.proxy<{ [k: symbol]: unknown }>()[key.symbol]).toThrow("CAPABILITY_EXPIRED");
+    await ctx.dispose();
+  });
+
+  test("fiber 可读取自身提供的键", async () => {
+    const key = defineKey<string>("@zeta-agent/contract", "self-provided");
+    const seen: string[] = [];
+    const ctx = createContext();
+    const handle = ctx.use(
+      defineComponent({
+        name: "self-provider",
+        inject: [],
+        provide: [key],
+        apply: (fiber) => {
+          fiber.provide(key, "self-value");
+          seen.push(fiber.get(key));
+          return () => {};
+        },
+      })
+    );
+    await handle.ready;
+    expect(seen).toEqual(["self-value"]);
+    await ctx.dispose();
+  });
+
+  test("isolate(A) 后仍可读父 realm 的 B 键", async () => {
+    const a = defineKey<string>("@zeta-agent/contract", "isolated-a");
+    const b = defineKey<string>("@zeta-agent/contract", "parent-b");
+    const ctx = createContext();
+    ctx.provide(a, "a");
+    ctx.provide(b, "b");
+    const child = ctx.isolate(a, Symbol("a-only")) as Context;
+    expect(() => child.get(a)).toThrow("INACTIVE_ACCESS");
+    expect(child.get(b)).toBe("b");
+    expect(ctx.get(a)).toBe("a");
+    await ctx.dispose();
+  });
+
+  test("intercept 对象 metadata 参与 provider consult 且不触发 reload；函数 metadata 兼容", async () => {
+    const key = defineKey<string>("@zeta-agent/contract", "consulted");
+    let loads = 0;
+    let consulted: unknown;
+    const ctx = createContext();
+    ctx.provide(key, "service", {
+      consult: (metadata) => {
+        consulted = metadata;
+        return (metadata as { allow?: boolean } | undefined)?.allow === true;
+      },
+    });
+    const consumer = ctx.use(
+      defineComponent({
+        name: "consult-consumer",
+        inject: [key],
+        apply: () => {
+          loads += 1;
+          return () => {};
+        },
+      })
+    );
+    await ctx.notify();
+    expect(loads).toBe(1);
+    expect(consumer.state.kind).toBe("ACTIVE");
+
+    const allowed = ctx.intercept(key, { allow: true }) as Context;
+    expect(allowed.get(key)).toBe("service");
+    expect(consulted).toEqual({ allow: true });
+    expect(loads).toBe(1);
+
+    const denied = ctx.intercept(key, { allow: false }) as Context;
+    expect(() => denied.get(key)).toThrow("CAPABILITY_EXPIRED");
+    await ctx.notify();
+    expect(loads).toBe(1);
+
+    const transformed = ctx.intercept(key, (value: unknown) => `${String(value)}!`) as Context;
+    expect(transformed.get(key)).toBe("service!");
+    await ctx.dispose();
+  });
+
+  test("所有变更入口检查 disposed；emit 在 disposed 后为 no-op", async () => {
+    const key = defineKey<string>("@zeta-agent/contract", "disposed-guard");
+    const ctx = createContext();
+    await ctx.dispose();
+
+    expect(() => ctx.set(key, "v")).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.provide(key, "v")).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.use(defineComponent({ name: "late", apply: () => () => {} }))).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.isolate(key)).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.intercept(key, {})).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.effect(() => () => {})).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.on("late", () => {})).toThrow(CONTEXT_DISPOSED);
+    expect(() => ctx.proxy()).toThrow(CONTEXT_DISPOSED);
+    await expect(ctx.notify()).rejects.toThrow(CONTEXT_DISPOSED);
+    expect(ctx.get(key, false)).toBeUndefined();
+    expect(() => ctx.get(key)).toThrow("INACTIVE_ACCESS");
+    expect(() => ctx.emit("late", 1)).not.toThrow();
+  });
+
+  test("dispose intercept/derived 只回收自己的 listener，不影响父与兄弟 realm", async () => {
+    const a = defineKey<string>("@zeta-agent/contract", "listener-a");
+    const b = defineKey<string>("@zeta-agent/contract", "listener-b");
+    const root = createContext({ uid: "listener-root" });
+    const childA = root.isolate(a, Symbol("listener-a")) as Context;
+    const childB = root.isolate(b, Symbol("listener-b")) as Context;
+    const rootSeen: string[] = [];
+    const bSeen: string[] = [];
+
+    root.on("share", (payload) => rootSeen.push(`root:${String(payload)}`));
+    childA.on("share", (payload) => rootSeen.push(`a:${String(payload)}`));
+    childB.on("share", (payload) => bSeen.push(`b:${String(payload)}`));
+
+    const intercept = root.intercept(a, {}) as Context;
+    intercept.on("share", (payload) => rootSeen.push(`intercept:${String(payload)}`));
+    await intercept.dispose();
+    await childA.dispose();
+
+    childA.emit("share", "x");
+    root.emit("share", 1);
+    childB.emit("share", 2);
+    expect(rootSeen).toEqual(["root:1"]);
+    expect(bSeen).toEqual(["b:2"]);
+    await root.dispose();
+  });
+});
+
+describe("T-04 registry/contribution 契约", () => {
+  test("排序、watchable、fallback、异常隔离与版本/realm 语义", () => {
+    const realm = Symbol("registry-realm");
+    const registry = defineRegistry<{ rank: number }, string[]>("ranked", {
+      version: 2,
+      realm,
+      compare: (left, right) => left.rank - right.rank,
+      compose: (items) => items.map((item) => String(item.rank)),
+      fallback: ["fallback"],
+    });
+    const seen: string[][] = [];
+    const stop = registry.watch((current) => seen.push(current.contributions.map((item) => String(item.rank))));
+
+    const undoTwo = contribute(registry, { rank: 2 });
+    const undoOne = contribute(registry, { rank: 1 });
+    expect(registry.contributions.map((item) => item.rank)).toEqual([1, 2]);
+    expect(resolveRegistry(registry)).toEqual(["1", "2"]);
+    expect(seen).toEqual([["2"], ["1", "2"]]);
+
+    const brokenWatcher = registry.watch(() => {
+      throw new Error("watcher failed");
+    });
+    undoOne();
+    expect(registry.errors).toHaveLength(1);
+    brokenWatcher();
+    stop();
+
+    const broken = defineRegistry<number, number>("broken", {
+      compose: () => {
+        throw new Error("compose failed");
+      },
+      fallback: -1,
+    });
+    expect(resolveRegistry(broken)).toBe(-1);
+    expect(broken.errors).toHaveLength(1);
+
+    expect(registry.version).toBe(2);
+    expect(registry.realm).toBe(realm);
+    undoTwo();
   });
 });

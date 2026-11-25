@@ -56,6 +56,49 @@ describe("T-05 fiber 生命周期", () => {
     expect(calls).toEqual(["apply-1", "second-1", "first-1", "apply-2", "second-2", "first-2"]);
   });
 
+  test("ctx.use 子 fiber 在父 update 时退役并以新 uid 重建", async () => {
+    const calls: string[] = [];
+    const uids: string[] = [];
+    const childReady: Array<Promise<void>> = [];
+    let generation = 0;
+    const ctx = createContext();
+    const child = defineComponent({
+      name: "retired-child",
+      apply: () => {
+        const current = ++generation;
+        return () => {
+          calls.push(`child-${current}`);
+        };
+      },
+    });
+    const parent = ctx.use(
+      defineComponent({
+        name: "retiring-parent",
+        apply: (fiber) => {
+          const handle = (fiber as Context).use(child);
+          uids.push(handle.uid);
+          childReady.push(handle.ready);
+          return () => {};
+        },
+      })
+    );
+    await parent.ready;
+    await Promise.all(childReady);
+    expect(generation).toBe(1);
+    expect(calls).toEqual([]);
+
+    await parent.update();
+    await Promise.all(childReady);
+    expect(new Set(uids).size).toBe(2);
+    expect(uids[0]).not.toBe(uids[1]);
+    expect(calls).toEqual(["child-1"]);
+
+    parent.remove();
+    await ctx.notify();
+    await ctx.dispose();
+    expect(calls).toEqual(["child-1", "child-2"]);
+  });
+
   test("provider 撤回等待 consumer teardown，且 teardown 可读旧依赖", async () => {
     const dependency = defineKey<string>("@zeta-agent/lifecycle-test", "guard-dependency");
     const service = defineKey<string>("@zeta-agent/lifecycle-test", "guard-service");
@@ -261,6 +304,61 @@ describe("T-05 fiber 生命周期", () => {
     }
     expect(system.fibers.size).toBe(0);
     expect(system.viewFor([service])).toBeNull();
+  });
+});
+
+describe("T-05 fiber remove/update barrier", () => {
+  test("remove() 返回可等待 Promise，卸载逆完成前不 resolve", async () => {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ctx = createContext();
+    const handle = ctx.use(
+      defineComponent({
+        name: "awaitable-remove",
+        inject: [],
+        provide: [],
+        apply: () => async () => {
+          events.push("dispose:start");
+          await gate;
+          events.push("dispose:end");
+        },
+      })
+    );
+    await handle.ready;
+    const removing = handle.remove();
+    expect(events).toEqual(["dispose:start"]);
+    expect(handle.state.kind).toBe("UNLOADING");
+    release();
+    await removing;
+    expect(events).toEqual(["dispose:start", "dispose:end"]);
+    expect(handle.state.kind).toBe("DISPOSED");
+    await ctx.dispose();
+  });
+
+  test("update(config) 将新配置传入 apply 并递增 revision", async () => {
+    const seen: unknown[] = [];
+    const ctx = createContext();
+    const handle = ctx.use(
+      defineComponent<{ v: number }>({
+        name: "update-config",
+        inject: [],
+        provide: [],
+        apply: (_fiber, config) => {
+          seen.push(config);
+          return () => {};
+        },
+      }),
+      { v: 1 }
+    );
+    await handle.ready;
+    await handle.update({ v: 2 });
+    expect(seen).toEqual([{ v: 1 }, { v: 2 }]);
+    expect(handle.revision).toBe(1);
+    await handle.remove();
+    await ctx.dispose();
   });
 });
 

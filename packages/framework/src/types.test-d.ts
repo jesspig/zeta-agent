@@ -74,6 +74,7 @@ const impl: Impl = {
   check: () => true,
   dependents: new Set<string>(),
   isolate: Symbol("realm-1"),
+  generation: 1,
 };
 
 const checkResult: boolean | undefined = impl.check?.();

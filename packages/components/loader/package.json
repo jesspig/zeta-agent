@@ -4,8 +4,15 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./config": "./src/config.ts",
+    "./hmr": "./src/hmr.ts",
+    "./reconcile": "./src/reconcile.ts",
+    "./types": "./src/types.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
-    "@zeta-agent/framework": "workspace:*",
     "@zeta-agent/cordis": "workspace:*"
   },
   "scripts": {
