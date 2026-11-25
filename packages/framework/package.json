@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@zeta-agent/cordis": "workspace:*",
+    "@zeta-agent/loader": "workspace:*",
     "@zeta-agent/events": "workspace:*",
     "@zeta-agent/observability": "workspace:*"
   },

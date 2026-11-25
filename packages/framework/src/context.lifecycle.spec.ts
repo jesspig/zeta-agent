@@ -307,6 +307,61 @@ describe("T-05 fiber 生命周期", () => {
   });
 });
 
+describe("T-05 fiber remove/update barrier", () => {
+  test("remove() 返回可等待 Promise，卸载逆完成前不 resolve", async () => {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ctx = createContext();
+    const handle = ctx.use(
+      defineComponent({
+        name: "awaitable-remove",
+        inject: [],
+        provide: [],
+        apply: () => async () => {
+          events.push("dispose:start");
+          await gate;
+          events.push("dispose:end");
+        },
+      })
+    );
+    await handle.ready;
+    const removing = handle.remove();
+    expect(events).toEqual(["dispose:start"]);
+    expect(handle.state.kind).toBe("UNLOADING");
+    release();
+    await removing;
+    expect(events).toEqual(["dispose:start", "dispose:end"]);
+    expect(handle.state.kind).toBe("DISPOSED");
+    await ctx.dispose();
+  });
+
+  test("update(config) 将新配置传入 apply 并递增 revision", async () => {
+    const seen: unknown[] = [];
+    const ctx = createContext();
+    const handle = ctx.use(
+      defineComponent<{ v: number }>({
+        name: "update-config",
+        inject: [],
+        provide: [],
+        apply: (_fiber, config) => {
+          seen.push(config);
+          return () => {};
+        },
+      }),
+      { v: 1 }
+    );
+    await handle.ready;
+    await handle.update({ v: 2 });
+    expect(seen).toEqual([{ v: 1 }, { v: 2 }]);
+    expect(handle.revision).toBe(1);
+    await handle.remove();
+    await ctx.dispose();
+  });
+});
+
 describe("T-05 context-scoped observer", () => {
   test("observer 按 context 隔离、生成 effect 树并隔离 handler 错误", async () => {
     const seenA: EffectMeta[] = [];

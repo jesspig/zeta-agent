@@ -289,6 +289,8 @@ export class Fiber {
   private readonly dependencies = new Map<symbol, ProviderBinding>();
   private loaded = false;
   updating = false;
+  /** 原地更新次数：replace/配置生效的可观察序号，与 uid 身份无关。 */
+  revision = 0;
   private removeRequested = false;
   private removing: Promise<void> | null = null;
 
@@ -368,8 +370,11 @@ export class Fiber {
     if (this.inertia === running) this.inertia = null;
   }
 
-  async update(): Promise<void> {
+  /** 同 fiber 原地更新：显式 config 覆盖 spec.config，revision 递增，供 loader/HMR 观察。 */
+  async update(config?: unknown): Promise<void> {
     if (this.removeRequested || this.state.kind === "DISPOSED") return;
+    if (config !== undefined) (this.spec as { config?: unknown }).config = config;
+    this.revision += 1;
     if (this.inertia) await this.inertia;
     if (this.removeRequested || this.isDisposed()) return;
     this.updating = true;

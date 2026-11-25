@@ -215,8 +215,12 @@ export interface ContextFiber {
   readonly state: LifecycleState;
   /** 首次加载完成；若当时依赖未齐备，state 可能是 PENDING，随后由 notify 驱动。 */
   readonly ready: Promise<void>;
-  update(): Promise<void>;
-  remove(): void;
+  /** 同 fiber 原地更新；显式 config 覆盖装配配置，revision 递增。 */
+  update<P>(config?: P): Promise<void>;
+  /** 完全去活的 barrier：reconcile 等待该 Promise 后才允许 insert 同名替换。 */
+  remove(): Promise<void>;
+  /** 原地更新序号，与 uid 身份无关。 */
+  readonly revision: number;
 }
 
 /** facade 统一上下文：cordis 的 effect/coeffect/fiber 语义的单一入口。 */
@@ -484,14 +488,17 @@ function makeContext(
         return fiber.state;
       },
       ready,
-      update: () => fiber.update(),
+      update: (config?: unknown) => fiber.update(config),
+      get revision() {
+        return fiber.revision;
+      },
       remove: () => {
         for (const key of component.provide) {
           if (internals.providerVersions.get(key.symbol)?.uid === uid) {
             internals.providerVersions.delete(key.symbol);
           }
         }
-        void fiber.remove();
+        return fiber.remove();
       },
     };
   };

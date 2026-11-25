@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { Entry } from "./config";
+import type { CoeffectKey } from "@zeta-agent/cordis/types";
+import { flattenEntries, type Entry } from "./config";
 import {
+  applyReconcile,
   createReconcileState,
   realmFor,
   reconcile,
@@ -106,5 +108,148 @@ describe("entry 对账与 realm 重分配", () => {
     expect(empty.entries.size).toBe(0);
     expect(result.state.entries.size).toBe(1);
     expect(() => reconcile(empty, [entry("a", "./a.ts"), entry("a", "./b.ts")])).toThrow("DUPLICATE_ENTRY_ID");
+  });
+});
+
+describe("T-05 reconcile 真正执行器", () => {
+  test("name 变化严格等待旧 fiber 去活后才 insert", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const host = async (action: ReconcileAction): Promise<void> => {
+      if (action.kind === "unload") {
+        order.push("unload:start");
+        await gate;
+        order.push("unload:end");
+      } else {
+        order.push(action.kind);
+        return;
+      }
+    };
+    const reconciler = new Reconciler();
+    await reconciler.apply([entry("a", "./a.ts")], host);
+
+    const pending = reconciler.apply([entry("a", "./a-v2.ts")], host);
+    expect(order).toEqual(["insert", "unload:start"]);
+    release();
+    await pending;
+    expect(order).toEqual(["insert", "unload:start", "unload:end", "insert"]);
+  });
+
+  test("group 递归 keyed diff：增删子项只影响对应 key，并带父/组归属", async () => {
+    const group = (children: readonly Entry[]): Entry => ({
+      id: "nav",
+      name: "@zeta/group",
+      group: true,
+      config: children,
+    });
+    const seen: string[] = [];
+    const host = (action: ReconcileAction): void => {
+      seen.push(`${action.kind}:${action.entry.id}:${action.parent ?? "-"}:${action.group ?? "-"}`);
+    };
+    const reconciler = new Reconciler();
+    const children = [entry("home", "./home.ts"), entry("admin", "./admin.ts")];
+    await reconciler.apply([group(children)], host);
+    expect(seen).toEqual(["insert:nav:home:nav:nav", "insert:nav:admin:nav:nav"]);
+
+    await reconciler.apply([group([...children, entry("extra", "./extra.ts")])], host);
+    expect(seen.at(-1)).toBe("insert:nav:extra:nav:nav");
+
+    await reconciler.apply([group([entry("home", "./home.ts")])], host);
+    expect(seen.slice(-2)).toEqual(["unload:nav:admin:nav:nav", "unload:nav:extra:nav:nav"]);
+    // home 的 key 未被触碰，不产生任何 reload/unload。
+    expect(seen.filter((item) => item.startsWith("unload") || item.startsWith("reload"))).toHaveLength(2);
+    expect(flattenEntries([group(children)]).map((item) => item.entry.id)).toEqual(["nav:home", "nav:admin"]);
+  });
+
+  test("isolate 删除携带迁移信息，不刷新无关 realm 的 entry", async () => {
+    const hostActions: ReconcileAction[] = [];
+    const reconciler = new Reconciler();
+    await reconciler.apply(
+      [
+        entry("a", "./a.ts", { isolate: { db: "shared" } }),
+        entry("b", "./b.ts", { isolate: { db: "shared" } }),
+      ],
+      (action) => {
+        hostActions.push(action);
+      }
+    );
+    const before = realmFor(reconciler.state, "b", "db");
+    hostActions.length = 0;
+    await reconciler.apply(
+      [
+        entry("a", "./a.ts", { isolate: {} }),
+        entry("b", "./b.ts", { isolate: { db: "shared" } }),
+      ],
+      (action) => {
+        hostActions.push(action);
+      }
+    );
+    expect(hostActions.map((item) => item.kind)).toEqual(["realm"]);
+    expect(hostActions[0]?.removedRealms).toEqual(["db"]);
+    expect(hostActions[0]?.entry.id).toBe("a");
+    // 未变更的 b 维持原 realm，也无 reload/notify 动作。
+    expect(realmFor(reconciler.state, "b", "db")).toBe(before);
+  });
+
+  test("inject 经 resolveKey 解析为 action.keys 并真实参与动作", async () => {
+    const key = (name: string): CoeffectKey<unknown> => ({
+      namespace: "@zeta-agent/entry",
+      name,
+      symbol: Symbol(name),
+    });
+    const seen: Array<readonly CoeffectKey<any>[] | undefined> = [];
+    await applyReconcile(
+      createReconcileState(),
+      [entry("a", "./a.ts", { inject: ["db", "cache"] })],
+      (action) => {
+        seen.push(action.keys);
+      },
+      { resolveKey: key }
+    );
+    expect(seen[0]?.map((item) => item?.name)).toEqual(["db", "cache"]);
+
+    const renamed = await applyReconcile(
+      createReconcileState(),
+      [entry("a", "./a.ts", { inject: { alias: "db" } })],
+      () => undefined,
+      { resolveKey: key }
+    );
+    expect(renamed.actions[0]?.keys?.map((item) => item.name)).toEqual(["db"]);
+  });
+
+  test("update(config) 经 reload 动作生效，self-disable 回写而不是静默丢弃", async () => {
+    const seen: unknown[] = [];
+    const host = (action: ReconcileAction): void => {
+      if (action.kind === "insert" || action.kind === "reload") seen.push(action.entry.config);
+    };
+    const reconciler = new Reconciler();
+    await reconciler.apply([entry("a", "./a.ts", { config: { v: 1 } })], host);
+    const updated = await reconciler.apply([entry("a", "./a.ts", { config: { v: 2 } })], host);
+    expect(seen).toEqual([{ v: 1 }, { v: 2 }]);
+    expect(updated.actions.map((item) => item.kind)).toEqual(["reload"]);
+
+    const disabled = await reconciler.apply([entry("a", "./a.ts", { disabled: true })], host);
+    expect(disabled.disabled).toEqual(["a"]);
+    expect(disabled.state.entries.has("a")).toBe(true);
+    expect(disabled.state.active.has("a")).toBe(false);
+    expect(disabled.actions.map((item) => item.kind)).toEqual(["unload"]);
+  });
+
+  test("执行器抛错时不提交状态，便于上层重试", async () => {
+    const reconciler = new Reconciler();
+    await reconciler.apply([entry("a", "./a.ts")], () => undefined);
+    let error: unknown;
+    try {
+      await reconciler.apply([entry("a", "./a-v2.ts")], () => {
+        throw new Error("HOST_BOOM");
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(String(error)).toContain("HOST_BOOM");
+    expect(reconciler.state.entries.get("a")?.name).toBe("./a.ts");
   });
 });

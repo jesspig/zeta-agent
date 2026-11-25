@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { defineComponent } from "../context";
+import { createComponentRegistry } from "./registry";
 import {
   analyzeGraph,
   buildImportGraph,
   closureDigest,
   createHmrController,
+  detectCycles,
   digestText,
   parseImports,
   runExclusive,
@@ -306,5 +309,206 @@ describe("T-15 HMR 事务语义", () => {
     expect(ctrl.stateOf("a")).toBeDefined();
     await flush;
     ctrl.close();
+  });
+});
+
+describe("T-05 HMR 动态图与连通 unit 提交", () => {
+  function harness(record: Record<string, string>, overrides: {
+    build?: (unit: HmrUnit, version: number, digest: string) => BuildArtifact;
+    apply?: (unit: HmrUnit, instance: UnitInstance) => void;
+    readFile?: (path: string) => string | Uint8Array | undefined;
+    debounceMs?: number;
+    onError?: (error: unknown) => void;
+    auto?: boolean;
+  } = {}) {
+    const ctrl = createHmrController({
+      root: "/plugins",
+      units: [unit("a", "a.ts"), unit("b", "b.ts")],
+      readFile: overrides.readFile ?? files(record),
+      build: (item, version, digest) =>
+        overrides.build?.(item, version, digest) ?? artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => instance(item, item.version),
+      apply: (item, value) => overrides.apply?.(item, value),
+      debounceMs: overrides.debounceMs,
+      onError: overrides.onError,
+      auto: overrides.auto,
+    });
+    return ctrl;
+  }
+
+  test("每次事务重建 import graph：新增/删除 import 与环都可检测", async () => {
+    const record: Record<string, string> = {
+      "a.ts": 'import "./shared.ts";',
+      "b.ts": "b-v1",
+      "shared.ts": "shared-v1",
+    };
+    const ctrl = harness(record);
+    expect(ctrl.graph().edges["a.ts"]).toContain("shared.ts");
+    expect(ctrl.analysis().cycles).toEqual([]);
+
+    record["a.ts"] = "a-v2";
+    ctrl.markDirty(["a.ts"]);
+    await ctrl.flush();
+    expect(ctrl.graph().edges["a.ts"] ?? []).toEqual([]);
+
+    record["a.ts"] = 'import "./b.ts";';
+    record["b.ts"] = 'import "./a.ts";';
+    ctrl.markDirty(["a.ts", "b.ts"]);
+    await ctrl.flush();
+    expect(ctrl.graph().edges["a.ts"]).toContain("b.ts");
+    expect(ctrl.graph().edges["b.ts"]).toContain("a.ts");
+    expect(detectCycles(ctrl.graph()).length).toBeGreaterThan(0);
+    expect(ctrl.analysis().cycles.length).toBeGreaterThan(0);
+    ctrl.close();
+  });
+
+  test("共享依赖失败时整个连通 unit 回退，保留旧 artifact", async () => {
+    const record: Record<string, string> = {
+      "a.ts": 'import "./shared.ts";',
+      "b.ts": 'import "./shared.ts";',
+      "shared.ts": "shared-v1",
+    };
+    let failB = false;
+    const ctrl = harness(record, {
+      build: (item, version, digest) => {
+        if (item.id === "b" && failB) throw new Error("SHARED_BOOM");
+        return artifact(`${item.entry}?v=${version}`, digest, version);
+      },
+    });
+    ctrl.markDirty(["shared.ts"]);
+    const first = await ctrl.flush();
+    expect(first.settled).toEqual(["a", "b"]);
+    const beforeA = ctrl.stateOf("a")!;
+    const beforeB = ctrl.stateOf("b")!;
+
+    record["shared.ts"] = "shared-v2";
+    failB = true;
+    ctrl.markDirty(["shared.ts"]);
+    const result = await ctrl.flush();
+    expect(result.aborted).toContain("a");
+    expect(result.aborted).toContain("b");
+    expect(result.settled).toEqual([]);
+    expect(ctrl.stateOf("a")).toBe(beforeA);
+    expect(ctrl.stateOf("b")).toBe(beforeB);
+    ctrl.close();
+  });
+
+  test("registry.replace 真实保留 uid/parent/config 并递增 revision", async () => {
+    const registry = createComponentRegistry();
+    const oldComponent = defineComponent({ name: "old", inject: [], provide: [], apply: () => () => {} });
+    const replacement = defineComponent({ name: "new", inject: [], provide: [], apply: () => () => {} });
+    const config = { port: 1 };
+    const original = registry.register(oldComponent, { uid: "stable", parent: "root", config });
+    const ctrl = createHmrController({
+      root: "/plugins",
+      units: [unit("a", "a.ts")],
+      readFile: files({ "a.ts": "v1" }),
+      build: (item, version, digest) => artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => instance(item, item.version),
+      apply: () => undefined,
+      registry,
+      componentOf: () => oldComponent,
+      replacementOf: () => replacement,
+    });
+    ctrl.markDirty(["a.ts"]);
+    const result = await ctrl.flush();
+    expect(result.settled).toEqual(["a"]);
+    const replaced = registry.byUid("stable")!;
+    expect(replaced).not.toBe(original);
+    expect(replaced.uid).toBe("stable");
+    expect(replaced.parent).toBe("root");
+    expect(replaced.config).toBe(config);
+    expect(replaced.component).toBe(replacement);
+    expect(replaced.revision).toBe(1);
+    ctrl.close();
+  });
+
+  test("apply 失败后重试只与变更 roots 相关", async () => {
+    let failApply = true;
+    const ctrl = harness({ "a.ts": "a-v1", "b.ts": "b-v1" }, {
+      apply: (item) => {
+        if (item.id === "a" && failApply) throw new Error("APPLY_BOOM");
+      },
+    });
+    ctrl.markDirty(["a.ts"]);
+    const failed = await ctrl.flush();
+    expect(failed.settled).toEqual([]);
+    expect(ctrl.stateOf("a")?.status).toBe("FAILED");
+
+    ctrl.markDirty(["b.ts"]);
+    const unrelated = await ctrl.flush();
+    expect(unrelated.retried).not.toContain("a");
+    expect(ctrl.stateOf("a")?.status).toBe("FAILED");
+
+    failApply = false;
+    ctrl.markDirty(["a.ts"]);
+    const retried = await ctrl.flush();
+    expect(retried.retried).toContain("a");
+    expect(retried.settled).toContain("a");
+    expect(ctrl.stateOf("a")?.status).toBe("ACTIVE");
+    ctrl.close();
+  });
+
+  test("事务队列按实例隔离，auto watcher 的 flush 拒绝有错误出口", async () => {
+    const record: Record<string, string> = { "a.ts": "v1", "b.ts": "v1" };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    const a = createHmrController({
+      root: "/p",
+      units: [unit("a", "a.ts")],
+      readFile: files(record),
+      build: (item, version, digest) => artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => instance(item, item.version),
+      apply: async () => {
+        order.push("a-apply");
+        await gate;
+      },
+    });
+    const b = createHmrController({
+      root: "/p",
+      units: [unit("b", "b.ts")],
+      readFile: files(record),
+      build: (item, version, digest) => artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => instance(item, item.version),
+      apply: () => {
+        order.push("b-apply");
+      },
+    });
+    a.markDirty(["a.ts"]);
+    b.markDirty(["b.ts"]);
+    const pendingA = a.flush();
+    const pendingB = b.flush();
+    await b.ready();
+    expect(order).toContain("b-apply");
+    release();
+    await Promise.all([pendingA, pendingB]);
+    a.close();
+    b.close();
+
+    let armed = false;
+    const errors: unknown[] = [];
+    const watched = createHmrController({
+      root: "/p",
+      units: [unit("a", "a.ts")],
+      readFile: (path) => {
+        if (armed) throw new Error("READ_BOOM");
+        return record[path];
+      },
+      build: (item, version, digest) => artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => instance(item, item.version),
+      apply: () => undefined,
+      debounceMs: 0,
+      onError: (error) => errors.push(error),
+    });
+    armed = true;
+    watched.notifyFile("a.ts");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await watched.ready();
+    expect(watched.errors().length).toBeGreaterThan(0);
+    expect(errors.length).toBeGreaterThan(0);
+    watched.close();
   });
 });
