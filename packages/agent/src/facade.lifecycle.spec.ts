@@ -154,4 +154,105 @@ describe("T-06 公共 facade 生命周期", () => {
       expect(events.at(-1)?.type).toBe("agent_end");
     }
   });
+
+  test("公开 inject/QueueMode 接入 facade loop：step 模式每轮 claim 一条 nextStep", async () => {
+    const requests: string[][] = [];
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* (request) {
+        streams += 1;
+        const messages = request.messages.filter((message) => message.role === "user");
+        requests.push(messages.map((message) => String(message.content)));
+        if (streams === 1) yield { type: "tool_call", id: "c1", name: "noop", arguments: "{}" };
+        else yield "ok";
+      },
+    });
+    agent.api.registerTool({ name: "noop", execute: () => "ok" });
+    agent.setQueueMode("step");
+    agent.inject({ role: "user", content: "step-1" });
+    agent.inject({ role: "user", content: "step-2" });
+    expect(agent.getQueueMode()).toBe("step");
+    expect(agent.queueSize("nextStep")).toBe(2);
+
+    await agent.prompt("go");
+
+    expect(requests[1]).toEqual(["go", "step-1"]);
+    expect(requests[2]).toEqual(["go", "step-1", "step-2"]); // transcript 历史保留
+    expect(agent.queueSize("nextStep")).toBe(0);
+  });
+
+  test("产品路径 natural end：预置 followUp 在同一次 run 的外层消费", async () => {
+    let streams = 0;
+    const seen: string[] = [];
+    let agent: ReturnType<typeof createAgent> | undefined;
+    agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* (request) {
+        streams += 1;
+        const users = request.messages.filter((message) => message.role === "user");
+        seen.push(String(users.at(-1)?.content ?? ""));
+        if (streams === 1) agent!.followUp({ role: "user", content: "follow" });
+        yield "ok";
+      },
+    });
+
+    await agent.prompt("first");
+
+    expect(streams).toBe(2);
+    expect(seen).toEqual(["first", "follow"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+  });
+
+  test("产品路径 decision end：保留 followUp，下一次 prompt 才消费", async () => {
+    let streams = 0;
+    const seen: string[] = [];
+    let decisions = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      // 只让第一次 prompt 硬终止；之后恢复默认 natural，验证保留队列能被下一次 prompt 消费。
+      loopHooks: { finishTurn: () => (++decisions === 1 ? { action: "end" } : undefined) },
+      streamFn: async function* (request) {
+        streams += 1;
+        const users = request.messages.filter((message) => message.role === "user");
+        seen.push(String(users.at(-1)?.content ?? ""));
+        yield "ok";
+      },
+    });
+    agent.followUp({ role: "user", content: "follow" });
+
+    await agent.prompt("first");
+    expect(streams).toBe(1);
+    expect(seen).toEqual(["first"]);
+    expect(agent.queueSize("followUp")).toBe(1);
+
+    await agent.prompt("second");
+    expect(streams).toBe(3);
+    expect(seen).toEqual(["first", "second", "follow"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+  });
+
+  test("产品路径 all terminate：整批 terminate 保留 followUp 且不再请求 provider", async () => {
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* () {
+        streams += 1;
+        if (streams === 1) yield { type: "tool_call", id: "c1", name: "stop", arguments: "{}" };
+        else yield "should-not-run";
+      },
+    });
+    agent.api.registerTool({ name: "stop", execute: () => "stopped" });
+    agent.api.addAfterToolCall(() => ({ terminate: true }));
+    agent.followUp({ role: "user", content: "follow" });
+
+    await agent.prompt("first");
+
+    expect(streams).toBe(1);
+    expect(agent.queueSize("followUp")).toBe(1);
+  });
 });

@@ -137,7 +137,58 @@ describe("T-06 公共 core run 所有权", () => {
     expect(agent.state.messages.length).toBeGreaterThan(ends[1]!.messages.length);
   });
 
-  test("运行中 follow-up 进入后续请求且 end 后保留未消费消息", async () => {
+  test("默认 natural end：预置 follow-up 在同一次 run 的外层消费", async () => {
+    const requests: string[] = [];
+    let streams = 0;
+    let injectFollowUp = (): void => {};
+    const agent = createAgent({
+      tools: [{ name: "noop", execute: () => "ok" }],
+      streamFn: async function* (request) {
+        streams += 1;
+        const messages = (request as { messages: readonly { role: string; content: unknown }[] }).messages;
+        requests.push(String(messages.filter((message) => message.role === "user").at(-1)?.content ?? ""));
+        if (streams === 1) {
+          injectFollowUp();
+          yield { type: "tool_call", id: "c1", name: "noop", arguments: "{}" };
+        } else yield "ok";
+      },
+    });
+    injectFollowUp = () => agent.followUp({ role: "user", content: "follow" });
+    await agent.prompt("first");
+
+    expect(streams).toBe(3);
+    expect(requests).toEqual(["first", "first", "follow"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+  });
+
+  test("显式 decision end 保留 follow-up，下一次 prompt 的自然终局才消费", async () => {
+    const requests: string[] = [];
+    let streams = 0;
+    let decisions = 0;
+    const agent = createAgent({
+      // 只在第一次 prompt 硬终止；之后恢复默认 natural，验证保留队列不永久滞留。
+      loopHooks: { finishTurn: () => (++decisions === 1 ? { action: "end" } : undefined) },
+      streamFn: async function* (request) {
+        streams += 1;
+        const messages = (request as { messages: readonly { role: string; content: unknown }[] }).messages;
+        requests.push(String(messages.filter((message) => message.role === "user").at(-1)?.content ?? ""));
+        yield "ok";
+      },
+    });
+    agent.followUp({ role: "user", content: "follow" });
+
+    await agent.prompt("first");
+    expect(streams).toBe(1);
+    expect(requests).toEqual(["first"]);
+    expect(agent.queueSize("followUp")).toBe(1);
+
+    await agent.prompt("second");
+    expect(streams).toBe(3);
+    expect(requests).toEqual(["first", "second", "follow"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+  });
+
+  test("公开 inject/QueueMode 接入 runLoop：step 每次 claim 一条 nextStep", async () => {
     const requests: string[] = [];
     let streams = 0;
     const agent = createAgent({
@@ -150,9 +201,35 @@ describe("T-06 公共 core run 所有权", () => {
         else yield "ok";
       },
     });
-    const first = agent.prompt("first");
-    agent.followUp({ role: "user", content: "follow" });
-    await first;
-    expect(requests).toEqual(["first", "first", "follow"]);
+    agent.setQueueMode("step");
+    agent.inject({ role: "user", content: "step-1" });
+    agent.inject({ role: "user", content: "step-2" });
+    expect(agent.getQueueMode()).toBe("step");
+    expect(agent.queueSize("nextStep")).toBe(2);
+
+    await agent.prompt("go");
+
+    expect(requests).toEqual(["go", "step-1", "step-2"]);
+    expect(agent.queueSize("nextStep")).toBe(0);
+  });
+
+  test("公开 setQueueMode(interrupt)：steer 清空 nextStep 并插队 nextTurn 队首", async () => {
+    const requests: string[][] = [];
+    const agent = createAgent({
+      streamFn: async function* (request) {
+        const messages = (request as { messages: readonly { role: string; content: unknown }[] }).messages;
+        requests.push(messages.filter((message) => message.role === "user").map((message) => String(message.content)));
+        yield "ok";
+      },
+    });
+    agent.inject({ role: "user", content: "stale" });
+    agent.setQueueMode("interrupt");
+    agent.steer({ role: "user", content: "urgent" });
+
+    await agent.prompt("go");
+
+    expect(agent.queueSize("nextStep")).toBe(0);
+    // interrupt 把每次 steer 的 message unshift 到队首：最后入队的 "go" 在最前。
+    expect(requests[0]).toEqual(["go", "urgent"]);
   });
 });

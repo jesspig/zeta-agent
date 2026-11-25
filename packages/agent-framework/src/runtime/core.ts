@@ -19,13 +19,16 @@ import {
   type AgentState,
   type EventStream,
 } from "./agent";
-import { createInbox, type Inbox } from "./inbox";
+import { createInbox, type Inbox, type InboxMessage, type QueueMode, type QueueTarget } from "./inbox";
 import {
+  asNextTurnUpdate,
   runLoop,
   type AssistantResult,
   type LastTurn,
   type LoopDecision,
   type LoopRuntime,
+  type NextTurnUpdate,
+  type SourcePollPhase,
   type ToolCall,
 } from "./loop";
 import { createToolPipeline, createToolRegistry } from "../tools/pipeline";
@@ -86,6 +89,7 @@ export interface CorePluginApi extends AgentPluginApi {
   disposeAll(): void;
 }
 
+const CONTINUE_DECISION: LoopDecision = Object.freeze({ action: "continue" });
 const END_DECISION: LoopDecision = Object.freeze({ action: "end" });
 
 type CoreTool = {
@@ -230,6 +234,28 @@ export class Agent {
     this.inbox.followUp(message);
   }
 
+  inject(message: AgentMessage): InboxMessage {
+    return this.inbox.inject(message);
+  }
+
+  setQueueMode(mode: QueueMode): void {
+    this.inbox.setMode(mode);
+  }
+
+  getQueueMode(): QueueMode {
+    return this.inbox.getMode();
+  }
+
+  queueSize(target: QueueTarget): number {
+    return this.inbox.size(target);
+  }
+
+  private async pollQueueSources(signal: AbortSignal, kinds: "all" | "steering" = "all"): Promise<void> {
+    await this.manager.run("steering", this.inbox, signal);
+    // prepareNextTurn 只重轮询 steering：followUp 在这里重入会与 natural end 外层消费互相喂料而无限续跑。
+    if (kinds === "all") await this.manager.run("followUp", this.inbox, signal);
+  }
+
   async waitForIdle(): Promise<void> {
     while (this.activeRun !== undefined) {
       await this.activeRun.promise.catch(() => {});
@@ -303,8 +329,8 @@ export class Agent {
 
     const inbox = this.inbox;
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
-    await this.manager.run("steering", inbox, signal);
-    await this.manager.run("followUp", inbox, signal);
+    await this.pollQueueSources(signal);
+    // followUp 交给 runLoop 外层：natural end 同轮消费，硬终局保留到下一个 run 的自然终局。
 
     const registry = createToolRegistry();
     for (const [name, tool] of this.tools) {
@@ -324,9 +350,13 @@ export class Agent {
       turnBudget: this.turnBudget,
       emit: (event) => this.stream.emit(event, signal),
       getState: () => this.stream.getState(),
-      prepareNextTurn: async () => {
-        await this.manager.run("prepareNextTurn", this.stream.getState(), signal);
-        await this.loopHooks.prepareNextTurn?.(this.stream.getState(), signal);
+      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> => {
+        const chained = asNextTurnUpdate(await this.manager.run("prepareNextTurn", this.stream.getState(), signal));
+        const hooked = asNextTurnUpdate(await this.loopHooks.prepareNextTurn?.(this.stream.getState(), signal));
+        return hooked ?? chained;
+      },
+      pollSources: async (phase: SourcePollPhase): Promise<void> => {
+        await this.pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
       prepareRequest: async (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
@@ -345,7 +375,11 @@ export class Agent {
         await this.manager.run("turnBoundary", event, signal);
         const legacy = await this.loopHooks.finishTurn?.(turn, signal);
         if (legacy !== undefined) return legacy;
-        return this.lastTurnHadNativeTools && turn.toolResults.length > 0 ? undefined : END_DECISION;
+        // 原生工具结果必须被下一轮消费：显式 continue；否则 natural end 交给 runLoop 外层。
+        if (this.lastTurnHadNativeTools && turn.toolResults.length > 0) return CONTINUE_DECISION;
+        // 非原生 toolCalls（兼容文本标记等）保持单轮收束，避免默认续跑反复解析。
+        if (turn.toolResults.length > 0) return END_DECISION;
+        return undefined;
       },
       pollFollowUp: async () => {
         const followUps = inbox.poll("followUp").map((item) => item.body);

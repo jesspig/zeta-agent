@@ -1,4 +1,5 @@
 import {
+  asNextTurnUpdate,
   createEventStream,
   createInbox,
   declareToolChanges,
@@ -38,8 +39,13 @@ import {
   type EventBus,
   type FinishTurn,
   type Inbox,
+  type InboxMessage,
   type LoopRuntime,
+  type NextTurnUpdate,
   type PluginContribution,
+  type QueueMode,
+  type QueueTarget,
+  type SourcePollPhase,
   type PluginMetadata,
   type ContributionContext,
   type ContributionExecutors,
@@ -553,6 +559,12 @@ export interface Agent extends PluginApiSurface {
   steer(message: AgentMessage): void;
   /** 运行中注入 followUp 消息：按队列语义留到下一次轮首消费。 */
   followUp(message: AgentMessage): void;
+  /** 注入 nextStep 消息：不唤醒当前 run，在 prepareNextTurn 时按 QueueMode claim。 */
+  inject(message: AgentMessage): InboxMessage;
+  /** 设置队列模式：all 全量消费、step 每次一条、interrupt 清空 nextStep 并插队 nextTurn。 */
+  setQueueMode(mode: QueueMode): void;
+  getQueueMode(): QueueMode;
+  queueSize(target: QueueTarget): number;
   subscribe(listener: AgentListener): Disposer;
   abort(): void;
   /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
@@ -905,6 +917,20 @@ export function createAgent(options: AgentOptions = {}): Agent {
   /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
   const inbox: Inbox = createInbox();
 
+  async function pollQueueSources(signal: AbortSignal, kinds: "all" | "steering" = "all"): Promise<void> {
+    for (const source of steeringSources) {
+      const message = await source.next() as AgentMessage | undefined;
+      if (message !== undefined) inbox.steer(message);
+    }
+    // prepareNextTurn 只重轮询 steering：followUp 在这里重入会与 natural end 外层消费互相喂料而无限续跑。
+    if (kinds === "all") {
+      for (const source of followUpSources) {
+        const message = await source.next() as AgentMessage | undefined;
+        if (message !== undefined) inbox.followUp(message);
+      }
+    }
+  }
+
   function addDisposer(dispose: () => void): () => void {
     return pluginManager.addDisposer(dispose);
   }
@@ -1241,6 +1267,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 模型在纯文本流中用该标记请求工具调用（stub 期间尚无结构化 tool-call 通道）。
   const TOOL_MARKER_RE = /@@TOOL:([A-Za-z0-9_.:-]+):(.*?)@@/g;
   // 与 runLoop 的默认终局判断相反：无工具调用的单轮也应结束，而非显式续跑。
+  const TURN_CONTINUE_DECISION = { action: "continue" } as const;
   const TURN_END_DECISION = { action: "end" } as const;
   // 工具结果仅回传本地执行信息，不重新进入模型（避免 stub 下的无限续跑）。
   const NO_TOOL_RESULT = "";
@@ -1313,12 +1340,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     }
 
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
-    for (const source of steeringSources) {
-      inbox.steer(await source.next() as AgentMessage);
-    }
-    for (const source of followUpSources) {
-      inbox.followUp(await source.next() as AgentMessage);
-    }
+    await pollQueueSources(signal);
+    // followUp 不在这里 promote：自然终局由 runLoop 外层 pollFollowUp 消费；
+    // 硬终局保留的队列在下一个 run 的自然终局外层消费，不会永久滞留。
 
     const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>, signal?: AbortSignal) => unknown | Promise<unknown>>();
     for (const item of contributions) {
@@ -1551,9 +1575,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
       turnBudget: options.turnBudget,
       emit: (event) => stream.emit(event, signal),
       getState: () => stream.getState(),
-      prepareNextTurn: async () => {
-        for (const fn of prepareNextTurnFns) await fn(stream.getState(), signal);
-        await options.loopHooks?.prepareNextTurn?.(stream.getState(), signal);
+      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> => {
+        let update: NextTurnUpdate | undefined;
+        for (const fn of prepareNextTurnFns) {
+          update = asNextTurnUpdate(await fn(stream.getState(), signal)) ?? update;
+        }
+        update = asNextTurnUpdate(await options.loopHooks?.prepareNextTurn?.(stream.getState(), signal)) ?? update;
+        return update;
+      },
+      pollSources: async (phase: SourcePollPhase): Promise<void> => {
+        await pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
       declareToolChanges: () => {
         const next = toolNamesSnapshot();
@@ -1587,8 +1618,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
         for (const fn of turnBoundaries) await fn(event, signal);
         const legacy = await options.loopHooks?.finishTurn?.(turn, signal);
         if (legacy !== undefined) return legacy;
-        // 原生工具调用需要续跑一轮，让模型消费工具结果；文本标记协议保持单轮收束。
-        return lastTurnHadNativeTools && turn.toolResults.length > 0 ? undefined : TURN_END_DECISION;
+        // 原生工具调用需要显式续跑一轮，让模型消费工具结果。
+        if (lastTurnHadNativeTools && turn.toolResults.length > 0) return TURN_CONTINUE_DECISION;
+        // 文本标记协议保持单轮收束：结果已落盘，不能把 toolCalls 交给默认续跑反复解析。
+        if (turn.toolResults.length > 0) return TURN_END_DECISION;
+        // 无显式决策时交还 runLoop 走 natural end，由外层消费 follow-up / explicitContinuation。
+        return undefined;
       },
 
       async streamAssistant(
@@ -1787,6 +1822,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
     followUp: (message) => {
       inbox.followUp(message);
     },
+    inject: (message) => inbox.inject(message),
+    setQueueMode: (mode) => inbox.setMode(mode),
+    getQueueMode: () => inbox.getMode(),
+    queueSize: (target) => inbox.size(target),
     // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
     // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
