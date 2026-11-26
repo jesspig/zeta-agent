@@ -1,2 +1,7 @@
 apps/zeta-cli/assets/resource-catalog.zetaasset text eol=lf
 apps/zeta-cli/assets/arch-marker.zetaasset binary
+# 嵌入资源必须与 embedded-assets manifest 的 SHA-256 字节一致；
+# Windows checkout 不得转 CRLF，否则 ARTIFACT_SHA256_MISMATCH。
+apps/zeta-cli/assets/prompts/** text eol=lf
+apps/zeta-cli/assets/skills/** text eol=lf
+apps/zeta-cli/assets/schema/** text eol=lf
