@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   assertAcceptedRisksDoNotUpgrade,
   buildSummaryFromLogs,
   evaluateItem,
+  executeCommand,
   exitCodeForReport,
   main,
   parseArgs,
@@ -83,6 +84,23 @@ describe("T-25 acceptance v2 判据覆盖", () => {
 });
 
 describe("T-01 acceptance v2 故障注入与退出码", () => {
+  test("首次运行自动创建 runId 证据目录", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zeta-acceptance-dir-"));
+    try {
+      const result = executeCommand({ args: ["fixture"] }, {
+        root: dir,
+        runId: "fresh-run",
+        itemId: "AC-01",
+        index: 0,
+        spawn: () => ({ status: 0, stdout: "PASS fixture\n", stderr: "" }),
+      });
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(join(dir, "reports/evidence/acceptance/fresh-run/AC-01.0.log"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("命令非零退出/标记缺失/超时/信号都判 fail", () => {
     const item = { id: "B1", title: "fixture" };
     const nonzero = evaluateItem(item, [commandResult({ exitCode: 7, output: "exit=7\n" })]);

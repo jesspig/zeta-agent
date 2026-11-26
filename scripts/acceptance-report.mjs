@@ -233,6 +233,7 @@ export function executeCommand(spec, context = {}) {
   const rendered = sanitize(`${stdout}${stderr}${exitLine}`);
   const logPath = `${EVIDENCE_REL}/${runId}/${itemId}.${index}.log`;
   const bytes = Buffer.from(rendered, "utf8");
+  mkdirSync(dirname(join(root, logPath)), { recursive: true });
   writeBytes(join(root, logPath), bytes);
   const timedOut = result.error?.code === "ETIMEDOUT" || result.timedOut === true;
   return {
