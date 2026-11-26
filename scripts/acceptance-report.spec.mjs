@@ -76,6 +76,12 @@ function logReader() {
   };
 }
 
+describe("T-25 acceptance v2 判据覆盖", () => {
+  test("AC-01..AC-25 一一覆盖且无旧 A 项", () => {
+    expect(ITEM_IDS).toEqual(Array.from({ length: 25 }, (_, index) => `AC-${String(index + 1).padStart(2, "0")}`));
+  });
+});
+
 describe("T-01 acceptance v2 故障注入与退出码", () => {
   test("命令非零退出/标记缺失/超时/信号都判 fail", () => {
     const item = { id: "B1", title: "fixture" };
@@ -198,7 +204,7 @@ describe("T-01 部分重跑拒绝过期基线/缺失哈希", () => {
         : item),
     };
     expect(planPartialRerun({ ids: [ITEM_IDS[0]], previous: wrongCriterion, context: base, readBytes }).reasonCodes)
-      .toContain("PARTIAL_CRITERION_VERSION_MISMATCH:A1");
+      .toContain("PARTIAL_CRITERION_VERSION_MISMATCH:AC-01");
 
     expect(planPartialRerun({
       ids: [ITEM_IDS[0]],
@@ -239,7 +245,7 @@ describe("T-01 部分重跑拒绝过期基线/缺失哈希", () => {
 
 describe("T-01 Markdown 摘要与 acceptedRisk 边界", () => {
   test("摘要片段逐项来自同次日志并可定位", () => {
-    const logText = "PASS A1\nFAIL A1 exit=3\n";
+    const logText = "PASS AC-01\nFAIL AC-01 exit=3\n";
     const summary = buildSummaryFromLogs(logText);
     const report = {
       schema: ACCEPTANCE_SCHEMA,
@@ -250,7 +256,7 @@ describe("T-01 Markdown 摘要与 acceptedRisk 边界", () => {
         id: ITEM_IDS[0],
         criterionVersion: CRITERION_VERSION,
         status: "fail",
-        evidence: ["reports/evidence/acceptance/run/A1.0.log"],
+        evidence: ["reports/evidence/acceptance/run/AC-01.0.log"],
         summary,
         reasonCodes: ["COMMAND_NONZERO_EXIT"],
       }],
@@ -260,7 +266,7 @@ describe("T-01 Markdown 摘要与 acceptedRisk 边界", () => {
     expect(logText).toContain(summary);
   });
 
-  test("accepted-risk 只记录，绝不把 A 项改成 pass", () => {
+  test("accepted-risk 只记录，绝不把 AC 项改成 pass", () => {
     const failItem = { id: ITEM_IDS[0], status: "fail", reasonCodes: [] };
     const withRisk = applyAcceptedRisks([failItem], [{ itemId: ITEM_IDS[0], reason: "known" }]);
     expect(withRisk[0].status).toBe("fail");
