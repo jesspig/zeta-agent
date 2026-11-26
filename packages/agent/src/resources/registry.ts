@@ -4,18 +4,25 @@ import { builtinParsers, parseResource, type ParseResult, type ParserPlugin } fr
 import type { TrustGate } from "./trust";
 
 // MCP server 配置 coeffect 由 plugins/mcp 实现（@zeta-agent/mcp:servers）。
-export type ResourceType = "skill" | "prompt" | "theme" | "agents";
+export type ResourceType = "skill" | "prompt" | "theme" | "agents" | "schema";
 export type ResourceScope = "agent" | "project";
 
-/** 四类资源在目录中的约定：目录名、扩展名、是否递归。 */
+/** 五类资源在目录中的约定：目录名、扩展名、是否递归。 */
 const RESOURCE_LAYOUT: Readonly<Record<ResourceType, { dir: string; ext: string; recursive: boolean }>> = {
   skill: { dir: "skills", ext: "SKILL.md", recursive: true },
   prompt: { dir: "prompts", ext: ".md", recursive: false },
   theme: { dir: "themes", ext: ".json", recursive: false },
   agents: { dir: "agents", ext: "AGENTS.md", recursive: true },
+  schema: { dir: "schema", ext: ".json", recursive: false },
 };
 
-export const RESOURCE_TYPES: readonly ResourceType[] = Object.freeze(["skill", "prompt", "theme", "agents"]);
+export const RESOURCE_TYPES: readonly ResourceType[] = Object.freeze([
+  "skill",
+  "prompt",
+  "theme",
+  "agents",
+  "schema",
+]);
 
 export interface ResourceEntry {
   readonly id: string;
@@ -28,6 +35,8 @@ export interface ResourceEntry {
   readonly relativePath: string;
   /** load 时的 typed 解析结果；发现阶段为 undefined。 */
   readonly parse?: ParseResult;
+  /** 来自单文件嵌入资源：正文已在 entry.content，load 不读宿主文件。 */
+  readonly embedded?: boolean;
 }
 
 export interface ResourceManifest {
@@ -48,7 +57,9 @@ export interface ResourceRegistryOptions {
   readonly agentRoot: string;
   readonly projectRoot?: string;
   readonly trust?: TrustGate;
-  /** 可替换的解析器插件；缺省为内建 skill/prompt/theme/agents 解析器。 */
+  /** 单文件内嵌资源：与磁盘资源合并进同一清单，由 load 统一解析。 */
+  readonly embedded?: readonly ResourceEntry[];
+  /** 可替换的解析器插件；缺省为内建 skill/prompt/theme/agents/schema 解析器。 */
   readonly parsers?: readonly ParserPlugin[];
 }
 
@@ -113,6 +124,7 @@ export function createResourceRegistry(options: ResourceRegistryOptions): Resour
 
   function scan(): ResourceManifest {
     const entries = [
+      ...(options.embedded ?? []).map((entry) => ({ ...entry, embedded: true as const })),
       ...scanRoot(options.agentRoot, "agent"),
       ...(options.projectRoot === undefined ? [] : scanRoot(options.projectRoot, "project")),
     ];
@@ -139,12 +151,14 @@ export function createResourceRegistry(options: ResourceRegistryOptions): Resour
           throw error;
         }
       }
-      // 信任通过后再读取正文；读取失败返回空内容，与发现阶段一致。
-      let content = "";
-      try {
-        content = readFileSync(join(entry.root, RESOURCE_LAYOUT[entry.type].dir, entry.relativePath), "utf8");
-      } catch {
-        content = "";
+      // 嵌入资源正文已在清单内；磁盘资源在信任通过后再读取，失败返回空内容。
+      let content = entry.embedded === true ? entry.content : "";
+      if (entry.embedded !== true) {
+        try {
+          content = readFileSync(join(entry.root, RESOURCE_LAYOUT[entry.type].dir, entry.relativePath), "utf8");
+        } catch {
+          content = "";
+        }
       }
       // 解析失败不抛出：以 typed ParseResult 附着，单条坏资源不拖垮其它资源。
       const parsers = options.parsers ?? builtinParsers;

@@ -15,8 +15,14 @@ import {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliSource = join(root, "apps/zeta-cli/src");
 const generatedFile = join(cliSource, "embedded-assets.generated.ts");
-const catalogPath = join(root, "apps/zeta-cli/assets/resource-catalog.zetaasset");
-const trackedMarkerPath = join(root, "apps/zeta-cli/assets/arch-marker.zetaasset");
+const assetsRoot = join(root, "apps/zeta-cli/assets");
+const catalogPath = join(assetsRoot, "resource-catalog.zetaasset");
+const trackedMarkerPath = join(assetsRoot, "arch-marker.zetaasset");
+const contentAssets = [
+  { id: "system-prompt", path: join(assetsRoot, "prompts/system.md") },
+  { id: "skills-index", path: join(assetsRoot, "skills/builtins/SKILL.md") },
+  { id: "config-schema", path: join(assetsRoot, "schema/config.zetaasset") },
+] as const;
 const outputRoot = join(root, "dist/local");
 
 /** 架构标记只描述目标可执行格式的机器码，不是伪造的原生库。 */
@@ -38,9 +44,24 @@ function archMarkerBytes(plan: LocalBuildPlan): Uint8Array {
   return bytes;
 }
 
+function dataResource(id: string, path: string): EmbeddedResource {
+  const bytes = readFileSync(path);
+  return {
+    id,
+    kind: "data",
+    arch: "universal",
+    path: relative(assetsRoot, path).split(sep).join("/"),
+    bytes: bytes.byteLength,
+    sha256: sha256Hex(new Uint8Array(bytes)),
+  };
+}
+
+function contentResources(): EmbeddedResource[] {
+  return contentAssets.map((asset) => dataResource(asset.id, asset.path));
+}
+
 function embeddedResources(plan: LocalBuildPlan, markerPath: string): EmbeddedResource[] {
   const marker = readFileSync(markerPath);
-  const catalog = readFileSync(catalogPath);
   return [
     {
       id: "arch-marker",
@@ -50,38 +71,17 @@ function embeddedResources(plan: LocalBuildPlan, markerPath: string): EmbeddedRe
       bytes: marker.byteLength,
       sha256: sha256Hex(new Uint8Array(marker)),
     },
-    {
-      id: "resource-catalog",
-      kind: "data",
-      arch: "universal",
-      path: "resource-catalog.zetaasset",
-      bytes: catalog.byteLength,
-      sha256: sha256Hex(new Uint8Array(catalog)),
-    },
+    dataResource("resource-catalog", catalogPath),
+    ...contentResources(),
   ];
 }
 
 /** 源码模式没有可执行文件架构可比，默认 manifest 把标记当普通数据资源。 */
 function defaultResources(): EmbeddedResource[] {
-  const marker = readFileSync(trackedMarkerPath);
-  const catalog = readFileSync(catalogPath);
   return [
-    {
-      id: "arch-marker",
-      kind: "data",
-      arch: "universal",
-      path: "arch-marker.zetaasset",
-      bytes: marker.byteLength,
-      sha256: sha256Hex(new Uint8Array(marker)),
-    },
-    {
-      id: "resource-catalog",
-      kind: "data",
-      arch: "universal",
-      path: "resource-catalog.zetaasset",
-      bytes: catalog.byteLength,
-      sha256: sha256Hex(new Uint8Array(catalog)),
-    },
+    dataResource("arch-marker", trackedMarkerPath),
+    dataResource("resource-catalog", catalogPath),
+    ...contentResources(),
   ];
 }
 
@@ -90,17 +90,34 @@ function importPathFromCliSource(target: string): string {
   return path.startsWith(".") ? path : `./${path}`;
 }
 
-function writeGenerated(plan: LocalBuildPlan, markerPath: string, resources: EmbeddedResource[]): void {
-  const entries = resources
-    .map((item) => `  ${JSON.stringify(item.id)}: ${item.id === "arch-marker" ? "archMarker" : "resourceCatalog"},`)
+const IDENTIFIERS: Readonly<Record<string, string>> = Object.freeze({
+  "arch-marker": "archMarker",
+  "resource-catalog": "resourceCatalog",
+  "system-prompt": "systemPrompt",
+  "skills-index": "skillsIndex",
+  "config-schema": "configSchema",
+});
+
+function writeGenerated(
+  plan: LocalBuildPlan,
+  assetPaths: Readonly<Record<string, string>>,
+  resources: readonly EmbeddedResource[]
+): void {
+  const ids = resources.map((item) => item.id);
+  const imports = ids
+    .map((id) => {
+      const identifier = IDENTIFIERS[id];
+      if (identifier === undefined) throw new Error(`EMBEDDED_ID_UNMAPPED: ${id}`);
+      return `import ${identifier} from ${JSON.stringify(importPathFromCliSource(assetPaths[id] ?? ""))} with { type: "file" };`;
+    })
     .join("\n");
+  const entries = ids.map((id) => `  ${JSON.stringify(id)}: ${IDENTIFIERS[id]},`).join("\n");
   const encoded = resources
     .map((item) => JSON.stringify(item, null, 2).split("\n").map((line) => `    ${line}`).join("\n"))
     .join(",\n");
   const body = `// 由 scripts/build-local.ts 按构建 target 生成；源码模式下使用当前宿主默认值。
 // 自指二进制哈希不写入嵌入 manifest；发布目录的 manifest.json 才记录它。
-import archMarker from ${JSON.stringify(importPathFromCliSource(markerPath))} with { type: "file" };
-import resourceCatalog from ${JSON.stringify(importPathFromCliSource(catalogPath))} with { type: "file" };
+${imports}
 import type { ArtifactManifest } from "@zeta-agent/deploy";
 
 export const EMBEDDED_ASSETS: Readonly<Record<string, string>> = Object.freeze({
@@ -125,8 +142,13 @@ async function buildOne(plan: LocalBuildPlan): Promise<ArtifactManifest> {
   const markerPath = join(targetDir, "arch-marker.zetaasset");
   writeFileSync(markerPath, archMarkerBytes(plan));
 
+  const paths: Record<string, string> = {
+    "arch-marker": markerPath,
+    "resource-catalog": catalogPath,
+    ...Object.fromEntries(contentAssets.map((asset) => [asset.id, asset.path])),
+  };
   const resources = embeddedResources(plan, markerPath);
-  writeGenerated(plan, markerPath, resources);
+  writeGenerated(plan, paths, resources);
 
   const result = await Bun.build({
     entrypoints: [join(cliSource, "index.ts")],
@@ -135,7 +157,7 @@ async function buildOne(plan: LocalBuildPlan): Promise<ArtifactManifest> {
     target: plan.bunTarget,
     compile: true,
     minify: true,
-    assets: [markerPath, catalogPath],
+    assets: [markerPath, catalogPath, ...contentAssets.map((asset) => asset.path)],
   });
   if (!result.success) {
     throw new Error(`BUILD_FAILED: ${plan.target}: ${result.logs.map(String).join(" | ")}`);
@@ -183,11 +205,23 @@ try {
   }
   console.log(`build-local: ${plans.length} target(s) built`);
 } finally {
-  const host = hostTarget();
-  if (host !== undefined) {
-    const plan = buildPlanFor(host);
-    writeGenerated(plan, trackedMarkerPath, defaultResources());
-  } else if (originalGenerated !== undefined) {
+  // 构建期会把 generated 文件临时指向 dist/local 目标目录的 marker；
+  // 无论成功或异常，都必须按进入脚本前的字节原样恢复源码，绝不留下跨包相对 import。
+  if (originalGenerated !== undefined) {
     writeFileSync(generatedFile, originalGenerated, "utf8");
+  } else {
+    const host = hostTarget();
+    if (host !== undefined) {
+      const plan = buildPlanFor(host);
+      const paths: Record<string, string> = {
+        "arch-marker": trackedMarkerPath,
+        "resource-catalog": catalogPath,
+        ...Object.fromEntries(contentAssets.map((asset) => [asset.id, asset.path])),
+      };
+      writeGenerated(plan, paths, defaultResources());
+    }
+  }
+  if (existsSync(generatedFile) && readFileSync(generatedFile, "utf8").includes("dist/local")) {
+    throw new Error("BUILD_SOURCE_POLLUTION: embedded-assets.generated.ts still references dist/local");
   }
 }

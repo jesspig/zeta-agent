@@ -54,7 +54,7 @@ describe("T-12 资源解析器插件与 typed fail", () => {
     const prompt = parseResource(entry({ type: "prompt", id: "agent:prompt:hi.md", relativePath: "hi.md" }), "Hello");
     expect(agents.ok).toBe(true);
     expect(prompt.ok).toBe(true);
-    expect(builtinParsers.map((p) => p.kind).sort()).toEqual(["agents", "prompt", "skill", "theme"]);
+    expect(builtinParsers.map((p) => p.kind).sort()).toEqual(["agents", "prompt", "schema", "skill", "theme"]);
   });
 
   test("自定义解析器可替换内建解析器", () => {

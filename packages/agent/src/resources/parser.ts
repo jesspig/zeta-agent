@@ -2,6 +2,34 @@ import type { ResourceEntry, ResourceType } from "./registry";
 
 export type ParserKind = ResourceType;
 
+/** JSON Schema 资源：要求对象形态，name 取 title/id/relativePath。 */
+const schemaParser = defineParserPlugin({
+  kind: "schema",
+  parse(source, entry) {
+    let value: unknown;
+    try {
+      value = JSON.parse(source);
+    } catch {
+      throw new ResourceParseError("INVALID_CONTENT", entry.id, "schema: invalid JSON");
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new ResourceParseError("INVALID_CONTENT", entry.id, "schema: expected an object");
+    }
+    const record = value as Record<string, unknown>;
+    const name =
+      (typeof record.title === "string" && record.title.length > 0 ? record.title : undefined) ??
+      (typeof record.id === "string" && record.id.length > 0 ? record.id : entry.relativePath);
+    return {
+      name,
+      description: typeof record.description === "string" ? record.description : "",
+      body: source,
+      frontmatter: Object.fromEntries(
+        Object.entries(record).filter(([, item]) => typeof item === "string")
+      ) as Record<string, string>,
+    };
+  },
+});
+
 export interface ParsedResource {
   readonly name: string;
   readonly description: string;
@@ -112,6 +140,7 @@ export const builtinParsers: readonly ParserPlugin[] = Object.freeze([
   markdownParser("prompt", false),
   themeParser,
   markdownParser("agents", true),
+  schemaParser,
 ]);
 
 /**

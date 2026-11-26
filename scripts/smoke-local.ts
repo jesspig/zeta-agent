@@ -72,6 +72,62 @@ try {
   if (current.version !== "1.0.0") throw new Error(`ROLLBACK_VERSION_MISMATCH: ${current.version}`);
   console.log(`PASS rollback ${rolled.from} -> ${rolled.to} digest=${current.digest.slice(0, 12)} start=ok`);
   console.log("smoke-local: 安装/升级/rollback 均通过真实单文件启动");
+
+  // T-20 RC：空目录 + 断网（无连接配置，走 echo）+ 重启续聊，全部用真实二进制。
+  const offlineDir = mkdtempSync(join(tmpdir(), "zeta-rc-offline-"));
+  const env = { ...process.env };
+  for (const key of ["ZETA_BASE_URL", "ZETA_API_KEY", "ZETA_MODEL"]) delete env[key];
+  env.ZETA_SESSION_PATH = join(offlineDir, "session.jsonl");
+  env.ZETA_WORKSPACE_PATH = join(offlineDir, "workspace");
+  const runOffline = (args: readonly string[]): string => {
+    const result = spawnSync(binary, [...args], {
+      cwd: offlineDir,
+      env,
+      encoding: "utf8",
+      shell: false,
+      timeout: 120_000,
+    });
+    if (result.status !== 0) {
+      throw new Error(`RC_START_FAILED: ${args.join(" ")}: ${result.stderr?.trim() ?? ""}`);
+    }
+    return result.stdout;
+  };
+
+  try {
+    const first = runOffline(["--headless", "SMOKE_PING"]);
+    if (!first.includes("[echo] SMOKE_PING")) {
+      throw new Error(`RC_OFFLINE_FIRST_OUTPUT_UNEXPECTED: ${first.trim()}`);
+    }
+    console.log("PASS rc-offline-first: 空目录断网启动 + echo 真实应答");
+
+    const capabilities = runOffline(["--capabilities"]);
+    const report = JSON.parse(capabilities.trim().split(/\r?\n/).at(-1) ?? "") as {
+      profile: string;
+      resources?: readonly { id: string }[];
+      sessionState?: { persisted: boolean; messageCount: number };
+    };
+    if (report.profile !== "local-safe" || report.sessionState?.persisted !== true) {
+      throw new Error(`RC_SESSION_NOT_PERSISTED: ${capabilities.trim()}`);
+    }
+    if ((report.sessionState?.messageCount ?? 0) < 2) {
+      throw new Error(`RC_SESSION_NOT_RESTORED: messageCount=${report.sessionState?.messageCount}`);
+    }
+    const embeddedIds = (report.resources ?? []).map((item) => item.id);
+    for (const id of ["agent:prompt:prompts/system.md", "agent:skill:skills/builtins/SKILL.md", "agent:schema:schema/config.zetaasset"]) {
+      if (!embeddedIds.includes(id)) throw new Error(`RC_EMBEDDED_RESOURCE_MISSING: ${id}`);
+    }
+    console.log(
+      `PASS rc-restart-resume: 重启恢复 ${report.sessionState?.messageCount} 条消息，嵌入资源 ${embeddedIds.length} 条`
+    );
+
+    const resumed = runOffline(["--headless", "SMOKE_RESUME"]);
+    if (!resumed.includes("[echo] SMOKE_RESUME")) {
+      throw new Error(`RC_RESUME_OUTPUT_UNEXPECTED: ${resumed.trim()}`);
+    }
+    console.log("PASS rc-offline-resume: 恢复后继续真实应答");
+  } finally {
+    rmSync(offlineDir, { recursive: true, force: true });
+  }
 } finally {
   rmSync(installRoot, { recursive: true, force: true });
 }

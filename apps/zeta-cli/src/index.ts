@@ -33,6 +33,7 @@ import { runDaemonMode } from "./daemon";
 import { runRemoteMode } from "./remote";
 import { createDeferredTelemetry, withFirstFrame } from "./deferred-telemetry";
 import { EMBEDDED_ASSETS, EMBEDDED_MANIFEST } from "./embedded-assets.generated";
+import { embeddedResources } from "./embedded-resources";
 import { createProbeHandle, handleProbeFrame } from "./probes";
 import { resolveDataDir } from "./runtime";
 import { buildTuiOptions } from "./tui-options";
@@ -161,6 +162,7 @@ export async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
     streamFn,
     allowedDirectories: [process.cwd()],
     profile: args.profile,
+    embeddedResources: embeddedResources(),
     hotReloadDirs: args.watchDirs,
     ...(sessionStorePath === undefined ? {} : { sessionStorePath }),
     ...(workspaceStorePath === undefined ? {} : { workspaceStorePath }),
@@ -534,6 +536,11 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
           modes: manifest.modes,
           resources: manifest.resources,
           diagnostics: manifest.diagnostics,
+          sessionState: {
+            id: bundle.runtime.protocol.session.id,
+            messageCount: bundle.runtime.protocol.session.messages().length,
+            persisted: bundle.sessionStore !== undefined,
+          },
         }) + "\n"
       );
       return 0;

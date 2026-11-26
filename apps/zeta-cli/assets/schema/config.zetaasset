@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "config:schema",
+  "description": "zeta 本地配置 schema（单文件内置）",
+  "type": "object",
+  "properties": {
+    "profile": {
+      "type": "string",
+      "enum": ["local-safe", "local-full", "daemon", "remote", "research", "multi-tenant"]
+    },
+    "sessionPath": { "type": "string" },
+    "watchDirs": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

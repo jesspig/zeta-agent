@@ -35,6 +35,14 @@ const LOCAL_SAFE_OPERATIONS: OperationCapabilityReport = {
   },
 };
 
+const LOCAL_FULL_OPERATIONS: OperationCapabilityReport = {
+  operations: {
+    ...LOCAL_SAFE_OPERATIONS.operations,
+    "shell.start": "active",
+    "session.open": "active",
+  },
+};
+
 const tempRoot = mkdtempSync(join(tmpdir(), "zeta-assembly-"));
 mkdirSync(join(tempRoot, "skills", "demo"), { recursive: true });
 writeFileSync(join(tempRoot, "skills", "demo", "SKILL.md"), "---\nname: demo\n---\nbody", "utf8");
@@ -42,7 +50,14 @@ afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
 
 describe("T-10 真实 BUILTIN_PLUGINS 与安装注册表清单", () => {
   test("BUILTIN_PLUGINS 只登记代码中真实存在的 builtin，不含虚构 skill/session 或研究 seam", () => {
-    expect(ASSEMBLY_PROFILES).toEqual(["local-safe", "local-full"]);
+    expect(ASSEMBLY_PROFILES).toEqual([
+      "local-safe",
+      "local-full",
+      "daemon",
+      "remote",
+      "research",
+      "multi-tenant",
+    ]);
     expect(BUILTIN_PLUGINS.length).toBeGreaterThan(0);
 
     const ids = BUILTIN_PLUGINS.map((plugin) => plugin.id);
@@ -143,10 +158,12 @@ describe("T-10 profile 能力诊断与 active registry schema", () => {
     expect(byId.get("tool:find")?.state).toBe("active");
   });
 
-  test("local-full 不把未实现的 shell 伪装成 active", () => {
-    const diagnostics = diagnoseCapabilities("local-full", LOCAL_SAFE_CAPABILITIES, LOCAL_SAFE_OPERATIONS);
-    expect(diagnostics.find((item) => item.id === "tool:bash")?.state).toBe("unsupported");
+  test("local-full 的真实 shell 声明 active，但未实现的系统隔离仍如实 unsupported", () => {
+    const diagnostics = diagnoseCapabilities("local-full", LOCAL_SAFE_CAPABILITIES, LOCAL_FULL_OPERATIONS);
+    expect(diagnostics.find((item) => item.id === "tool:bash")?.state).toBe("active");
+    expect(diagnostics.find((item) => item.id === "operation:shell.start")?.state).toBe("active");
     expect(diagnostics.find((item) => item.id === "capability:isolation")?.state).toBe("unsupported");
+    expect(diagnostics.find((item) => item.id === "capability:seccomp")?.state).toBe("unsupported");
   });
 
   test("provider schema 只暴露可执行工具；不支持的工具被明确禁用且进入诊断", () => {

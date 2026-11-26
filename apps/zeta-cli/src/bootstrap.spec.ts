@@ -1,13 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDefaultRuntime } from "@zeta-agent/agent";
 import { parseArgs } from "./args";
 
 const CLI = join(import.meta.dir, "index.ts");
+// local-full 等 profile 默认持久会话；测试显式隔离到临时目录，避免污染工作树。
+const cliTemp = mkdtempSync(join(tmpdir(), "zeta-cli-bootstrap-"));
+afterAll(() => rmSync(cliTemp, { recursive: true, force: true }));
 
 async function runCli(args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: join(import.meta.dir, "..", "..", ".."),
+    env: { ...process.env, ZETA_SESSION_PATH: join(cliTemp, "session.jsonl") },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -52,7 +58,7 @@ describe("T-10 CLI 统一 parse → config → loader → root fiber → mode", 
     expect(states.get("capability:fsConfinement")).toBe("active");
   }, 30_000);
 
-  test("子进程能力矩阵：local-full 为显式 opt-in 且不把 shell 伪装成 active", async () => {
+  test("子进程能力矩阵：local-full 显式 opt-in 并声明真实 shell active，隔离仍 unsupported", async () => {
     const safe = await runCli(["--capabilities"]);
     const full = await runCli(["--capabilities", "--profile", "local-full"]);
     expect(full.code, full.stderr).toBe(0);
@@ -62,7 +68,9 @@ describe("T-10 CLI 统一 parse → config → loader → root fiber → mode", 
     expect(fullReport.profile).toBe("local-full");
     expect(fullReport.plugins.length).toBeGreaterThan(safeReport.plugins.length);
     const states = new Map((fullReport.diagnostics as Array<{ id: string; state: string }>).map((item) => [item.id, item.state]));
-    expect(states.get("tool:bash")).toBe("unsupported");
+    expect(states.get("tool:bash")).toBe("active");
+    expect(states.get("capability:isolation")).toBe("unsupported");
+    expect(states.get("capability:seccomp")).toBe("unsupported");
   }, 30_000);
 
   test("CLI 与 SDK 默认装配逐字段一致（manifest / 工具 / 服务 / session / mode / 诊断）", async () => {

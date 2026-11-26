@@ -13,14 +13,16 @@ import {
   type EvaluateLimits,
   type PluginSource,
 } from "./plugin-source";
+import { pluginSystemSandbox, type PluginSystemSandbox } from "./sandbox-support";
 
 export {
   createPluginSource,
   pluginSourceDigest,
   verifyPluginSourceDigest,
   DEFAULT_EVALUATE_LIMITS,
+  pluginSystemSandbox,
 };
-export type { EvaluateLimits, PluginSource };
+export type { EvaluateLimits, PluginSource, PluginSystemSandbox };
 
 // ---------------------------------------------------------------------------
 // 序列化贡献：只含纯数据 + handler 占位 id，绝不含函数或宿主对象引用。
@@ -89,6 +91,8 @@ export interface IsolationReport {
   readonly termination: "confirmed" | "unknown";
   readonly reconciliation?: string;
   readonly capabilities: readonly CapabilityRecord[];
+  /** 系统级沙箱事实；无 seccomp/jail 时如实 unsupported，不伪装 active。 */
+  readonly systemSandbox: PluginSystemSandbox;
 }
 
 export interface IsolatedPlugin extends AgentPlugin {
@@ -311,6 +315,7 @@ function makeReport(
     termination,
     ...(reconciliationValue === undefined ? {} : { reconciliation: reconciliationValue }),
     capabilities,
+    systemSandbox: pluginSystemSandbox(),
   };
 }
 
