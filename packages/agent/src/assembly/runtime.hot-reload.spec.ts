@@ -66,4 +66,39 @@ describe("T-15 默认装配接入插件 HMR", () => {
     expect(hotReload.fiberOf("stable.ts")).toBe(untouchedFiber);
     await runtime.dispose();
   });
+
+  test("真实插件文件变更替换工具/section；dispose 停止 watcher/HMR 队列且幂等", async () => {
+    const dir = tempDir();
+    const file = join(dir, "plugin.ts");
+    const source = (version: number): string => `export default {
+  kind: "AgentPlugin",
+  name: "file-plugin",
+  contributions: [
+    { kind: "tool", tool: { name: "hotping", execute: () => "v${version}" } },
+    { kind: "section", text: "HOT:v${version}" },
+  ],
+};
+`;
+    writeFileSync(file, source(1));
+    const runtime = await createDefaultRuntime({ includeBuiltins: false, hotReloadDirs: [dir] });
+    expect(runtime.agent.toolNames).toContain("hotping");
+    expect(runtime.agent.pluginSections.map((item) => item.text)).toContain("HOT:v1");
+    const firstGeneration = runtime.agent.hotPluginGenerations[0]!;
+    expect(firstGeneration.status).toBe("ACTIVE");
+
+    writeFileSync(file, source(2));
+    await waitFor(() => runtime.agent.pluginSections.some((item) => item.text === "HOT:v2"));
+    expect(runtime.hotReload!.revisionOf("plugin.ts")).toBe(2);
+    expect(runtime.agent.pluginSections.map((item) => item.text)).not.toContain("HOT:v1");
+    expect(firstGeneration.status).toBe("DISPOSED");
+    expect(firstGeneration.disposeCount).toBe(1);
+
+    const firstDisposal = runtime.dispose();
+    expect(runtime.dispose()).toBe(firstDisposal);
+    await firstDisposal;
+    expect(runtime.agent.disposed).toBe(true);
+    expect(runtime.hotReload!.controller.closed).toBe(true);
+    await expect(runtime.hotReload!.flush()).rejects.toThrow(/HMR_CLOSED/);
+    await expect(runtime.agent.prompt("after-dispose")).rejects.toThrow(/AGENT_DISPOSED/);
+  });
 });

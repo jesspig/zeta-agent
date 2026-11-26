@@ -12,7 +12,14 @@ import {
   resolveStructuredBackend,
   type BackendProfile,
 } from "@zeta-agent/security";
-import { createAgent, type Agent, type AgentOptions, type AgentStreamFn } from "../facade";
+import {
+  createAgent,
+  type Agent,
+  type AgentOptions,
+  type AgentPlugin,
+  type AgentStreamFn,
+  type HotPluginGeneration,
+} from "../facade";
 import {
   createProviderBroker,
   type ProviderBroker,
@@ -196,15 +203,37 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     options.hotReloadDirs === undefined || options.hotReloadDirs.length === 0
       ? []
       : discoverHotReloadUnits(options.hotReloadDirs);
+  /** 求值产物只有带 contributions 的对象才是可安装插件；纯数据导出维持值投影语义。 */
+  const asHotPlugin = (value: unknown): AgentPlugin | undefined => {
+    if (typeof value !== "object" || value === null) return undefined;
+    const candidate = value as Partial<AgentPlugin>;
+    if (!Array.isArray(candidate.contributions)) return undefined;
+    return {
+      kind: "AgentPlugin",
+      name: typeof candidate.name === "string" ? candidate.name : "hot-plugin",
+      contributions: candidate.contributions,
+      install: typeof candidate.install === "function"
+        ? candidate.install.bind(candidate)
+        : () => () => {},
+      ...(candidate.source === undefined ? {} : { source: candidate.source }),
+      ...(candidate.trusted === undefined ? {} : { trusted: candidate.trusted }),
+      ...(candidate.digest === undefined ? {} : { digest: candidate.digest }),
+    };
+  };
   const hotReload =
     hotReloadUnits.length === 0
       ? undefined
-      : createPluginHotReloader({
+      : createPluginHotReloader<HotPluginGeneration>({
           ctx,
           parent: rootFiber,
           root: options.hotReloadDirs![0],
           units: hotReloadUnits,
           auto: true,
+          applyPlugin: (unit, instance) => {
+            const plugin = asHotPlugin(instance.value);
+            return plugin === undefined ? undefined : agent.hotSwapPlugin(unit.id, plugin);
+          },
+          revertPlugin: (_unit, applied) => agent.revertHotPlugin(applied),
         });
   if (hotReload !== undefined) await hotReload.install(hotReloadUnits);
 
@@ -220,6 +249,8 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     };
   }
 
+  let disposal: Promise<void> | undefined;
+
   return {
     agent,
     manifest,
@@ -233,13 +264,21 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     governance,
     hotReload,
     providerBroker,
-    async dispose() {
-      await hotReload?.close();
-      await ctx.dispose();
-      if (ownsSessionStore) sessionStore?.close();
-      // 外部注入的 governance 由调用方持有；只回收本 runtime 创建的治理器。
-      if (ownsGovernance) await governance?.dispose();
-      securityBackend.dispose();
+    dispose() {
+      if (disposal !== undefined) return disposal;
+      // 所有权顺序：停止新准入与 watcher → agent 排空 run/tool/listener/插件/审计
+      // → ctx fiber → session → tenant governance → backend。重复调用共享同一 promise。
+      disposal = (async () => {
+        agent.closeAdmission();
+        await hotReload?.close();
+        await agent.dispose();
+        await ctx.dispose();
+        if (ownsSessionStore) sessionStore?.close();
+        // 外部注入的 governance 由调用方持有；只回收本 runtime 创建的治理器。
+        if (ownsGovernance) await governance?.dispose();
+        securityBackend.dispose();
+      })();
+      return disposal;
     },
   };
 }

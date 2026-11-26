@@ -45,6 +45,9 @@ export function isFailClosedHookChain(name: string): boolean {
 
 export type PluginStatus = "ACTIVE" | "FAILED";
 
+/** 调用方可持有的 hook 快照：链名 → 拓扑排序后的活跃条目。 */
+export type HookSnapshot = ReadonlyMap<string, readonly HookEntry<unknown>[]>;
+
 export interface PluginStatusRecord {
   readonly plugin: AgentPlugin;
   readonly status: PluginStatus;
@@ -61,9 +64,11 @@ interface ChainOptionsOverride {
   readonly rethrow?: boolean;
 }
 
-interface ManagerRunOptions extends HookRunOptions {
+export interface ManagerRunOptions extends HookRunOptions {
   /** true：禁止 legacy 兜底；链内错误原样上抛，由调用方 fail-closed。 */
   readonly failClosed?: boolean;
+  /** 调用方持有的条目快照；在途 run/tool 据此执行旧引用，缺省取当前链快照。 */
+  readonly snapshot?: HookSnapshot;
 }
 
 /**
@@ -208,12 +213,30 @@ export class AgentPluginManager {
     return this.legacy.get(field);
   }
 
+  /** 捕获当前所有链的活跃条目；在途调用据此执行，后续注册变化不改写旧快照。 */
+  snapshot(): HookSnapshot {
+    const result = new Map<string, readonly HookEntry<unknown>[]>();
+    for (const [name, chain] of this.chains) result.set(name, chain.snapshot());
+    return result;
+  }
+
   /**
    * 运行命名链。配置关闭时只走 legacy；普通 hook 默认 no-throw，
    * failClosed 链或严格配置下错误上抛且绝不回退 legacy。
    */
   async run<I>(
     chainName: string,
+    input: I,
+    signal?: AbortSignal,
+    options?: ManagerRunOptions
+  ): Promise<I> {
+    return this.runSnapshot(chainName, options?.snapshot ?? this.snapshot(), input, signal, options);
+  }
+
+  /** 对已捕获快照运行命名链，语义与 run 完全一致。 */
+  async runSnapshot<I>(
+    chainName: string,
+    snapshot: HookSnapshot,
     input: I,
     signal?: AbortSignal,
     options?: ManagerRunOptions
@@ -225,7 +248,12 @@ export class AgentPluginManager {
     }
     try {
       const chain = this.chain<I>(chainName, failClosed ? { rethrow: true } : undefined);
-      const result = await chain.run(input, signal, { reverse: options?.reverse === true });
+      const result = await chain.runWith(
+        (snapshot.get(chainName) ?? []) as readonly HookEntry<I>[],
+        input,
+        signal,
+        { reverse: options?.reverse === true }
+      );
       // 非严格命名的链若已被 no-throw 创建，failClosed 仍必须阻断（即便没有 in-chain throw）。
       if (failClosed && chain.lastFailures.length > 0) throw chain.lastFailures[0]!.error;
       return result;
@@ -241,10 +269,26 @@ export class AgentPluginManager {
     chainName: string,
     input: I,
     signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>,
+    options?: { readonly snapshot?: HookSnapshot }
+  ): Promise<void> {
+    return this.runEachSnapshot(chainName, options?.snapshot ?? this.snapshot(), input, signal, visit);
+  }
+
+  async runEachSnapshot<I>(
+    chainName: string,
+    snapshot: HookSnapshot,
+    input: I,
+    signal: AbortSignal | undefined,
     visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
   ): Promise<void> {
     if (!this.configValue.enabled) return;
-    await this.chain<I>(chainName).runEach(input, signal, visit);
+    await this.chain<I>(chainName).runEachWith(
+      (snapshot.get(chainName) ?? []) as readonly HookEntry<I>[],
+      input,
+      signal,
+      visit
+    );
   }
 
   /** LIFO 撤销全部注册。 */

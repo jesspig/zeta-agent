@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   asNextTurnUpdate,
   createEventStream,
@@ -38,6 +39,8 @@ import {
   type WorkspaceStore,
   type EventBus,
   type FinishTurn,
+  type HookEntry,
+  type HookSnapshot,
   type Inbox,
   type InboxMessage,
   type LoopDecision,
@@ -45,6 +48,7 @@ import {
   type LastTurn,
   type NextTurnUpdate,
   type PluginContribution,
+  type PluginSlot,
   type PluginStatus,
   type QueueMode,
   type QueueTarget,
@@ -580,6 +584,19 @@ export interface AgentCompactionHandle {
   readonly budgetTracker: BudgetTracker;
 }
 
+/** HMR 安装的一个插件世代：持有自己的贡献 disposer，按在途 lease 精确撤销。 */
+export interface HotPluginGeneration {
+  readonly id: string;
+  readonly generation: number;
+  readonly plugin: AgentPlugin;
+  readonly superseded: AgentPlugin | undefined;
+  readonly status: "ACTIVE" | "RETIRING" | "DISPOSED";
+  readonly inFlight: number;
+  readonly disposeCount: number;
+  /** 幂等；重复调用不增加 disposeCount。 */
+  dispose(): void;
+}
+
 export interface Agent extends PluginApiSurface {
   prompt(text: string, signal?: AbortSignal): Promise<readonly AgentMessage[]>;
   continue(signal?: AbortSignal): Promise<readonly AgentMessage[]>;
@@ -597,8 +614,18 @@ export interface Agent extends PluginApiSurface {
   abort(): void;
   /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
   reset(): void;
-  /** 取消在途工具并等待其 lease 结算；之后撤销插件贡献。 */
+  /** 取消在途工具并等待其 lease 结算；之后撤销插件贡献与审计连接。幂等。 */
   dispose(): Promise<void>;
+  /** 只停止新准入（同步）；由装配层在关闭 watcher 前调用。 */
+  closeAdmission(): void;
+  readonly disposed: boolean;
+  /** 与 waitForIdle 相同的 lease 视图：run + tool lease 计数。 */
+  readonly activeLeaseCount: number;
+  /** 安装或替换一个热重载插件世代；失败时旧世代保持 ACTIVE。 */
+  hotSwapPlugin(id: string, plugin: AgentPlugin): HotPluginGeneration;
+  /** 回滚到该世代被替换前的插件；用于 HMR 分区补偿。 */
+  revertHotPlugin(generation: HotPluginGeneration): void;
+  readonly hotPluginGenerations: readonly HotPluginGeneration[];
   waitForIdle(): Promise<void>;
   runTool(call: AgentToolCall): Promise<ToolFailure>;
   emitEffect(meta: EffectMeta): void;
@@ -825,6 +852,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
       : undefined;
   if (socketSink !== undefined) void socketSink.ready().catch(() => {});
   const auditSink: AuditSink | undefined = options.auditSink ?? socketSink;
+  let auditClosed = false;
+  /** 审计连接由 agent 独占：所有输出排空后才关闭，且只关一次。 */
+  async function closeAuditSink(): Promise<void> {
+    if (auditClosed) return;
+    auditClosed = true;
+    if (socketSink !== undefined) await socketSink.close();
+    const injected = auditSink as ({ close?: () => void | Promise<void> } | undefined);
+    if (injected !== undefined && typeof injected.close === "function" && injected !== socketSink) {
+      await injected.close();
+    }
+  }
   /** egress 拒绝等未进入 durableEffects 的失败回执，供调用方观测。 */
   const failedEmissionReceipts: Receipt[] = [];
 
@@ -1003,8 +1041,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
       "- Answer environment questions (cwd, platform, git status, etc.) from the Environment section or by calling tools.",
       "- Reply in the same language the user uses. Keep answers concise and concrete.",
     ].filter((line) => line.length > 0);
-    // section 贡献是真实提示词的一部分，按注册入口的 order 排序后追加。
-    const sections = sectionRegistry.snapshot().map((slot) => slot.value.text);
+    // section 贡献是真实提示词的一部分，按注册入口的 order 排序后追加；在途 run 用捕获的旧快照。
+    const scopeSections = dispatchScope.getStore()?.sections;
+    const sections = scopeSections ?? sectionRegistry.snapshot().map((slot) => slot.value.text);
     if (sections.length > 0) lines.push("", "Plugin sections:", ...sections);
     return lines.join("\n");
   }
@@ -1019,6 +1058,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   });
 
   let aborted = false;
+  let disposed = false;
+  let disposal: Promise<void> | undefined;
   let generation = 0;
   interface RunLease {
     readonly generation: number;
@@ -1046,6 +1087,127 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
   const pluginManager = options.pluginManager ?? new AgentPluginManager();
   const events = createEventBus();
+
+  // ── 调用快照（dispatch scope）─────────────────────────────────────────────
+  // 在途 run/tool 在开始时捕获 hook 条目、工具 descriptor、section/task/service 与插件世代；
+  // HMR 替换只影响之后的新调用，旧世代的 disposer 在在途 lease 归零后才执行。
+  interface FrozenService {
+    readonly name: string;
+    readonly realm: symbol;
+    readonly value: unknown;
+  }
+  interface DispatchScope {
+    readonly hooks: HookSnapshot;
+    readonly tools: ReadonlyMap<string, ToolDescriptor>;
+    readonly sections: readonly string[];
+    readonly tasks: readonly { readonly name: string; readonly handler: (() => void | Promise<void>) | undefined }[];
+    readonly services: readonly FrozenService[];
+    readonly generations: readonly HotGenerationState[];
+  }
+  interface HotGenerationState {
+    readonly id: string;
+    readonly generation: number;
+    readonly plugin: AgentPlugin;
+    readonly superseded: AgentPlugin | undefined;
+    status: HotPluginGeneration["status"];
+    inFlight: number;
+    disposeCount: number;
+    readonly disposers: Disposer[];
+    readonly installations: PluginInstallation[];
+    /** 本世代贡献的工具名：在途调用据此持有旧 descriptor。 */
+    readonly toolNames: readonly string[];
+    /** 本世代贡献的 service 槽位（name + realm）：在途调用据此解析旧值。 */
+    readonly serviceSlots: readonly { readonly name: string; readonly realm: symbol }[];
+    handle: HotPluginGeneration;
+  }
+  type FacadeHookOptions = { readonly failClosed?: boolean; readonly reverse?: boolean };
+  const dispatchScope = new AsyncLocalStorage<DispatchScope>();
+  const hotGenerations = new Map<string, HotGenerationState>();
+  const scopedHooks = (): HookSnapshot => dispatchScope.getStore()?.hooks ?? pluginManager.snapshot();
+  const hookRun = <I>(
+    chain: string,
+    input: I,
+    signal?: AbortSignal,
+    options?: FacadeHookOptions
+  ): Promise<I> => pluginManager.run(chain, input, signal, {
+    ...(options ?? {}),
+    snapshot: scopedHooks(),
+  });
+  const hookRunEach = <I>(
+    chain: string,
+    input: I,
+    signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
+  ): Promise<void> => pluginManager.runEach(chain, input, signal, visit, { snapshot: scopedHooks() });
+
+  function disposeGeneration(state: HotGenerationState): void {
+    if (state.status === "DISPOSED") return;
+    state.status = "DISPOSED";
+    state.disposeCount += 1;
+    for (const stop of [...state.disposers].reverse()) stop();
+    for (const installation of state.installations) {
+      const index = pluginInstallations.indexOf(installation);
+      if (index >= 0) pluginInstallations.splice(index, 1);
+      installationContributionDisposers.delete(installation);
+      const tracked = pluginTracking.get(installation.plugin);
+      if (tracked !== undefined) {
+        tracked();
+        pluginTracking.delete(installation.plugin);
+      }
+    }
+    if (hotGenerations.get(state.id) === state) hotGenerations.delete(state.id);
+  }
+  function retireIfIdle(state: HotGenerationState): void {
+    if (state.status === "RETIRING" && state.inFlight === 0) disposeGeneration(state);
+  }
+  function captureScope(): DispatchScope {
+    const generations = [...hotGenerations.values()].filter((state) => state.status === "ACTIVE");
+    for (const state of generations) state.inFlight += 1;
+    // 只冻结热插件工具：宿主在 run 中直接注册的工具仍按原语义即时可见。
+    const tools = new Map<string, ToolDescriptor>();
+    for (const state of generations) {
+      for (const name of state.toolNames) {
+        const entry = pluginTools.get(name);
+        if (entry !== undefined) tools.set(name, descriptorFor(entry.tool));
+      }
+    }
+    // service 与工具同源冻结：只冻结热插件贡献的槽位，宿主/非热服务仍按实时注册表解析。
+    const services: FrozenService[] = [];
+    for (const state of generations) {
+      for (const slot of state.serviceSlots) {
+        services.push({
+          name: slot.name,
+          realm: slot.realm,
+          value: serviceRegistry.resolve(slot.name, slot.realm),
+        });
+      }
+    }
+    const scope: DispatchScope = {
+      hooks: pluginManager.snapshot(),
+      tools,
+      sections: sectionRegistry.snapshot().map((slot) => slot.value.text),
+      tasks: taskRegistry.snapshot().map((slot) => ({ name: slot.name, handler: slot.value })),
+      services,
+      generations,
+    };
+    return scope;
+  }
+  function releaseScope(scope: DispatchScope): void {
+    for (const state of scope.generations) {
+      state.inFlight = Math.max(0, state.inFlight - 1);
+      retireIfIdle(state);
+    }
+  }
+  /** 在当前 scope 中运行；无论正常/异常都按同一 lease 视图释放世代引用。 */
+  async function withScope<T>(fn: () => Promise<T>): Promise<T> {
+    const scope = captureScope();
+    try {
+      return await dispatchScope.run(scope, fn);
+    } finally {
+      releaseScope(scope);
+    }
+  }
+
   /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
   const inbox: Inbox = createInbox();
   let hookSequence = 0;
@@ -1078,9 +1240,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   async function pollQueueSources(signal: AbortSignal, kinds: "all" | "steering" = "all"): Promise<void> {
-    await pluginManager.run("steering", inbox, signal);
+    await hookRun("steering", inbox, signal);
     // prepareNextTurn 只重轮询 steering：followUp 在这里重入会与 natural end 外层消费互相喂料而无限续跑。
-    if (kinds === "all") await pluginManager.run("followUp", inbox, signal);
+    if (kinds === "all") await hookRun("followUp", inbox, signal);
   }
 
   function addDisposer(dispose: () => void): () => void {
@@ -1451,6 +1613,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
     getTool(name) {
       const transient = runToolDescriptors.get(name);
       if (transient !== undefined) return transient;
+      const scoped = dispatchScope.getStore()?.tools.get(name);
+      if (scoped !== undefined) return scoped;
       const loadout = declaredLoadout.get(name);
       if (loadout !== undefined) return descriptorFor(loadout);
       const plugin = pluginTools.get(name);
@@ -1570,8 +1734,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
     const startEvent: AgentEvent = {
       type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args,
     };
-    await pluginManager.run("beforeToolCall", startEvent, toolSignal ?? activeSignal, { failClosed: true });
-    await pluginManager.run("wrap", startEvent, toolSignal ?? activeSignal, { failClosed: true });
+    await hookRun("beforeToolCall", startEvent, toolSignal ?? activeSignal, { failClosed: true });
+    await hookRun("wrap", startEvent, toolSignal ?? activeSignal, { failClosed: true });
     return {};
   };
 
@@ -1606,9 +1770,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
       isError: input.isError,
     };
     const accumulator: AfterHookAccumulator = { event: endEvent, overrides };
-    await pluginManager.run("afterToolCall", accumulator, toolSignal ?? activeSignal, { failClosed: true });
+    await hookRun("afterToolCall", accumulator, toolSignal ?? activeSignal, { failClosed: true });
     capture(accumulator.overrides);
-    await pluginManager.run("wrap", endEvent, toolSignal ?? activeSignal, { failClosed: true, reverse: true });
+    await hookRun("wrap", endEvent, toolSignal ?? activeSignal, { failClosed: true, reverse: true });
     return overrides;
   };
 
@@ -1785,6 +1949,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   function startRun(userText: string | undefined, externalSignal?: AbortSignal): Promise<readonly AgentMessage[]> {
+    if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再接受新 run");
     if (activeRun !== undefined) throw new Error("ACTIVE_RUN: 同一 Agent 同时只能运行一个 prompt/continue");
     const controller = new AbortController();
     const onAbort = (): void => {
@@ -1797,7 +1962,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     activeRun = lease;
     aborted = false;
     lastTurnHadNativeTools = false;
-    const execution = executeRun(lease, userText).finally(() => {
+    const execution = withScope(() => executeRun(lease, userText)).finally(() => {
       externalSignal?.removeEventListener("abort", onAbort);
       if (activeRun === lease) activeRun = undefined;
     });
@@ -1812,11 +1977,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" }, signal);
     // task 贡献作为后台作业在轮首执行（失败不影响主流程，由 hook chain 归一化）。
-    for (const slot of taskRegistry.snapshot()) {
+    const tasks = dispatchScope.getStore()?.tasks
+      ?? taskRegistry.snapshot().map((slot) => ({ name: slot.name, handler: slot.value }));
+    for (const task of tasks) {
       try {
-        await slot.value?.();
+        await task.handler?.();
       } catch (error) {
-        fiberLogger.warn(`plugin task ${slot.name} failed: ${String(error)}`);
+        fiberLogger.warn(`plugin task ${task.name} failed: ${String(error)}`);
       }
     }
 
@@ -1832,7 +1999,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
     const effectiveStreamFn = activeStreamFn();
     const emitConverted = async (input: unknown): Promise<void> => {
-      await pluginManager.runEach("converter", input, signal, async (value) => {
+      await hookRunEach("converter", input, signal, async (value) => {
         if (value !== undefined) await stream.emit(value as AgentEvent, signal);
       });
     };
@@ -1844,7 +2011,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       emit: (event) => stream.emit(event, signal),
       getState: () => stream.getState(),
       prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> =>
-        asNextTurnUpdate(await pluginManager.run("prepareNextTurn", stream.getState(), signal)),
+        asNextTurnUpdate(await hookRun("prepareNextTurn", stream.getState(), signal)),
       pollSources: async (phase: SourcePollPhase): Promise<void> => {
         await pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
@@ -1868,16 +2035,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
               ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
               : (base.messages ?? []),
         };
-        const transformed = await pluginManager.run("contextTransform", seeded, signal);
-        return await pluginManager.run("prepareRequest", transformed, signal);
+        const transformed = await hookRun("contextTransform", seeded, signal);
+        return await hookRun("prepareRequest", transformed, signal);
       },
       pollFollowUp: async () => {
         const followUps = inbox.poll("followUp").map((item) => item.body);
-        return await pluginManager.run("pollFollowUp", followUps, signal);
+        return await hookRun("pollFollowUp", followUps, signal);
       },
       finishTurn: async (turn) => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-        const outcome = await pluginManager.run("turnBoundary", event, signal);
+        const outcome = await hookRun("turnBoundary", event, signal);
         if (isLoopDecision(outcome)) return outcome;
         // 原生工具调用需要显式续跑一轮，让模型消费工具结果。
         if (lastTurnHadNativeTools && turn.toolResults.length > 0) return TURN_CONTINUE_DECISION;
@@ -2068,6 +2235,143 @@ export function createAgent(options: AgentOptions = {}): Agent {
     }));
   }
 
+  /** 与 waitForIdle 共用的 lease 视图：先等 run，再等 tool lease，最后等 listener。 */
+  async function drainLeases(): Promise<void> {
+    while (activeRun !== undefined) await activeRun.promise.catch(() => {});
+    await toolLeases.waitForIdle();
+    await stream.waitForIdle();
+  }
+
+  const serviceSlotsOf = (candidate: AgentPlugin): readonly { readonly name: string; readonly realm: symbol }[] =>
+    candidate.contributions.flatMap((item) =>
+      item.kind === "service" ? [{ name: item.name, realm: item.realm ?? defaultRealm }] : []
+    );
+
+  /** 热重载插件的独立安装事务：新世代先完整安装成功，才替换旧世代。 */
+  function hotSwapPlugin(id: string, plugin: AgentPlugin): HotPluginGeneration {
+    if (disposed) throw new Error("AGENT_DISPOSED");
+    if (typeof id !== "string" || id.length === 0) throw new Error("HOT_PLUGIN_ID_REQUIRED");
+    const previous = hotGenerations.get(id);
+    // 替换前保留旧 service 槽：事务中途失败时连带恢复，避免同名注册覆盖后留下空洞。
+    const oldServiceSlots = previous === undefined ? [] : serviceRegistry.snapshot().filter((slot) =>
+      previous.serviceSlots.some((owned) => owned.name === slot.name && owned.realm === slot.realm)
+    );
+    const hotGeneration = ++pluginGeneration;
+    const tx = createPluginTransaction<AgentPlugin>({ generation: () => hotGeneration });
+    // 热重载来源是宿主本地文件，与初始宿主插件一致按可信处理；贡献仍走同一审查/注册入口。
+    tx.stage([{ item: plugin, meta: { name: plugin.name, trusted: true } }]);
+    const issues = tx.validate();
+    if (issues.length > 0) throw new Error(`PLUGIN_VALIDATION_FAILED: ${issues.map((issue) => issue.reason).join(",")}`);
+    const contributionStops: Disposer[] = [];
+    const installations: PluginInstallation[] = [];
+    const result = tx.commit({
+      install: (entry) => {
+        const dispose = entry.item.install();
+        pluginTracking.set(entry.item, addDisposer(pluginManager.trackInstall(entry.item)));
+        return dispose;
+      },
+      apply: (entry, record) => {
+        const installation: PluginInstallation = {
+          plugin: entry.item,
+          generation: hotGeneration,
+          dispose: record.dispose,
+          realm: defaultRealm,
+          review: {
+            decision: "allowed",
+            reason: "HOT_RELOAD",
+            source: { origin: "user", trusted: true },
+          },
+          status: "ACTIVE",
+        };
+        pluginInstallations.push(installation);
+        installations.push(installation);
+        const contributionDisposers: Disposer[] = [];
+        installationContributionDisposers.set(installation, contributionDisposers);
+        for (const item of entry.item.contributions) {
+          if (!entry.trusted && item.kind !== "section" && item.kind !== "hook") continue;
+          const stop = contributionHost.apply(item, {
+            realm: item.realm ?? defaultRealm,
+            order: item.order ?? entry.order,
+            priority: item.priority ?? entry.item.priority,
+            dependsOn: item.dependsOn ?? entry.item.dependsOn,
+            owner: entry.item.name,
+            replaceable: item.replaceable ?? entry.replaceable,
+            required: item.required ?? entry.required,
+            source: item.source ?? entry.source,
+            trusted: item.trusted ?? entry.trusted,
+            generation: hotGeneration,
+          });
+          contributionDisposers.push(stop);
+          contributionStops.push(stop);
+        }
+        installation.status = pluginManager.syncPluginStatus(entry.item).status;
+      },
+      unapply: (entry, record) => {
+        const index = pluginInstallations.findIndex((item) => item.dispose === record.dispose);
+        if (index >= 0) pluginInstallations.splice(index, 1);
+        for (const installation of installations) installationContributionDisposers.delete(installation);
+        const tracked = pluginTracking.get(entry.item);
+        tracked?.();
+        pluginTracking.delete(entry.item);
+      },
+    });
+    if (result.error !== undefined) {
+      // 事务回滚只调用 install() 原样 disposer；这里补足部分已注册的贡献，并恢复被覆盖的旧 service。
+      for (const stop of [...contributionStops].reverse()) stop();
+      for (const slot of oldServiceSlots) {
+        serviceRegistry.register({
+          name: slot.name,
+          value: slot.value,
+          realm: slot.realm,
+          order: slot.order,
+          replaceable: slot.replaceable,
+          required: slot.required,
+          source: slot.source,
+        });
+      }
+      throw result.error;
+    }
+    if (previous !== undefined && previous.status === "ACTIVE") {
+      previous.status = "RETIRING";
+      retireIfIdle(previous);
+    }
+    const state: HotGenerationState = {
+      id,
+      generation: hotGeneration,
+      plugin,
+      superseded: previous?.plugin,
+      status: "ACTIVE",
+      inFlight: 0,
+      disposeCount: 0,
+      disposers: [...result.installed.map((record) => record.dispose), ...contributionStops].map(addDisposer),
+      installations,
+      toolNames: plugin.contributions.flatMap((item) => item.kind === "tool" ? [item.tool.name] : []),
+      serviceSlots: serviceSlotsOf(plugin),
+      handle: undefined as unknown as HotPluginGeneration,
+    };
+    state.handle = {
+      id,
+      generation: hotGeneration,
+      plugin,
+      get superseded() { return state.superseded; },
+      get status() { return state.status; },
+      get inFlight() { return state.inFlight; },
+      get disposeCount() { return state.disposeCount; },
+      dispose: () => disposeGeneration(state),
+    };
+    hotGenerations.set(id, state);
+    return state.handle;
+  }
+
+  function revertHotPlugin(handle: HotPluginGeneration): void {
+    const state = [...hotGenerations.values()].find((item) => item.handle === handle);
+    if (state === undefined || state.status === "DISPOSED") return;
+    const superseded = state.superseded;
+    state.status = "RETIRING";
+    retireIfIdle(state);
+    if (superseded !== undefined && !disposed) hotSwapPlugin(handle.id, superseded);
+  }
+
   return {
     prompt(text, signal) {
       if (typeof text !== "string") return Promise.reject(new Error("prompt: expected a string"));
@@ -2140,22 +2444,42 @@ export function createAgent(options: AgentOptions = {}): Agent {
       inbox.clear("followUp");
       stream.reset();
     },
-    async waitForIdle() {
-      while (activeRun !== undefined) await activeRun.promise.catch(() => {});
-      await toolLeases.waitForIdle();
-      await stream.waitForIdle();
+    waitForIdle: () => drainLeases(),
+    dispose() {
+      if (disposal !== undefined) return disposal;
+      disposal = (async () => {
+        // 1) 停止新准入；2) abort 并 drain run/tool/listener；3) 撤销插件；4) 关闭审计。
+        disposed = true;
+        aborted = true;
+        activeRun?.controller.abort("AGENT_DISPOSED");
+        await toolLeases.close();
+        await drainLeases();
+        pluginManager.disposeAll();
+        for (const state of [...hotGenerations.values()]) {
+          state.status = "RETIRING";
+          retireIfIdle(state);
+        }
+        pluginProviderRegistration?.();
+        pluginProviderRegistration = undefined;
+        for (const stop of brokerRegistrations) stop();
+        brokerRegistrations.length = 0;
+        await closeAuditSink();
+      })();
+      return disposal;
     },
-    async dispose() {
-      aborted = true;
-      activeRun?.controller.abort("AGENT_DISPOSED");
-      await toolLeases.close();
-      while (activeRun !== undefined) await activeRun.promise.catch(() => {});
-      await stream.waitForIdle();
-      pluginManager.disposeAll();
-      pluginProviderRegistration?.();
-      pluginProviderRegistration = undefined;
-      for (const dispose of brokerRegistrations) dispose();
-      brokerRegistrations.length = 0;
+    closeAdmission() {
+      disposed = true;
+    },
+    get disposed() {
+      return disposed;
+    },
+    get activeLeaseCount() {
+      return (activeRun === undefined ? 0 : 1) + toolLeases.activeCount;
+    },
+    hotSwapPlugin,
+    revertHotPlugin,
+    get hotPluginGenerations() {
+      return [...hotGenerations.values()].map((state) => state.handle);
     },
     ...api,
     api,
@@ -2164,6 +2488,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     resolveLogSink: (options) => resolveLogSink(options),
     logger,
     async runTool(call) {
+      if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再接受新 runTool");
       // 与模型工具共用同一受管 registry/context：同一 hooks、wrap、审计、effects/quota、
       // timeout 与 cleanup；runToolCall 只关掉事件 sink 与消息追加。
       let invoked = false;
@@ -2184,6 +2509,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
           }
         )
       );
+      // 先登记调用自己的工具，再捕获 scope：runTool 的本次调用必须命中自己的 descriptor。
+      return withScope(async () => {
       try {
         const result = await activePipeline.runToolCall({
           id: `runTool-${++runToolSeq}`,
@@ -2203,6 +2530,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       } finally {
         stop();
       }
+      });
     },
     get aborted() {
       return aborted;
@@ -2238,7 +2566,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return pluginGeneration;
     },
     resolveService(name, realm) {
-      return serviceRegistry.resolve(name, realm);
+      if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再解析 service");
+      const frozen = dispatchScope.getStore()?.services.find(
+        (slot) => slot.name === name && slot.realm === (realm ?? defaultRealm)
+      );
+      return frozen === undefined ? serviceRegistry.resolve(name, realm) : frozen.value;
     },
     async runTask(name, realm) {
       await taskRegistry.resolve(name, realm)?.();
@@ -2269,9 +2601,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         verified: result.ok && sealed.ok,
       };
     },
-    async closeAudit() {
-      if (socketSink !== undefined) await socketSink.close();
-    },
+    closeAudit: () => closeAuditSink(),
     createProviderStreamFn(config, fetchImpl) {
       return createProviderStreamFn(
         {

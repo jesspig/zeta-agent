@@ -393,3 +393,23 @@ describe("T-05 context-scoped observer", () => {
     expect(seenB.map((meta) => meta.label)).toEqual(["b-only"]);
   });
 });
+
+describe("T-10 context dispose 幂等与 disposed 后拒绝", () => {
+  test("重复 dispose 不重复执行逆；dispose 后 use/notify 显式拒绝", async () => {
+    const calls: string[] = [];
+    const ctx = createContext();
+    const handle = ctx.use(
+      defineComponent({ name: "idempotent", apply: () => () => { calls.push("dispose"); } })
+    );
+    await handle.ready;
+
+    const first = ctx.dispose() as unknown as Promise<void>;
+    const second = ctx.dispose() as unknown as Promise<void>;
+    await Promise.all([first, second]);
+    expect(calls).toEqual(["dispose"]);
+    expect(handle.state.kind).toBe("DISPOSED");
+
+    expect(() => ctx.use(defineComponent({ name: "late", apply: () => () => {} }))).toThrow("CONTEXT_DISPOSED");
+    await expect(ctx.notify()).rejects.toThrow("CONTEXT_DISPOSED");
+  });
+});

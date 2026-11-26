@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { defineAgentPlugin, type AgentPlugin } from "@zeta-agent/agent-framework";
+import type { AuditSink } from "@zeta-agent/security";
 import { createAgent, type AgentEvent, type AgentStreamChunk } from "./facade";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -290,5 +292,98 @@ describe("T-06 公共 facade 生命周期", () => {
 
     expect(streams).toBe(1);
     expect(agent.queueSize("followUp")).toBe(1);
+  });
+});
+
+describe("T-10 shutdown 所有权与 post-dispose 拒绝", () => {
+  test("插件撤销先于审计关闭，dispose 幂等且之后 run/runTool 被拒绝", async () => {
+    const order: string[] = [];
+    const plugin = defineAgentPlugin("shutdown", [
+      { kind: "hook", event: "agent_start", handler: () => {} },
+    ]);
+    const tracked: AgentPlugin = {
+      ...plugin,
+      install() {
+        const dispose = plugin.install();
+        return () => { order.push("plugin-revoke"); dispose(); };
+      },
+    };
+    const auditSink = {
+      entries: [],
+      append: () => ({ seq: 0, record: {} as never, prevHash: "", hash: "" }),
+      noteDrop: () => {},
+      finalized: () => "complete",
+      close: () => { order.push("audit-close"); },
+    } as unknown as AuditSink;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      plugins: [tracked],
+      auditSink,
+      streamFn: async function* () { yield "ok"; },
+    });
+    await agent.prompt("go");
+
+    const first = agent.dispose();
+    expect(agent.disposed).toBe(true);
+    expect(agent.dispose()).toBe(first);
+    await first;
+    expect(order).toEqual(["plugin-revoke", "audit-close"]);
+    await agent.dispose();
+    expect(order).toEqual(["plugin-revoke", "audit-close"]);
+
+    await expect(agent.prompt("again")).rejects.toThrow(/AGENT_DISPOSED/);
+    await expect(agent.runTool({ name: "noop", execute: () => "ok" })).rejects.toThrow(/AGENT_DISPOSED/);
+    expect(agent.activeLeaseCount).toBe(0);
+    await agent.waitForIdle();
+  });
+
+  test("dispose 中止在途 run，等 tool lease 结算后才撤销插件", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    let toolSettled = false;
+    const order: string[] = [];
+    let streams = 0;
+    const plugin = defineAgentPlugin("inflight", [
+      {
+        kind: "tool",
+        tool: {
+          name: "ping",
+          execute: async () => {
+            await gate;
+            toolSettled = true;
+            return "done";
+          },
+        },
+      },
+    ]);
+    const tracked: AgentPlugin = {
+      ...plugin,
+      install() {
+        const dispose = plugin.install();
+        return () => { order.push(`plugin-revoke:${toolSettled}`); dispose(); };
+      },
+    };
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      plugins: [tracked],
+      streamFn: async function* () {
+        if (streams++ % 2 === 0) yield { type: "tool_call", id: "c1", name: "ping", arguments: "{}" };
+        else yield "ok";
+      },
+    });
+    agent.api.addBeforeToolCall(() => { started = true; });
+
+    const running = agent.prompt("go");
+    await waitUntil(() => started);
+    const disposing = agent.dispose();
+    expect(agent.disposed).toBe(true);
+    release();
+    await running;
+    await disposing;
+    expect(order).toEqual(["plugin-revoke:true"]);
+    expect(agent.activeLeaseCount).toBe(0);
   });
 });

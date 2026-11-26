@@ -154,9 +154,21 @@ export class HookChain<I = unknown> {
   }
 
   async run(input: I, signal?: AbortSignal, options: HookRunOptions = {}): Promise<I> {
+    return this.runWith(this.snapshot(), input, signal, options);
+  }
+
+  /**
+   * 对已捕获的条目快照执行：在途调用持有旧条目引用，期间链上注册变化不影响本次执行。
+   * 失败记录仍写回活链，保持可观察性不变。
+   */
+  async runWith(
+    snapshot: readonly HookEntry<I>[],
+    input: I,
+    signal?: AbortSignal,
+    options: HookRunOptions = {}
+  ): Promise<I> {
     this.failures = [];
-    const sorted = this.snapshot();
-    const ordered = options.reverse === true ? [...sorted].reverse() : sorted;
+    const ordered = options.reverse === true ? [...snapshot].reverse() : snapshot;
     if (this.modeValue === "parallel") return this.runParallel(ordered, input, signal);
     return this.runSerial(ordered, input, signal);
   }
@@ -167,9 +179,17 @@ export class HookChain<I = unknown> {
     signal: AbortSignal | undefined,
     visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
   ): Promise<void> {
+    return this.runEachWith(this.snapshot(), input, signal, visit);
+  }
+
+  async runEachWith(
+    snapshot: readonly HookEntry<I>[],
+    input: I,
+    signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
+  ): Promise<void> {
     this.failures = [];
-    const ordered = this.snapshot();
-    for (const [index, entry] of ordered.entries()) {
+    for (const [index, entry] of snapshot.entries()) {
       try {
         const value = await entry.fn(input, signal);
         await visit(value, entry);

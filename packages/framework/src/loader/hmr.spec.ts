@@ -512,3 +512,61 @@ describe("T-05 HMR 动态图与连通 unit 提交", () => {
     watched.close();
   });
 });
+
+describe("T-10 HMR unit 隔离与 close 生命周期", () => {
+  test("独立 unit 不互相重启：只有落脏目标被 build/evaluate/apply", async () => {
+    let evaluations = 0;
+    const applied: string[] = [];
+    const record: Record<string, string> = { "a.ts": "a-v1", "b.ts": "b-v1" };
+    const ctrl = createHmrController({
+      root: "/p",
+      units: [unit("a", "a.ts"), unit("b", "b.ts")],
+      readFile: files(record),
+      build: (item, version, digest) => artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => {
+        evaluations += 1;
+        return instance(item, item.version);
+      },
+      apply: (item) => {
+        applied.push(item.id);
+      },
+    });
+    ctrl.markDirty(["a.ts"]);
+    await ctrl.flush();
+    expect(evaluations).toBe(1);
+    expect(applied).toEqual(["a"]);
+
+    record["a.ts"] = "a-v2";
+    ctrl.markDirty(["a.ts"]);
+    await ctrl.flush();
+    expect(evaluations).toBe(2);
+    expect(applied).toEqual(["a", "a"]);
+    expect(ctrl.revisionOf("b")).toBe(0);
+    ctrl.close();
+  });
+
+  test("close 后不再登记/启动事务，ready 仍能等待在途事务", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const record: Record<string, string> = { "a.ts": "a-v1" };
+    const ctrl = createHmrController({
+      root: "/p",
+      units: [unit("a", "a.ts")],
+      readFile: files(record),
+      build: (item, version, digest) => artifact(`${item.entry}?v=${version}`, digest, version),
+      evaluate: (item) => instance(item, item.version),
+      apply: async () => { await gate; },
+    });
+    ctrl.markDirty(["a.ts"]);
+    const pending = ctrl.flush();
+    ctrl.close();
+    expect(ctrl.closed).toBe(true);
+    ctrl.notifyFile("a.ts");
+    ctrl.markDirty(["a.ts"]);
+    await expect(ctrl.flush()).rejects.toThrow("HMR_CLOSED");
+    release();
+    await pending;
+    await ctrl.ready();
+    expect(ctrl.stateOf("a")?.status).toBe("ACTIVE");
+  });
+});
