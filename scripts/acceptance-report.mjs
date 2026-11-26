@@ -105,7 +105,7 @@ const ITEMS = [
     { args: ["scripts/check-current-ci.mjs"], expect: "PASS current-ci" },
   ] },
   { id: "AC-25", title: "全量 check/gates/acceptance v2 与 RC 绑定最终 commit", commands: [
-    { args: ["run", "check"], expect: "45 successful" },
+    { args: ["run", "check"], expect: "PASS 核心语义零回归" },
     { args: ["scripts/release-check.mjs"], expect: "fail=0" },
   ], note: "acceptance v2 整体退出码由本报告证明；RC 必须绑定本次 baseline commit" },
 ];

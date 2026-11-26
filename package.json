@@ -26,7 +26,7 @@
     "gates": "bun scripts/quality-gates.mjs",
     "dev": "turbo run dev",
     "zeta": "bun apps/zeta-cli/src/index.ts",
-    "build:local": "bun install --frozen-lockfile --os=* --cpu=* --libc=* && bun scripts/build-local.ts --all",
+    "build:local": "bun install --frozen-lockfile --os='*' --cpu='*' --libc='*' && bun scripts/build-local.ts --all",
     "smoke:local": "bun scripts/smoke-local.ts"
   },
   "packageManager": "bun@1.4.2",
