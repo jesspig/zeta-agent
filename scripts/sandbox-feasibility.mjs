@@ -118,7 +118,7 @@ export function probeSandboxFeasibility(root, options = {}) {
   const packagedIdentity =
     options.packagedIdentity ??
     (process.platform === "win32" && typeof process.env.AppxPackageFamilyName === "string");
-  const platformLimited = process.platform === "win32";
+  const platformLimited = process.platform === "win32" || target.startsWith("win32-");
 
   return {
     schema: "zeta-sandbox-feasibility/1",

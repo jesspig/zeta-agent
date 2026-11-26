@@ -461,7 +461,7 @@ describe("T-16 daemon 租约/探针/TLS 硬化", () => {
       socket.on("data", (chunk) => {
         buffer += chunk.toString();
       });
-      socket.on("end", () => resolve({ body: buffer }));
+      socket.on("end", () => resolve({ body: buffer, error: buffer.includes("HTTP/") ? undefined : "TLS_NO_HTTP_RESPONSE" }));
       socket.on("error", (error) => resolve({ body: buffer, error: error.message }));
     });
   }

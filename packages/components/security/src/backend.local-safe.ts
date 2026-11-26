@@ -198,6 +198,17 @@ function snapshot(stat: ReturnType<typeof fstatSync>): FileStatSnapshot {
   };
 }
 
+function sameSnapshot(left: FileStatSnapshot, right: FileStatSnapshot): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.mode === right.mode &&
+    left.isFile === right.isFile
+  );
+}
+
 function matchesExpected(actual: FileStatSnapshot, expected: ExpectedStat | undefined): boolean {
   if (expected === undefined) return true;
   if (expected.dev !== undefined && expected.dev !== actual.dev) return false;
@@ -355,6 +366,7 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
     if (opts.nofollow === false) throw new Error("NOFOLLOW_CANNOT_BE_DISABLED");
     const target = confinedPath(path, allowed);
     assertNofollow(resolve(path), target);
+    assertNoSymlinkWithinAllowed(resolve(path));
     assertNoSymlinkWithinAllowed(target);
 
     let pre: FileStatSnapshot | undefined;
@@ -375,8 +387,8 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
     try {
       options.openRaceHook?.("after-open", target);
       const stat = snapshot(fstatSync(fd));
-      if (pre !== undefined && (pre.dev !== stat.dev || pre.ino !== stat.ino)) {
-        throw new Error("OPEN_RACE_VIOLATION: fd dev/ino changed after precheck");
+      if (pre !== undefined && !sameSnapshot(pre, stat)) {
+        throw new Error("OPEN_RACE_VIOLATION: fd identity changed after precheck");
       }
       if (!stat.isFile) throw new Error("UNSUPPORTED_FILE_TYPE: only regular files are allowed");
       if (!matchesExpected(stat, opts.expected)) throw new Error("EXPECTED_STAT_MISMATCH");
@@ -395,6 +407,7 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
     if (opts.nofollow === false) throw new Error("NOFOLLOW_CANNOT_BE_DISABLED");
     const target = confinedPath(path, allowed);
     assertNofollow(resolve(path), target);
+    assertNoSymlinkWithinAllowed(resolve(path));
     assertNoSymlinkWithinAllowed(target);
     if (options.failWrite?.(target) === true) throw new Error("INJECTED_WRITE_FAILURE");
 
@@ -448,7 +461,7 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
         } catch {
           current = undefined;
         }
-        if (current === undefined || current.dev !== before.dev || current.ino !== before.ino) {
+        if (current === undefined || !sameSnapshot(before, current)) {
           throw new Error("OPEN_RACE_VIOLATION: target changed after precheck");
         }
       }
