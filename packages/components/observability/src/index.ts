@@ -202,6 +202,8 @@ export interface OtlpWireOptions {
   readonly fetchImpl?: typeof fetch;
   readonly serviceName?: string;
   readonly headers?: Readonly<Record<string, string>>;
+  /** 异步导出失败的可观测出口；不阻断主流程，但不再把失败完全吞掉。 */
+  readonly onAsyncFailure?: (error: Error) => void;
 }
 
 export interface OtlpSpan {
@@ -282,8 +284,9 @@ export function createOtlpHttpExporter(options: OtlpWireOptions): OtlpExporter {
       // 但不影响调用方主流程（调用方已经 try/catch 旁路）。
       void response.then((reply) => {
         if (!reply.ok) throw new Error(`OTLP_EXPORT_FAILED: ${reply.status}`);
-      }).catch(() => {
-        // 旁路错误不得产生 unhandled rejection；同步 export 仍可通过注入 fetch 抛错向调用方传故障。
+      }).catch((error: unknown) => {
+        // 旁路错误不得产生 unhandled rejection；通过显式回调暴露，避免静默丢失。
+        options.onAsyncFailure?.(error instanceof Error ? error : new Error(String(error)));
       });
     },
   };
@@ -327,8 +330,8 @@ export function createOtlpSpanExporter(options: OtlpWireOptions): SpanExporter {
         body: JSON.stringify(body),
       }).then((reply) => {
         if (!reply.ok) throw new Error(`OTLP_SPAN_EXPORT_FAILED: ${reply.status}`);
-      }).catch(() => {
-        // 旁路错误不得产生 unhandled rejection。
+      }).catch((error: unknown) => {
+        options.onAsyncFailure?.(error instanceof Error ? error : new Error(String(error)));
       });
     },
   };

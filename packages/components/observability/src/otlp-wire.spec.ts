@@ -105,6 +105,27 @@ describe("T-22 OTLP/HTTP 真实 wire 与 sink 旁路", () => {
     }
   });
 
+  test("异步 503 与网络失败通过 onAsyncFailure 暴露，不再静默吞掉", async () => {
+    const failures: string[] = [];
+    const logs = createOtlpHttpExporter({
+      endpoint: "https://otel.example.com/v1/logs",
+      fetchImpl: (async () => new Response("", { status: 503 })) as unknown as typeof fetch,
+      onAsyncFailure: (error) => failures.push(error.message),
+    });
+    logs.export(message);
+
+    const spans = createOtlpSpanExporter({
+      endpoint: "https://otel.example.com/v1/traces",
+      fetchImpl: (async () => { throw new Error("OTLP_NETWORK_DOWN"); }) as unknown as typeof fetch,
+      onAsyncFailure: (error) => failures.push(error.message),
+    });
+    spans.export([{ traceId: "a".repeat(32), spanId: "1".repeat(16), name: "root", startTimeUnixNano: "1", endTimeUnixNano: "2" }]);
+
+    await Bun.sleep(0);
+    expect(failures).toContain("OTLP_EXPORT_FAILED: 503");
+    expect(failures).toContain("OTLP_NETWORK_DOWN");
+  });
+
   test("sink 故障旁路：exporter 抛错时 resolveLogSink 落 file，主流程不中断", () => {
     const files: LogMessage[] = [];
     const sink = resolveLogSink({
