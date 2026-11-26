@@ -96,6 +96,8 @@ function echoStream(): AgentStreamFn {
   return async function* (request) {
     const last = request.messages.at(-1);
     if (last?.role === "user") yield `[echo] ${String(last.content)}`;
+    // 生产 provider 必须给出显式终态；无 terminal 的 EOF 会被 broker 归一化为 incomplete_stream。
+    yield { type: "done", stopReason: "stop" };
   };
 }
 

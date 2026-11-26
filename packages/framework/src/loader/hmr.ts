@@ -420,6 +420,8 @@ export interface HmrController {
   revisionOf(id: string): number;
   analysis(): GraphAnalysis;
   graph(): ImportGraph;
+  /** close 后不再登记文件、不再启动事务；ready() 仍可等待此前在途事务。 */
+  readonly closed: boolean;
   close(): void;
 }
 
@@ -444,8 +446,10 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
   let fsWatcher: FSWatcher | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
   let lastAnalysis: GraphAnalysis = EMPTY_ANALYSIS;
+  let closed = false;
 
   const markDirty = (files: readonly string[]): void => {
+    if (closed) return;
     for (const file of files) dirty.add(normalizePath(file));
   };
 
@@ -705,18 +709,22 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
   }
 
   function flush(): Promise<HmrResult> {
+    if (closed) return Promise.reject(new Error("HMR_CLOSED"));
     return queue.run(transaction);
   }
 
   function scheduleFlush(): void {
+    if (closed) return;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {
+      debounce = null;
+      if (closed) return;
       void flush().catch(recordError);
     }, options.debounceMs ?? 100);
   }
 
   const notifyFile = (file: string): void => {
-    if (typeof file !== "string") return;
+    if (closed || typeof file !== "string") return;
     markDirty([file]);
     scheduleFlush();
   };
@@ -730,6 +738,7 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
     strategy: "closure-digest-connected-unit",
     markDirty,
     markDirtySigned(signatures) {
+      if (closed) return;
       for (const signature of signatures) {
         const path = normalizePath(signature.path);
         pendingSignatures.set(path, signature.digest);
@@ -747,8 +756,13 @@ export function createHmrController(options: HmrControllerOptions): HmrControlle
     revisionOf: (id) => states.get(id)?.revision ?? 0,
     analysis: () => lastAnalysis,
     graph: () => graph,
+    get closed() {
+      return closed;
+    },
     close: () => {
+      closed = true;
       if (debounce) clearTimeout(debounce);
+      debounce = null;
       fsWatcher?.close();
       fsWatcher = null;
     },

@@ -1,14 +1,28 @@
 import type { Disposer } from "@zeta-agent/framework";
 import type { AgentEvent } from "../runtime/agent";
 
+/** 工具声明的参数形状；provider schema 与执行前校验共用同一份定义。 */
+export interface PluginToolParameter {
+  readonly name: string;
+  readonly type: "string" | "number" | "boolean" | "object" | "array";
+  readonly description?: string;
+  readonly required?: boolean;
+}
+
 export interface PluginTool<P = never> {
   readonly name: string;
+  readonly description?: string;
+  readonly parameters?: readonly PluginToolParameter[];
   readonly execute: (input: P, signal?: AbortSignal) => unknown | Promise<unknown>;
 }
 
 /** 贡献元数据：来源/摘要/能力供审查，order/realm/replaceable 接入真实注册入口。 */
 export interface PluginMetadata {
   readonly order?: number;
+  /** hook 在单一链中的优先级；升序执行，缺省 100。 */
+  readonly priority?: number;
+  /** 必须先于本贡献执行的 hook 名；参与拓扑排序与环检测。 */
+  readonly dependsOn?: readonly string[];
   readonly realm?: symbol;
   readonly replaceable?: boolean;
   readonly required?: boolean;

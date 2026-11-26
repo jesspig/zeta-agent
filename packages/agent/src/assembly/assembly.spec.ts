@@ -168,4 +168,18 @@ describe("T-10 profile 能力诊断与 active registry schema", () => {
     expect(runtime.agent.capabilityDiagnostics.find((item) => item.id === "tool:bash")?.state).toBe("unsupported");
     await runtime.dispose();
   });
+
+  test("默认装配 dispose 单链幂等，dispose 后 agent 拒绝新 run/runTool", async () => {
+    const runtime = await createDefaultRuntime({
+      includeBuiltins: false,
+      streamFn: async function* () { yield "ok"; },
+    });
+    const first = runtime.dispose();
+    expect(runtime.dispose()).toBe(first);
+    await first;
+    expect(runtime.agent.disposed).toBe(true);
+    expect(runtime.agent.activeLeaseCount).toBe(0);
+    await expect(runtime.agent.prompt("after-dispose")).rejects.toThrow(/AGENT_DISPOSED/);
+    await expect(runtime.agent.runTool({ name: "noop", execute: () => "ok" })).rejects.toThrow(/AGENT_DISPOSED/);
+  });
 });

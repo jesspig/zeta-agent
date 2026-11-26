@@ -109,13 +109,15 @@ describe("T-06 loop await、队列与终态", () => {
     expect(events.at(-1)?.type).toBe("agent_end");
   });
 
-  test("steering 与 follow-up 分队列，follow-up 不丢且只在外层消费", async () => {
+  test("natural end：steering 优先续跑，follow-up 在外层消费且保留 lastTurn", async () => {
     const inbox = createInbox();
     const seen: string[] = [];
     const allSeen: string[][] = [];
     let requests = 0;
+    let prepared = 0;
     const { runtime: loop } = runtime({
       inbox,
+      prepareNextTurn: () => { prepared += 1; },
       streamAssistant: async (request) => {
         requests += 1;
         const messages = (request as { messages: readonly { role: string; content: unknown }[] }).messages;
@@ -128,11 +130,14 @@ describe("T-06 loop await、队列与终态", () => {
         }
         return { message: { role: "assistant", content: "ok" }, toolCalls: [], stopReason: "stop" };
       },
-      finishTurn: () => ({ action: "end" }),
+      // 不提供 finishTurn：无显式决策，内层耗尽后才是 natural end。
     });
     await runLoop(loop);
-    expect(seen).toEqual(["", "steer"]);
-    expect(allSeen[1]).toEqual(["follow", "steer"]);
+    expect(seen).toEqual(["", "steer", "follow"]);
+    expect(allSeen[1]).toEqual(["steer"]);
+    expect(allSeen[2]).toEqual(["steer", "follow"]); // transcript 保留，lastTurn 不清空
+    // 两次 prepareNextTurn：steer 续跑一次，follow-up 从外层回来再一次（lastTurn 未被清空）。
+    expect(prepared).toBe(2);
     expect(inbox.size("nextTurn")).toBe(0);
     expect(inbox.size("followUp")).toBe(0);
   });

@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext } from "@zeta-agent/framework";
+import type { AgentPlugin } from "@zeta-agent/agent-framework";
+import { createAgent, type HotPluginGeneration } from "../facade";
 import {
   buildWithBun,
   createPluginHotReloader,
@@ -117,5 +119,62 @@ describe("T-15 真实插件文件变更 HMR E2E", () => {
     expect(recovered.retried).toEqual(["plugin"]);
     expect(asRecord(reloader.valueOf("plugin")).version).toBe(3);
     await reloader.close();
+  });
+
+  test("真实插件文件经 Bun 构建后替换 agent 贡献，语法错误保留旧插件", async () => {
+    const dir = tempDir();
+    const file = join(dir, "plugin.ts");
+    const source = (version: number): string => `export default {
+  kind: "AgentPlugin",
+  name: "file-plugin",
+  contributions: [
+    { kind: "tool", tool: { name: "hotping", execute: () => "v${version}" } },
+    { kind: "section", text: "E2E:v${version}" },
+  ],
+};
+`;
+    writeFileSync(file, source(1));
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* () { yield "ok"; },
+    });
+    const reloader = createPluginHotReloader<HotPluginGeneration>({
+      ctx: createContext({ uid: "t10-e2e" }),
+      units: [{ id: "plugin.ts", entry: file }],
+      readFile: (path) => {
+        try { return readFileSync(path, "utf8"); } catch { return undefined; }
+      },
+      build: buildWithBun,
+      evaluate: evaluateWithBun,
+      applyPlugin: (unit, instance) => {
+        const candidate = instance.value as Partial<AgentPlugin>;
+        const plugin: AgentPlugin = {
+          kind: "AgentPlugin",
+          name: candidate.name ?? "file-plugin",
+          contributions: candidate.contributions ?? [],
+          install: () => () => {},
+        };
+        return agent.hotSwapPlugin(unit.id, plugin);
+      },
+      revertPlugin: (_unit, applied) => agent.revertHotPlugin(applied),
+    });
+    const units: readonly HotReloadUnit[] = [{ id: "plugin.ts", entry: file }];
+    await reloader.install(units);
+    expect(agent.pluginSections.map((item) => item.text)).toContain("E2E:v1");
+
+    writeFileSync(file, source(2));
+    reloader.markDirty([file]);
+    expect((await reloader.flush()).settled).toEqual(["plugin.ts"]);
+    expect(agent.pluginSections.map((item) => item.text)).toContain("E2E:v2");
+    expect(agent.pluginSections.map((item) => item.text)).not.toContain("E2E:v1");
+
+    writeFileSync(file, "export default { broken\n");
+    reloader.markDirty([file]);
+    expect((await reloader.flush()).aborted).toEqual(["plugin.ts"]);
+    expect(agent.pluginSections.map((item) => item.text)).toContain("E2E:v2");
+    expect(reloader.failed()).toEqual(["plugin.ts"]);
+    await reloader.close();
+    await agent.dispose();
   });
 });

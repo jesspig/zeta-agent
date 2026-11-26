@@ -50,12 +50,39 @@ export interface LastTurn {
   readonly newMessages?: readonly AgentMessage[];
 }
 
+/** prepareNextTurn 的可替换字段；未给出的字段保留上一轮值。 */
+export interface NextTurnUpdate {
+  readonly context?: unknown;
+  readonly messages?: readonly AgentMessage[];
+  readonly model?: string;
+  readonly thinkingLevel?: string;
+}
+
+export function asNextTurnUpdate(value: unknown): NextTurnUpdate | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  // manager.run 无 hook 时原样返回 AgentState：它也有 messages，但不是 turn 更新。
+  if ("isStreaming" in record || "pendingToolCalls" in record || "systemPrompt" in record) return undefined;
+  const update: NextTurnUpdate = {
+    ...(record.context !== undefined ? { context: record.context } : {}),
+    ...(Array.isArray(record.messages) ? { messages: record.messages as readonly AgentMessage[] } : {}),
+    ...(typeof record.model === "string" ? { model: record.model } : {}),
+    ...(typeof record.thinkingLevel === "string" ? { thinkingLevel: record.thinkingLevel } : {}),
+  };
+  return Object.keys(update).length > 0 ? update : undefined;
+}
+
+/** source 的重轮询时机：prepareNextTurn 之后、finishTurn 之后。 */
+export type SourcePollPhase = "prepareNextTurn" | "finishTurn";
+
 export interface LoopRuntime {
   readonly inbox: Inbox;
   readonly signal?: AbortSignal;
   emit(event: AgentEvent, signal?: AbortSignal): Promise<void> | void;
   getState(): AgentState;
-  prepareNextTurn?(lastTurn: LastTurn | undefined, signal?: AbortSignal): unknown | Promise<unknown>;
+  prepareNextTurn?(lastTurn: LastTurn | undefined, signal?: AbortSignal): NextTurnUpdate | unknown | void | Promise<NextTurnUpdate | unknown | void>;
+  /** 重轮询 steering/followUp source；上层把消息写入 inbox，loop 不在这里消费队列。 */
+  pollSources?(phase: SourcePollPhase, signal?: AbortSignal): void | Promise<void>;
   /** 工具声明 delta：返回 system 消息或 delta 对象，由 loop 统一 emit。 */
   declareToolChanges?(signal?: AbortSignal): readonly AgentMessage[] | ToolDeclarationDelta | void | Promise<readonly AgentMessage[] | ToolDeclarationDelta | void>;
   prepareRequest?(request: unknown, signal?: AbortSignal): unknown | Promise<unknown>;
@@ -90,12 +117,20 @@ export const RUN_LOOP_STEPS = [
   "emitAgentEnd",
 ] as const;
 
+/**
+ * 三种终局：
+ * - end：显式决策（finishTurn/decide/decision/waterfall）要求结束，硬终止且保留队列。
+ * - continue：显式决策要求续跑；无工具时留下一次 context-only 请求（explicitContinuation）。
+ * - natural：无显式决策且内层已无请求/工具，交还外层消费 follow-up。
+ */
+type TurnAction = "continue" | "end" | "natural";
+
 async function resolveAction(
   runtime: LoopRuntime,
   turn: LastTurn,
   toolCallCount: number,
   signal?: AbortSignal
-): Promise<"continue" | "end"> {
+): Promise<TurnAction> {
   const legacy = await runtime.finishTurn?.(turn, signal);
   if (legacy !== undefined) return legacy.action;
   const legacyDecision = runtime.decide?.(runtime.getState(), turn);
@@ -114,7 +149,7 @@ async function resolveAction(
     }
     return decided.kind === "exit" ? "end" : "continue";
   }
-  return toolCallCount > 0 ? "continue" : "end";
+  return toolCallCount > 0 ? "continue" : "natural";
 }
 
 function errorMessage(error: unknown): string {
@@ -130,7 +165,10 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
   let enterInner = true;
   let hasMoreToolCalls = false;
   let turnCount = 0;
+  // nextStep 只在 prepareNextTurn（已有 lastTurn）时 claim：首轮/硬终局不得吞掉未唤醒的注入消息。
   let pending: readonly InboxMessage[] = inbox.poll("nextTurn");
+  let nextTurnRequest: { context?: unknown; model?: string; thinkingLevel?: string } = {};
+  let injectedMessageId = -1;
 
   const emit = async (event: AgentEvent): Promise<void> => {
     await runtime.emit(event, signal);
@@ -150,8 +188,16 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       enterInner = false;
       if (lastTurn !== undefined) {
         runtime.onStep?.("prepareNextTurn");
-        await runtime.prepareNextTurn?.(lastTurn, signal);
-        pending = [...pending, ...inbox.poll("nextTurn")];
+        const update = asNextTurnUpdate(await runtime.prepareNextTurn?.(lastTurn, signal));
+        if (update !== undefined) {
+          const { messages, ...requestFields } = update;
+          if (Object.keys(requestFields).length > 0) nextTurnRequest = { ...nextTurnRequest, ...requestFields };
+          if (messages !== undefined) {
+            pending = [...pending, ...messages.map((body) => ({ id: injectedMessageId--, body }))];
+          }
+        }
+        await runtime.pollSources?.("prepareNextTurn", signal);
+        pending = [...pending, ...inbox.poll("nextTurn"), ...inbox.poll("nextStep")];
         await emit({ type: "turn_start" });
       }
 
@@ -178,8 +224,8 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       }
 
       runtime.onStep?.("prepareRequest");
-      const request = await runtime.prepareRequest?.({ messages: runtime.getState().messages }, signal)
-        ?? { messages: runtime.getState().messages };
+      const baseRequest = { ...nextTurnRequest, messages: runtime.getState().messages };
+      const request = await runtime.prepareRequest?.(baseRequest, signal) ?? baseRequest;
 
       runtime.onStep?.("streamAssistant");
       await emit({ type: "message_start", message: { role: "assistant", content: "" } });
@@ -300,29 +346,29 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
         await emit({ type: "message_end", message });
       }
       const turn: LastTurn = { message: response.message, toolResults: toolResultMessages };
-      // 全 terminate：保留本批真实结果，但不再发起下一轮 provider 调用。
-      const action = terminating ? "end" : await resolveAction(runtime, turn, toolCalls.length, signal);
+      // 全 terminate 与显式 end 同等硬终止；natural 只表示内层无更多请求/工具。
+      const action: TurnAction = terminating ? "end" : await resolveAction(runtime, turn, toolCalls.length, signal);
       await emit({ type: "turn_end", message: response.message, toolResults: toolResultMessages });
       lastTurn = turn;
+      // 只有显式 continue 才在 finishTurn 后重轮询 source；硬终局不污染队列，
+      // natural end 也不需要重复注入 followUp（否则持续产出型 source 会无限续跑）。
+      if (!terminating && action === "continue") await runtime.pollSources?.("finishTurn", signal);
 
       runtime.onStep?.("decisionEnd");
-      const shouldEnd = action === "end";
+      const shouldEnd = terminating || action === "end";
       runtime.onStep?.("decisionContinue");
       const shouldContinue = action === "continue";
       runtime.onStep?.("outerFollowUpOrBreak");
       if (shouldEnd) {
-        if (inbox.size("followUp") > 0) {
-          pending = inbox.poll("followUp").map((item) => ({ id: item.id, body: item.body }));
-          enterInner = true;
-          continue;
-        }
+        // decision end / all terminate：立即 agent_end 并返回，followUp/nextTurn/nextStep 一律原样保留。
         await emitAgentEnd();
         return runtime.getState();
       }
 
       hasMoreToolCalls = shouldContinue && toolCalls.length > 0;
-      if (inbox.size("nextTurn") > 0) enterInner = true;
-      explicitContinuation = shouldContinue && toolCalls.length === 0 && inbox.size("nextTurn") === 0;
+      if (inbox.size("nextTurn") > 0 || inbox.size("nextStep") > 0) enterInner = true;
+      explicitContinuation = shouldContinue && toolCalls.length === 0
+        && inbox.size("nextTurn") === 0 && inbox.size("nextStep") === 0;
     }
 
     runtime.onStep?.("outerFollowUpOrBreak");
@@ -331,7 +377,7 @@ export async function runLoop(runtime: LoopRuntime): Promise<AgentState> {
       : inbox.poll("followUp").map((item) => item.body);
     if (followUps.length > 0) {
       pending = followUps.map((body) => ({ id: 0, body }));
-      lastTurn = undefined;
+      // follow-up 进入外层不代表新一轮从零开始：保留 lastTurn，下一轮仍走 prepareNextTurn。
       explicitContinuation = false;
       continue;
     }

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { defineAgentPlugin, type AgentPlugin } from "@zeta-agent/agent-framework";
+import type { AuditSink } from "@zeta-agent/security";
 import { createAgent, type AgentEvent, type AgentStreamChunk } from "./facade";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -53,6 +55,42 @@ describe("T-06 公共 facade 生命周期", () => {
     expect(order.indexOf("prepareRequest:end")).toBeLessThan(order.indexOf("stream:1"));
     expect(order.indexOf("prepareNextTurn:end")).toBeLessThan(order.indexOf("stream:2"));
     expect(order.indexOf("finishTurn:end")).toBeLessThan(order.indexOf("agent_end"));
+  });
+
+  test("T-07 普通 hook 抛错归一化，legacy prepareRequest 屏障仍完整", async () => {
+    const gate = deferred();
+    const order: string[] = [];
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* () {
+        streams += 1;
+        order.push(`stream:${streams}`);
+        yield "ok";
+      },
+      loopHooks: {
+        prepareRequest: async (request) => {
+          order.push("legacy:start");
+          await gate.promise;
+          order.push("legacy:end");
+          return request;
+        },
+      },
+    });
+    agent.api.addPrepareRequest(() => { throw new Error("ordinary hook down"); });
+    agent.api.addPrepareRequest((request) => {
+      order.push("healthy");
+      return request;
+    });
+    const running = agent.prompt("go");
+    await waitUntil(() => order.includes("legacy:start"));
+    expect(streams).toBe(0);
+    gate.resolve();
+    await running;
+    expect(order.indexOf("legacy:end")).toBeLessThan(order.indexOf("healthy"));
+    expect(order.indexOf("healthy")).toBeLessThan(order.indexOf("stream:1"));
+    expect(streams).toBe(1);
   });
 
   test("prompt/reset 互斥，idle 等待 agent_end listener", async () => {
@@ -153,5 +191,199 @@ describe("T-06 公共 facade 生命周期", () => {
       expect(events.some((event) => event.type === "turn_end")).toBe(true);
       expect(events.at(-1)?.type).toBe("agent_end");
     }
+  });
+
+  test("公开 inject/QueueMode 接入 facade loop：step 模式每轮 claim 一条 nextStep", async () => {
+    const requests: string[][] = [];
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* (request) {
+        streams += 1;
+        const messages = request.messages.filter((message) => message.role === "user");
+        requests.push(messages.map((message) => String(message.content)));
+        if (streams === 1) yield { type: "tool_call", id: "c1", name: "noop", arguments: "{}" };
+        else yield "ok";
+      },
+    });
+    agent.api.registerTool({ name: "noop", execute: () => "ok" });
+    agent.setQueueMode("step");
+    agent.inject({ role: "user", content: "step-1" });
+    agent.inject({ role: "user", content: "step-2" });
+    expect(agent.getQueueMode()).toBe("step");
+    expect(agent.queueSize("nextStep")).toBe(2);
+
+    await agent.prompt("go");
+
+    expect(requests[1]).toEqual(["go", "step-1"]);
+    expect(requests[2]).toEqual(["go", "step-1", "step-2"]); // transcript 历史保留
+    expect(agent.queueSize("nextStep")).toBe(0);
+  });
+
+  test("产品路径 natural end：预置 followUp 在同一次 run 的外层消费", async () => {
+    let streams = 0;
+    const seen: string[] = [];
+    let agent: ReturnType<typeof createAgent> | undefined;
+    agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* (request) {
+        streams += 1;
+        const users = request.messages.filter((message) => message.role === "user");
+        seen.push(String(users.at(-1)?.content ?? ""));
+        if (streams === 1) agent!.followUp({ role: "user", content: "follow" });
+        yield "ok";
+      },
+    });
+
+    await agent.prompt("first");
+
+    expect(streams).toBe(2);
+    expect(seen).toEqual(["first", "follow"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+  });
+
+  test("产品路径 decision end：保留 followUp，下一次 prompt 才消费", async () => {
+    let streams = 0;
+    const seen: string[] = [];
+    let decisions = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      // 只让第一次 prompt 硬终止；之后恢复默认 natural，验证保留队列能被下一次 prompt 消费。
+      loopHooks: { finishTurn: () => (++decisions === 1 ? { action: "end" } : undefined) },
+      streamFn: async function* (request) {
+        streams += 1;
+        const users = request.messages.filter((message) => message.role === "user");
+        seen.push(String(users.at(-1)?.content ?? ""));
+        yield "ok";
+      },
+    });
+    agent.followUp({ role: "user", content: "follow" });
+
+    await agent.prompt("first");
+    expect(streams).toBe(1);
+    expect(seen).toEqual(["first"]);
+    expect(agent.queueSize("followUp")).toBe(1);
+
+    await agent.prompt("second");
+    expect(streams).toBe(3);
+    expect(seen).toEqual(["first", "second", "follow"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+  });
+
+  test("产品路径 all terminate：整批 terminate 保留 followUp 且不再请求 provider", async () => {
+    let streams = 0;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      streamFn: async function* () {
+        streams += 1;
+        if (streams === 1) yield { type: "tool_call", id: "c1", name: "stop", arguments: "{}" };
+        else yield "should-not-run";
+      },
+    });
+    agent.api.registerTool({ name: "stop", execute: () => "stopped" });
+    agent.api.addAfterToolCall(() => ({ terminate: true }));
+    agent.followUp({ role: "user", content: "follow" });
+
+    await agent.prompt("first");
+
+    expect(streams).toBe(1);
+    expect(agent.queueSize("followUp")).toBe(1);
+  });
+});
+
+describe("T-10 shutdown 所有权与 post-dispose 拒绝", () => {
+  test("插件撤销先于审计关闭，dispose 幂等且之后 run/runTool 被拒绝", async () => {
+    const order: string[] = [];
+    const plugin = defineAgentPlugin("shutdown", [
+      { kind: "hook", event: "agent_start", handler: () => {} },
+    ]);
+    const tracked: AgentPlugin = {
+      ...plugin,
+      install() {
+        const dispose = plugin.install();
+        return () => { order.push("plugin-revoke"); dispose(); };
+      },
+    };
+    const auditSink = {
+      entries: [],
+      append: () => ({ seq: 0, record: {} as never, prevHash: "", hash: "" }),
+      noteDrop: () => {},
+      finalized: () => "complete",
+      close: () => { order.push("audit-close"); },
+    } as unknown as AuditSink;
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      plugins: [tracked],
+      auditSink,
+      streamFn: async function* () { yield "ok"; },
+    });
+    await agent.prompt("go");
+
+    const first = agent.dispose();
+    expect(agent.disposed).toBe(true);
+    expect(agent.dispose()).toBe(first);
+    await first;
+    expect(order).toEqual(["plugin-revoke", "audit-close"]);
+    await agent.dispose();
+    expect(order).toEqual(["plugin-revoke", "audit-close"]);
+
+    await expect(agent.prompt("again")).rejects.toThrow(/AGENT_DISPOSED/);
+    await expect(agent.runTool({ name: "noop", execute: () => "ok" })).rejects.toThrow(/AGENT_DISPOSED/);
+    expect(agent.activeLeaseCount).toBe(0);
+    await agent.waitForIdle();
+  });
+
+  test("dispose 中止在途 run，等 tool lease 结算后才撤销插件", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    let toolSettled = false;
+    const order: string[] = [];
+    let streams = 0;
+    const plugin = defineAgentPlugin("inflight", [
+      {
+        kind: "tool",
+        tool: {
+          name: "ping",
+          execute: async () => {
+            await gate;
+            toolSettled = true;
+            return "done";
+          },
+        },
+      },
+    ]);
+    const tracked: AgentPlugin = {
+      ...plugin,
+      install() {
+        const dispose = plugin.install();
+        return () => { order.push(`plugin-revoke:${toolSettled}`); dispose(); };
+      },
+    };
+    const agent = createAgent({
+      includeBuiltins: false,
+      emissionPolicy: "direct",
+      plugins: [tracked],
+      streamFn: async function* () {
+        if (streams++ % 2 === 0) yield { type: "tool_call", id: "c1", name: "ping", arguments: "{}" };
+        else yield "ok";
+      },
+    });
+    agent.api.addBeforeToolCall(() => { started = true; });
+
+    const running = agent.prompt("go");
+    await waitUntil(() => started);
+    const disposing = agent.dispose();
+    expect(agent.disposed).toBe(true);
+    release();
+    await running;
+    await disposing;
+    expect(order).toEqual(["plugin-revoke:true"]);
+    expect(agent.activeLeaseCount).toBe(0);
   });
 });

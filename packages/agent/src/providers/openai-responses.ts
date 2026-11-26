@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentStreamChunk, AgentStreamFn, AgentStreamRequest, AgentToolSchema } from "../facade";
-import { doneChunk, errorChunk, httpError } from "./protocol";
+import { doneChunk, errorChunk, httpError, incompleteStreamChunk } from "./protocol";
 
 export interface OpenAiResponsesConfig {
   readonly baseUrl: string;
@@ -173,7 +173,7 @@ async function* parseResponsesSse(body: ReadableStream<Uint8Array>, startedAt: n
         }
       }
     }
-    if (!completed) yield errorChunk({ code: "no_completion", message: "OPENAI_RESPONSES_NO_COMPLETION", provider: "openai-responses" });
+    if (!completed) yield incompleteStreamChunk("openai-responses", { startedAt });
   } finally {
     reader.releaseLock();
   }

@@ -2,11 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { AgentPluginManager } from "../plugins/manager";
 import {
   createTerminationController,
+  createToolLeaseManager,
   createToolPipeline,
   createToolRegistry,
   executeBatch,
+  runToolCall,
+  type ToolAuditEvent,
   type ToolDescriptor,
 } from "./pipeline";
+import { inputSchemaFromParameters } from "./types";
 import { executeConditionalBatch, type ConditionalCall } from "./parallel";
 
 function descriptor(overrides: Partial<ToolDescriptor> = {}): ToolDescriptor {
@@ -260,5 +264,173 @@ describe("T-08 terminate preserves real results", () => {
     expect(results).toHaveLength(1);
     expect(seen).toHaveLength(1);
     expect(seen[0]?.callId).toBe("c1");
+  });
+});
+
+describe("T-08 schema rejection, audit and unified nested path", () => {
+  test("declared parameters project to a strict object schema", () => {
+    const schema = inputSchemaFromParameters([
+      { name: "path", type: "string", description: "file", required: true },
+      { name: "verbose", type: "boolean" },
+    ]);
+    expect(schema).toEqual({
+      type: "object",
+      properties: { path: { type: "string" }, verbose: { type: "boolean" } },
+      required: ["path"],
+      additionalProperties: false,
+    });
+  });
+
+  test("missing/wrong-type/extra inputs are rejected before execute and audited", async () => {
+    let executed = 0;
+    const schema = {
+      type: "object" as const,
+      properties: { query: { type: "string" as const } },
+      required: ["query"],
+      additionalProperties: false,
+    };
+    const registry = registryWith(
+      descriptor({
+        name: "typed",
+        inputSchema: schema,
+        execute: () => {
+          executed += 1;
+          return { ok: true };
+        },
+      })
+    );
+    const audit: ToolAuditEvent[] = [];
+    const [missing, wrongType, extra] = await executeBatch(
+      [
+        { id: "m", tool: "typed", input: {} },
+        { id: "w", tool: "typed", input: { query: 7 } },
+        { id: "e", tool: "typed", input: { query: "q", injected: true } },
+      ],
+      { registry, audit: (event) => void audit.push(event) }
+    );
+    expect(executed).toBe(0);
+    expect([missing?.reason, wrongType?.reason, extra?.reason]).toEqual([
+      expect.stringContaining("TOOL_INPUT_REQUIRED"),
+      expect.stringContaining("TOOL_INPUT_TYPE"),
+      expect.stringContaining("TOOL_INPUT_EXTRA_FIELD"),
+    ]);
+    expect(audit.map((event) => event.phase)).toEqual(["prepare", "prepare", "prepare"]);
+    expect(audit.every((event) => event.tool === "typed")).toBe(true);
+  });
+
+  test("runToolCall shares publisher but skips completion sink and messages", async () => {
+    const registry = registryWith(descriptor({ name: "nested", execute: () => ({ ok: "nested" }) }));
+    const published: string[] = [];
+    const sunk: string[] = [];
+    const result = await runToolCall(
+      { id: "n1", tool: "nested", input: {} },
+      {
+        registry,
+        publisher: (item) => {
+          published.push(item.callId);
+          return item;
+        },
+        completionSink: (item) => {
+          sunk.push(item.callId);
+        },
+      }
+    );
+    expect(published).toEqual(["n1"]);
+    expect(sunk).toEqual([]);
+    expect(result.message).toBeUndefined();
+    expect(result.output).toEqual({ ok: "nested" });
+  });
+});
+
+describe("T-08 tool lease lifecycle", () => {
+  test("every call acquires a lease and waitForIdle settles with it", async () => {
+    const leases = createToolLeaseManager();
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const registry = registryWith(
+      descriptor({
+        name: "gated",
+        execute: () => gate.then(() => ({ ok: true })),
+      })
+    );
+    const running = executeBatch([{ id: "c1", tool: "gated", input: {} }], { registry, toolLeases: leases });
+    await delay(5);
+    expect(leases.activeIds).toEqual(["c1"]);
+    let idle = false;
+    const waiting = leases.waitForIdle().then(() => {
+      idle = true;
+    });
+    await delay(5);
+    expect(idle).toBe(false);
+    release();
+    await running;
+    await waiting;
+    expect(idle).toBe(true);
+    expect(leases.activeCount).toBe(0);
+  });
+
+  test("timeout cancels the independent lease and confirms cooperative termination", async () => {
+    const leases = createToolLeaseManager();
+    let observed: AbortSignal | undefined;
+    const registry = registryWith(
+      descriptor({
+        name: "cooperative",
+        timeoutMs: 5,
+        execute: (_input, exec) => {
+          observed = exec.signal;
+          return new Promise<never>((_resolve, reject) => {
+            exec.signal?.addEventListener("abort", () => reject(new Error("ABORTED_BY_TIMEOUT")));
+          });
+        },
+      })
+    );
+    const [result] = await executeBatch([{ id: "c1", tool: "cooperative", input: {} }], {
+      registry,
+      toolLeases: leases,
+      timeoutConfirmationMs: 100,
+    });
+    expect(result?.reason).toContain("TOOL_TIMEOUT");
+    expect(result?.reconciliation).toBeUndefined();
+    expect(observed?.aborted).toBe(true);
+    expect(leases.activeCount).toBe(0);
+  });
+
+  test("unconfirmed timeout returns unknown for reconciliation instead of a retryable failure", async () => {
+    const leases = createToolLeaseManager();
+    let attempts = 0;
+    const registry = registryWith(
+      descriptor({
+        name: "uncooperative",
+        timeoutMs: 5,
+        retry: { maxAttempts: 3 },
+        execute: () => {
+          attempts += 1;
+          return new Promise<never>(() => {});
+        },
+      })
+    );
+    const [result] = await executeBatch([{ id: "c1", tool: "uncooperative", input: {} }], {
+      registry,
+      toolLeases: leases,
+      timeoutConfirmationMs: 5,
+    });
+    expect(attempts).toBe(1);
+    expect(result?.reason).toContain("TOOL_TIMEOUT_UNKNOWN");
+    expect(result?.outcome).toBe("unknown");
+    expect(result?.reconciliation).toBe(true);
+    expect(leases.activeCount).toBe(0);
+  });
+
+  test("dispose cancels leases, force-settles unknown and leaves no active lease", async () => {
+    const leases = createToolLeaseManager();
+    const lease = leases.acquire("leftover");
+    expect(leases.activeCount).toBe(1);
+    const unknown = await leases.close({ graceMs: 5 });
+    expect(unknown).toEqual(["leftover"]);
+    expect(lease.outcome).toBe("unknown");
+    expect(lease.signal.aborted).toBe(true);
+    await expect(leases.waitForIdle()).resolves.toBeUndefined();
   });
 });

@@ -16,6 +16,7 @@ export {
   PERMISSION_BEHAVIORS,
   createPermissionGuard,
   createToolRegistry,
+  createToolLeaseManager,
   validateInput,
   executeCall,
   executeBatch,
@@ -41,6 +42,10 @@ export type {
   ToolRegistry,
   ToolPublisher,
   TerminationController,
+  ToolLease,
+  ToolLeaseManager,
+  ToolLeaseOutcome,
+  ToolAuditEvent,
   BatchContext,
   PreparedToolCall,
   ExecutedToolCall,
@@ -53,7 +58,13 @@ export type {
   ToolHookRunner,
   ToolPipeline,
 } from "./tools/pipeline";
-export { normalizeToolArgs, createToolResultMessage, toolName, toolInput } from "./tools/types";
+export {
+  normalizeToolArgs,
+  createToolResultMessage,
+  inputSchemaFromParameters,
+  toolName,
+  toolInput,
+} from "./tools/types";
 export type {
   ToolExecutionMode,
   ToolExecutionConfig,

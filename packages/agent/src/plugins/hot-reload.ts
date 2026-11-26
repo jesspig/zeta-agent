@@ -21,7 +21,7 @@ export interface HotReloadUnit extends HmrUnit {
   readonly critical?: boolean;
 }
 
-export interface PluginHotReloaderOptions {
+export interface PluginHotReloaderOptions<THandle = unknown> {
   readonly ctx: Context;
   /** 真实文件监听根目录；缺省取首个 unit 所在目录。 */
   readonly root?: string;
@@ -38,12 +38,27 @@ export interface PluginHotReloaderOptions {
   /** 每个 unit 的 fiber effect；返回逆供 fiber.update 精确撤销。 */
   readonly effect?: (unit: HotReloadUnit, value: unknown) => (() => void) | void;
   readonly onApply?: (unit: HotReloadUnit, instance: UnitInstance) => void;
+  /**
+   * 真实插件应用桥：把求值产物安装为新的 AgentPlugin 世代；返回句柄供 revert/discard。
+   * 未提供时退化为仅更新 slot/fiber 的值投影（兼容纯数据插件）。
+   */
+  readonly applyPlugin?: (
+    unit: HotReloadUnit,
+    instance: UnitInstance,
+    previous: THandle | undefined
+  ) => THandle | undefined | Promise<THandle | undefined>;
+  /** 分区回滚：撤销本次 apply 产生的新世代，恢复旧插件。 */
+  readonly revertPlugin?: (unit: HotReloadUnit, applied: THandle) => void | Promise<void>;
+  /** 无法回滚时丢弃孤立世代。 */
+  readonly discardPlugin?: (handle: THandle) => void | Promise<void>;
   readonly auto?: boolean;
   readonly debounceMs?: number;
 }
 
-export interface PluginHotReloader {
+export interface PluginHotReloader<THandle = unknown> {
   readonly controller: HmrController;
+  /** 补偿记录：critical root 与分区回滚均在此可观察。 */
+  readonly compensationLog: readonly { readonly id: string; readonly generation: number }[];
   /** 创建 unit fiber 并跑首轮求值；幂等，重复调用只登记新增 unit。 */
   install(units: readonly HotReloadUnit[]): Promise<readonly string[]>;
   markDirty(files: readonly string[]): void;
@@ -57,10 +72,16 @@ export interface PluginHotReloader {
   close(): Promise<void>;
 }
 
-interface InstalledHandle {
+interface InstalledHandle<THandle> {
   readonly unit: HotReloadUnit;
   readonly fiber: ContextFiber;
   readonly slot: { current: unknown };
+  plugin?: THandle;
+  pending?: {
+    readonly handle: THandle | undefined;
+    readonly previous: THandle | undefined;
+    revert: boolean;
+  };
 }
 
 const SOURCE_EXTENSIONS = /\.(ts|tsx|js|mjs|cjs)$/;
@@ -123,11 +144,15 @@ function defaultReadFile(path: string): string | Uint8Array | undefined {
 
 /**
  * 插件热重载器：复用 framework 的 HMR 事务与 Context 的 fiber 生命周期。
- * replace 只更新组件读取的 slot 并调用 fiber.update()，不 remove/use，
- * 因此 uid、parent、config 与宿主会话全部保留。
+ * slot/fiber 保留 uid/parent/config 与宿主会话；传入 applyPlugin 时同时把求值产物
+ * 安装为真实 AgentPlugin 世代，工具/hook/section/wrap 随文件变更整体替换。
  */
-export function createPluginHotReloader(options: PluginHotReloaderOptions): PluginHotReloader {
-  const handles = new Map<string, InstalledHandle>();
+export function createPluginHotReloader<THandle = unknown>(
+  options: PluginHotReloaderOptions<THandle>
+): PluginHotReloader<THandle> {
+  const handles = new Map<string, InstalledHandle<THandle>>();
+  const compensationLog: Array<{ id: string; generation: number }> = [];
+  let closed = false;
   const root =
     options.root ??
     (options.units?.[0] === undefined ? process.cwd() : dirname(options.units[0].entry));
@@ -143,14 +168,23 @@ export function createPluginHotReloader(options: PluginHotReloaderOptions): Plug
     compensate: (unit, previous) => {
       const handle = handles.get(unit.id);
       if (handle !== undefined) {
-        handle.slot.current = previous?.instance.value;
+        if (handle.pending !== undefined) handle.pending.revert = true;
+        if (previous !== undefined) handle.slot.current = previous.instance.value;
         void handle.fiber.update();
       }
+      compensationLog.push({ id: unit.id, generation: previous?.revision ?? 0 });
       options.compensate?.(unit as HotReloadUnit, previous);
     },
     apply: async (unit, instance) => {
       const handle = handles.get(unit.id);
       if (handle === undefined) throw new Error(`HMR_UNIT_NOT_INSTALLED: ${unit.id}`);
+      let applied: THandle | undefined;
+      if (options.applyPlugin !== undefined) {
+        applied = await options.applyPlugin(unit, instance, handle.plugin);
+        if (applied !== undefined) {
+          handle.pending = { handle: applied, previous: handle.plugin, revert: false };
+        }
+      }
       handle.slot.current = instance.value;
       options.onApply?.(unit as HotReloadUnit, instance);
       await handle.fiber.update();
@@ -159,8 +193,32 @@ export function createPluginHotReloader(options: PluginHotReloaderOptions): Plug
     debounceMs: options.debounceMs,
   });
 
+  /** 事务结束后按 settled/aborted 决定保留还是撤销本次安装的新世代。 */
+  async function finalizePending(result: HmrResult): Promise<void> {
+    const settled = new Set(result.settled);
+    for (const handle of handles.values()) {
+      const pending = handle.pending;
+      if (pending === undefined) continue;
+      handle.pending = undefined;
+      if (pending.handle === undefined) continue;
+      if (!pending.revert && settled.has(handle.unit.id)) {
+        handle.plugin = pending.handle;
+        continue;
+      }
+      handle.plugin = pending.previous;
+      if (options.revertPlugin !== undefined && pending.previous !== undefined) {
+        await options.revertPlugin(handle.unit, pending.handle);
+      } else if (options.discardPlugin !== undefined) {
+        await options.discardPlugin(pending.handle);
+      }
+    }
+  }
+
   return {
     controller,
+    get compensationLog() {
+      return [...compensationLog];
+    },
     async install(units) {
       const ids: string[] = [];
       const initialEntries: string[] = [];
@@ -184,20 +242,27 @@ export function createPluginHotReloader(options: PluginHotReloaderOptions): Plug
       }
       if (initialEntries.length > 0) {
         controller.markDirty(initialEntries);
-        await controller.flush();
+        await finalizePending(await controller.flush());
       }
       await Promise.all(ids.map((id) => handles.get(id)!.fiber.ready));
       return ids;
     },
     markDirty: (files) => controller.markDirty(files),
     markDirtySigned: (signatures) => controller.markDirtySigned(signatures),
-    flush: () => controller.flush(),
+    async flush() {
+      const result = await controller.flush();
+      await finalizePending(result);
+      return result;
+    },
     ready: () => controller.ready(),
     failed: () => controller.failed(),
     revisionOf: (id) => controller.revisionOf(id),
     fiberOf: (id) => handles.get(id)?.fiber,
     valueOf: (id) => handles.get(id)?.slot.current ?? controller.stateOf(id)?.instance.value,
     async close() {
+      if (closed) return;
+      closed = true;
+      await controller.ready();
       controller.close();
       for (const handle of handles.values()) handle.fiber.remove();
       handles.clear();

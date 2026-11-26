@@ -8,6 +8,10 @@ type ByKind<K extends PluginContribution["kind"]> = Extract<PluginContribution, 
 export interface ContributionContext {
   readonly realm: symbol;
   readonly order: number;
+  readonly priority?: number;
+  readonly dependsOn?: readonly string[];
+  /** 归属插件名前缀，用于把环失败归因到目标插件。 */
+  readonly owner?: string;
   readonly generation: number;
   readonly replaceable: boolean;
   readonly required: boolean;
@@ -62,6 +66,9 @@ export function createContributionHost(
     const ctx: ContributionContext = {
       realm: meta.realm ?? defaultRealm,
       order: meta.order ?? 100,
+      ...(meta.priority === undefined ? {} : { priority: meta.priority }),
+      ...(meta.dependsOn === undefined ? {} : { dependsOn: meta.dependsOn }),
+      ...(meta.owner === undefined ? {} : { owner: meta.owner }),
       generation: meta.generation ?? nextGeneration(),
       replaceable: meta.replaceable ?? true,
       required: meta.required ?? false,

@@ -9,6 +9,23 @@ export interface HookFailure {
   readonly error: Error;
 }
 
+/** 依赖图环失败：只让环内条目 FAILED，链上其他条目继续参与排序与执行。 */
+export interface HookCycleFailure {
+  readonly chain: string;
+  readonly name: string;
+  readonly cycle: readonly string[];
+}
+
+export interface HookAddOptions {
+  /** 必须先于本 hook 执行的条目名；参与拓扑排序与环检测。 */
+  readonly dependsOn?: readonly string[];
+}
+
+export interface HookRunOptions {
+  /** 反向执行（wrap 的 after 阶段）；不改变排序结果，只反转遍历顺序。 */
+  readonly reverse?: boolean;
+}
+
 export interface HookChainOptions {
   readonly mode?: HookDispatchMode;
   readonly defaultPriority?: number;
@@ -25,6 +42,9 @@ export interface HookEntry<I> {
   readonly priority: number;
   readonly order: number;
   readonly name: string;
+  readonly dependsOn: readonly string[];
+  readonly status: "ACTIVE" | "FAILED";
+  readonly failureReason?: string;
 }
 
 export const DEFAULT_HOOK_PRIORITY = 100;
@@ -34,8 +54,20 @@ export function normalizeHookError(error: unknown, name: string, index: number):
   return { index, name, error: normalized };
 }
 
+function compareEntries<I>(left: HookEntry<I>, right: HookEntry<I>): number {
+  return left.priority - right.priority || left.order - right.order;
+}
+
+interface ResolvedGraph<I> {
+  readonly ordered: readonly HookEntry<I>[];
+  readonly failed: readonly HookEntry<I>[];
+  readonly cycles: readonly HookCycleFailure[];
+}
+
 /**
- * 有序 hook 链：priority 升序、同值按注册序；add 返回幂等 disposer，disposeAll 按 LIFO 撤销。
+ * 有序 hook 链：priority 升序、同值按注册序，dependsOn 参与拓扑排序；
+ * 环内条目被隔离为 FAILED（HOOK_CYCLE），其他条目照常执行。
+ * add 返回幂等 disposer，disposeAll 按 LIFO 撤销。
  * 串行逐一 await 并折叠返回值（undefined 保持当前值）；并行用 Promise.allSettled 收集。
  */
 export class HookChain<I = unknown> {
@@ -68,15 +100,34 @@ export class HookChain<I = unknown> {
     return this.entries.length;
   }
 
+  get activeSize(): number {
+    return this.snapshot().length;
+  }
+
   get names(): readonly string[] {
-    return this.sorted().map((entry) => entry.name);
+    return this.snapshot().map((entry) => entry.name);
   }
 
   get lastFailures(): readonly HookFailure[] {
     return [...this.failures];
   }
 
-  add(fn: HookFn<I>, priority: number = this.defaultPriorityValue, name?: string): Disposer {
+  /** 当前依赖图中的环；每个环只标记环内条目，不影响其他 hook。 */
+  get cycles(): readonly HookCycleFailure[] {
+    return this.resolveGraph().cycles;
+  }
+
+  /** 因环被隔离的条目（status=FAILED，failureReason=HOOK_CYCLE）。 */
+  get failedEntries(): readonly HookEntry<I>[] {
+    return this.resolveGraph().failed;
+  }
+
+  add(
+    fn: HookFn<I>,
+    priority: number = this.defaultPriorityValue,
+    name?: string,
+    options: HookAddOptions = {}
+  ): Disposer {
     if (typeof fn !== "function") throw new Error("HookChain.add: expected a function");
     const order = this.sequence++;
     const entry: HookEntry<I> = {
@@ -84,6 +135,8 @@ export class HookChain<I = unknown> {
       priority,
       order,
       name: name ?? `${this.chainName}#${order}`,
+      dependsOn: Object.freeze([...(options.dependsOn ?? [])]),
+      status: "ACTIVE",
     };
     this.entries.push(entry);
     let active = true;
@@ -95,15 +148,58 @@ export class HookChain<I = unknown> {
     };
   }
 
+  /** 通过拓扑排序后的活跃条目快照；排除环内 FAILED 条目。 */
   snapshot(): readonly HookEntry<I>[] {
-    return this.sorted();
+    return this.resolveGraph().ordered;
   }
 
-  async run(input: I, signal?: AbortSignal): Promise<I> {
+  async run(input: I, signal?: AbortSignal, options: HookRunOptions = {}): Promise<I> {
+    return this.runWith(this.snapshot(), input, signal, options);
+  }
+
+  /**
+   * 对已捕获的条目快照执行：在途调用持有旧条目引用，期间链上注册变化不影响本次执行。
+   * 失败记录仍写回活链，保持可观察性不变。
+   */
+  async runWith(
+    snapshot: readonly HookEntry<I>[],
+    input: I,
+    signal?: AbortSignal,
+    options: HookRunOptions = {}
+  ): Promise<I> {
     this.failures = [];
-    const ordered = this.sorted();
+    const ordered = options.reverse === true ? [...snapshot].reverse() : snapshot;
     if (this.modeValue === "parallel") return this.runParallel(ordered, input, signal);
     return this.runSerial(ordered, input, signal);
+  }
+
+  /** 逐条目执行并把结果交给 visit；用于 converter 这类需要逐项发射的 hook。 */
+  async runEach(
+    input: I,
+    signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
+  ): Promise<void> {
+    return this.runEachWith(this.snapshot(), input, signal, visit);
+  }
+
+  async runEachWith(
+    snapshot: readonly HookEntry<I>[],
+    input: I,
+    signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
+  ): Promise<void> {
+    this.failures = [];
+    for (const [index, entry] of snapshot.entries()) {
+      try {
+        const value = await entry.fn(input, signal);
+        await visit(value, entry);
+      } catch (error) {
+        const failure = normalizeHookError(error, entry.name, index);
+        this.failures.push(failure);
+        this.onError?.(failure);
+        if (this.rethrowValue) throw failure.error;
+      }
+    }
   }
 
   disposeAll(): void {
@@ -118,10 +214,83 @@ export class HookChain<I = unknown> {
     this.failures = [];
   }
 
-  private sorted(): HookEntry<I>[] {
-    return [...this.entries].sort((left, right) =>
-      left.priority - right.priority || left.order - right.order
-    );
+  private resolveGraph(): ResolvedGraph<I> {
+    const byName = new Map<string, HookEntry<I>>();
+    for (const entry of this.entries) {
+      if (!byName.has(entry.name)) byName.set(entry.name, entry);
+    }
+    const lookup = (name: string): HookEntry<I> | undefined => {
+      const exact = byName.get(name);
+      if (exact !== undefined) return exact;
+      const suffix = `:${name}`;
+      const matches = this.entries.filter((entry) => entry.name.endsWith(suffix));
+      return matches.length === 1 ? matches[0] : undefined;
+    };
+
+    const cycles: HookCycleFailure[] = [];
+    const failedNames = new Set<string>();
+    const state = new Map<string, 0 | 1 | 2>();
+    const stack: string[] = [];
+    const visit = (entry: HookEntry<I>): void => {
+      state.set(entry.name, 1);
+      stack.push(entry.name);
+      for (const dependency of entry.dependsOn) {
+        const target = lookup(dependency);
+        if (target === undefined) continue;
+        if (target === entry) {
+          const cycle = [entry.name, entry.name];
+          cycles.push({ chain: this.chainName, name: entry.name, cycle });
+          for (const name of cycle) failedNames.add(name);
+          continue;
+        }
+        const visited = state.get(target.name) ?? 0;
+        if (visited === 0) visit(target);
+        else if (visited === 1) {
+          const start = stack.indexOf(target.name);
+          const cycle = [...stack.slice(start), target.name];
+          cycles.push({ chain: this.chainName, name: entry.name, cycle });
+          for (const name of cycle) failedNames.add(name);
+        }
+      }
+      stack.pop();
+      state.set(entry.name, 2);
+    };
+    for (const entry of this.entries) {
+      if ((state.get(entry.name) ?? 0) === 0) visit(entry);
+    }
+
+    const active = this.entries.filter((entry) => !failedNames.has(entry.name));
+    const activeSet = new Set(active);
+    const indegree = new Map(active.map((entry) => [entry, 0]));
+    const dependents = new Map(active.map((entry) => [entry, [] as HookEntry<I>[]]));
+    for (const entry of active) {
+      for (const dependency of entry.dependsOn) {
+        const target = lookup(dependency);
+        if (target === undefined || target === entry || !activeSet.has(target)) continue;
+        indegree.set(entry, (indegree.get(entry) ?? 0) + 1);
+        dependents.get(target)!.push(entry);
+      }
+    }
+    const ready = active.filter((entry) => indegree.get(entry) === 0);
+    const ordered: HookEntry<I>[] = [];
+    while (ready.length > 0) {
+      ready.sort(compareEntries);
+      const current = ready.shift()!;
+      ordered.push(current);
+      for (const child of dependents.get(current) ?? []) {
+        const remaining = (indegree.get(child) ?? 0) - 1;
+        indegree.set(child, remaining);
+        if (remaining === 0) ready.push(child);
+      }
+    }
+    // 防御：若仍有未出队条目（异常图），只隔离它们，不拖垮已排序条目。
+    for (const entry of active) {
+      if (!ordered.includes(entry)) failedNames.add(entry.name);
+    }
+    const failed = this.entries
+      .filter((entry) => failedNames.has(entry.name))
+      .map((entry) => ({ ...entry, status: "FAILED" as const, failureReason: "HOOK_CYCLE" }));
+    return { ordered, failed, cycles };
   }
 
   private async runSerial(ordered: readonly HookEntry<I>[], input: I, signal?: AbortSignal): Promise<I> {

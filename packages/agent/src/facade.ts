@@ -1,4 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  asNextTurnUpdate,
   createEventStream,
   createInbox,
   declareToolChanges,
@@ -37,9 +39,20 @@ import {
   type WorkspaceStore,
   type EventBus,
   type FinishTurn,
+  type HookEntry,
+  type HookSnapshot,
   type Inbox,
+  type InboxMessage,
+  type LoopDecision,
   type LoopRuntime,
+  type LastTurn,
+  type NextTurnUpdate,
   type PluginContribution,
+  type PluginSlot,
+  type PluginStatus,
+  type QueueMode,
+  type QueueTarget,
+  type SourcePollPhase,
   type PluginMetadata,
   type ContributionContext,
   type ContributionExecutors,
@@ -51,14 +64,22 @@ import {
   type StreamFn,
   type ToolCall,
   type ToolResult,
+  type UsageSnapshot,
+  aggregateUsage,
+  createInitialState,
 } from "@zeta-agent/agent-framework";
 import {
+  createToolLeaseManager,
   createToolPipeline,
-  createToolRegistry,
+  inputSchemaFromParameters,
+  type BatchContext,
   type BeforeToolCallHook,
   type AfterToolCallHook,
+  type PluginToolParameter,
+  type ToolAuditEvent,
   type ToolDescriptor,
   type ToolPublisher,
+  type ToolRegistry,
 } from "@zeta-agent/agent-framework";
 import {
   createPluginTransaction,
@@ -119,6 +140,12 @@ import {
   type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import { createProviderStreamFn } from "./providers/dispatch";
+import {
+  createProviderBroker,
+  type ProviderBroker,
+  type ProviderBrokerOptions,
+  type ProviderRegistrationOptions,
+} from "./providers/broker";
 import { builtinIdsForProfile, resolveAssemblyProfile, type AssemblyProfile } from "./assembly/builtins";
 import { createAssemblyManifest, type CapabilityDiagnostic } from "./assembly/manifest";
 import { diagnoseCapabilities, executableToolNames } from "./assembly/profile";
@@ -198,6 +225,8 @@ export interface PluginInstallation {
   readonly dispose: Disposer;
   readonly realm: symbol;
   readonly review: ExtensionReview;
+  /** 依赖环只把目标插件标为 FAILED，其他插件保持 ACTIVE。 */
+  status: PluginStatus;
 }
 
 export interface PluginReviewRecord {
@@ -254,14 +283,16 @@ export interface AgentToolCall {
   readonly execute: () => unknown | Promise<unknown>;
 }
 
-export type ToolFailure = { readonly ok: false; readonly reason: string } | { readonly ok: true; readonly value: unknown };
+export type ToolFailure =
+  | { readonly ok: false; readonly reason: string; readonly reconciliation?: boolean }
+  | { readonly ok: true; readonly value: unknown };
 
 export interface AgentToolSchema {
   readonly name: string;
   readonly description: string;
   readonly parameters: readonly {
     readonly name: string;
-    readonly type: "string" | "number" | "boolean";
+    readonly type: PluginToolParameter["type"];
     readonly description: string;
     readonly required?: boolean;
   }[];
@@ -502,6 +533,8 @@ export interface AgentOptions {
   readonly turnBudget?: number;
   /** 工具调用缺省超时（毫秒）；工具自身 timeoutMs 优先。 */
   readonly toolTimeoutMs?: number;
+  /** 超时取消后等待工具确认终止的宽限期；未确认返回 unknown。 */
+  readonly toolTimeoutConfirmationMs?: number;
   /**
    * 审计传输形态：默认 "memory" 保持零回归；"socket" 走进程外 daemon（仅含端点，不含密钥）。
    * 仅当未注入 auditSink 时生效。
@@ -513,8 +546,13 @@ export interface AgentOptions {
   readonly auditToken?: string;
   /** @deprecated facade 不再自行写无签名旁路文件；落盘由 daemon 独占。 */
   readonly auditDir?: string;
-  /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt。 */
+  /** 可选会话存储：agent_end 的 newMessages 在 awaited listener 中逐条落盘后再 resolve prompt；创建时同步回放 committed transcript。 */
   readonly sessionStore?: SessionStore;
+  /** 可选 broker；注入后所有模型请求统一经它路由，注册/切换不动 Agent 实例。 */
+  readonly providerBroker?: ProviderBroker;
+  /** broker 路由使用的 provider/model；可由 setProvider/setModel 热切换。 */
+  readonly provider?: string;
+  readonly model?: string;
   /**
    * 租户治理作用域（由 principal resolver 解析得到）：注入后 session/provider/effects/quota/audit
    * 全部按该 realm 解析；未注入时保持原有单租户行为。
@@ -546,6 +584,19 @@ export interface AgentCompactionHandle {
   readonly budgetTracker: BudgetTracker;
 }
 
+/** HMR 安装的一个插件世代：持有自己的贡献 disposer，按在途 lease 精确撤销。 */
+export interface HotPluginGeneration {
+  readonly id: string;
+  readonly generation: number;
+  readonly plugin: AgentPlugin;
+  readonly superseded: AgentPlugin | undefined;
+  readonly status: "ACTIVE" | "RETIRING" | "DISPOSED";
+  readonly inFlight: number;
+  readonly disposeCount: number;
+  /** 幂等；重复调用不增加 disposeCount。 */
+  dispose(): void;
+}
+
 export interface Agent extends PluginApiSurface {
   prompt(text: string, signal?: AbortSignal): Promise<readonly AgentMessage[]>;
   continue(signal?: AbortSignal): Promise<readonly AgentMessage[]>;
@@ -553,10 +604,28 @@ export interface Agent extends PluginApiSurface {
   steer(message: AgentMessage): void;
   /** 运行中注入 followUp 消息：按队列语义留到下一次轮首消费。 */
   followUp(message: AgentMessage): void;
+  /** 注入 nextStep 消息：不唤醒当前 run，在 prepareNextTurn 时按 QueueMode claim。 */
+  inject(message: AgentMessage): InboxMessage;
+  /** 设置队列模式：all 全量消费、step 每次一条、interrupt 清空 nextStep 并插队 nextTurn。 */
+  setQueueMode(mode: QueueMode): void;
+  getQueueMode(): QueueMode;
+  queueSize(target: QueueTarget): number;
   subscribe(listener: AgentListener): Disposer;
   abort(): void;
   /** 新建会话：清空会话上下文与在途状态，保留事件订阅。 */
   reset(): void;
+  /** 取消在途工具并等待其 lease 结算；之后撤销插件贡献与审计连接。幂等。 */
+  dispose(): Promise<void>;
+  /** 只停止新准入（同步）；由装配层在关闭 watcher 前调用。 */
+  closeAdmission(): void;
+  readonly disposed: boolean;
+  /** 与 waitForIdle 相同的 lease 视图：run + tool lease 计数。 */
+  readonly activeLeaseCount: number;
+  /** 安装或替换一个热重载插件世代；失败时旧世代保持 ACTIVE。 */
+  hotSwapPlugin(id: string, plugin: AgentPlugin): HotPluginGeneration;
+  /** 回滚到该世代被替换前的插件；用于 HMR 分区补偿。 */
+  revertHotPlugin(generation: HotPluginGeneration): void;
+  readonly hotPluginGenerations: readonly HotPluginGeneration[];
   waitForIdle(): Promise<void>;
   runTool(call: AgentToolCall): Promise<ToolFailure>;
   emitEffect(meta: EffectMeta): void;
@@ -585,6 +654,22 @@ export interface Agent extends PluginApiSurface {
   closeAudit(): Promise<void>;
   /** 用 AgentOptions 注入的凭据组件创建 provider 流；未注入时保持 dispatch 默认行为。 */
   createProviderStreamFn(config: AgentProviderConfig, fetchImpl?: typeof fetch): AgentStreamFn;
+  /** 模型请求统一入口；生产装配中始终存在，register/switch 不重建 Agent。 */
+  readonly providerBroker: ProviderBroker | undefined;
+  registerProvider(id: string, streamFn: AgentStreamFn, options?: ProviderRegistrationOptions): Disposer;
+  unregisterProvider(id: string): void;
+  setProviderRoutes(routes: Readonly<Record<string, readonly string[]>>): void;
+  setProviderFallback(providerIds: readonly string[]): void;
+  setProvider(id: string | undefined): void;
+  setModel(model: string | undefined): void;
+  /** session/run 计费汇总，来自消息上的 done 终态而非 adapter 局部状态。 */
+  readonly usageSummary: UsageSummary;
+  lastRunUsage(): UsageSummary;
+  /** 重新绑定 SessionStore 并从 committed transcript 回放；运行中拒绝。 */
+  attachSessionStore(store: SessionStore): void;
+  resumeSession(frameId: string): void;
+  forkSession(fromId?: string): Promise<SessionStore>;
+  truncateSession(frameId: string): Promise<SessionStore>;
   readonly sessionStore: SessionStore | undefined;
   readonly compaction: AgentCompactionHandle | undefined;
   /** 本 agent 绑定的租户作用域；单租户调用方为 undefined。 */
@@ -603,22 +688,113 @@ export interface Agent extends PluginApiSurface {
   providerToolSchemas(): readonly AgentToolSchema[];
 }
 
+function isLoopDecision(value: unknown): value is LoopDecision {
+  if (typeof value !== "object" || value === null) return false;
+  const action = (value as { readonly action?: unknown }).action;
+  return action === "continue" || action === "end";
+}
+
+function turnFromEvent(event: AgentEvent): LastTurn {
+  return event.type === "turn_end"
+    ? { message: event.message, toolResults: event.toolResults }
+    : { message: { role: "assistant", content: "" }, toolResults: [] };
+}
+
 function streamErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) return String(error.message);
   return error instanceof Error ? error.message : String(error);
 }
 
-export function createAgent(options: AgentOptions = {}): Agent {
-  const stream = createEventStream();
-  const tenantScope = options.tenantScope;
-  const sessionStore = tenantScope?.sessionStore ?? options.sessionStore;
-  if (sessionStore !== undefined) {
-    // agent_end 只含本次 newMessages；事件流 await listener，故 prompt resolve 前消息已落盘。
-    stream.subscribe(async (event) => {
-      if (event.type !== "agent_end") return;
-      for (const item of event.messages) await sessionStore.append(item);
-    });
+/** session/run 计费汇总；只统计带 usage 的 assistant 终态，错误与重试不重复计入。 */
+export interface UsageSummary {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly durationMs: number;
+  readonly responseId?: string;
+  readonly requests: number;
+  readonly errors: number;
+}
+
+function usageSummaryFrom(messages: readonly AgentMessage[]): UsageSummary {
+  const billable = messages.filter((message) => message.role === "assistant" && message.usage !== undefined);
+  const usage = aggregateUsage(messages) ?? {};
+  const numeric = (key: "inputTokens" | "outputTokens" | "totalTokens" | "durationMs"): number => {
+    const value = usage[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  return {
+    inputTokens: numeric("inputTokens"),
+    outputTokens: numeric("outputTokens"),
+    totalTokens: numeric("totalTokens"),
+    durationMs: numeric("durationMs"),
+    ...(typeof usage.responseId === "string" ? { responseId: usage.responseId } : {}),
+    requests: billable.length,
+    errors: messages.filter((message) =>
+      message.role === "assistant" && typeof message.content === "string" && message.content.startsWith("Error:")
+    ).length,
+  };
+}
+
+const TOOLS_DECLARATION = /^tools:\s*(.*)$/m;
+
+/**
+ * committed transcript 回放：system 事实只用于计算，不回灌 state.messages；
+ * 对话事实与工具声明分别恢复，避免重开时重复注入 system/tool 声明。
+ */
+function replayCommittedTranscript(messages: readonly AgentMessage[]): {
+  readonly messages: readonly AgentMessage[];
+  readonly systemPrompt: string;
+  readonly declaredTools: readonly string[] | undefined;
+} {
+  const conversation: AgentMessage[] = [];
+  let systemPrompt = "";
+  let declaredTools: readonly string[] | undefined;
+  for (const message of messages) {
+    if (message.role === "system") {
+      const fact = typeof message.content === "string" ? message.content : String(message.content ?? "");
+      const declaration = fact.match(TOOLS_DECLARATION);
+      if (declaration !== null) {
+        declaredTools = (declaration[1] ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
+        const promptFact = fact.slice(0, declaration.index ?? 0).trim();
+        if (promptFact.length > 0) systemPrompt = promptFact;
+      } else if (fact.length > 0) {
+        systemPrompt = fact;
+      }
+      continue;
+    }
+    conversation.push(message);
   }
+  return { messages: conversation, systemPrompt, declaredTools };
+}
+
+/** 只读适配器：部分测试宿主提供仅含 append 的 SessionStore，投影缺失时按空 transcript 处理。 */
+function projectionMessages(store: SessionStore | undefined): readonly AgentMessage[] {
+  const projection = store?.projection?.();
+  return Array.isArray(projection?.messages) ? projection!.messages : [];
+}
+
+export function createAgent(options: AgentOptions = {}): Agent {
+  const tenantScope = options.tenantScope;
+  let activeSessionStore: SessionStore | undefined = tenantScope?.sessionStore ?? options.sessionStore;
+  const restoredTranscript = activeSessionStore === undefined
+    ? { messages: [] as readonly AgentMessage[], systemPrompt: "", declaredTools: undefined as readonly string[] | undefined }
+    : replayCommittedTranscript(projectionMessages(activeSessionStore));
+  const restoredUsage = aggregateUsage(restoredTranscript.messages);
+  const stream = createEventStream(createInitialState({
+    messages: restoredTranscript.messages,
+    systemPrompt: restoredTranscript.systemPrompt,
+    ...(restoredUsage === undefined ? {} : { usage: restoredUsage }),
+    ...(typeof restoredUsage?.durationMs === "number" ? { durationMs: restoredUsage.durationMs } : {}),
+    ...(typeof restoredUsage?.responseId === "string" ? { responseId: restoredUsage.responseId } : {}),
+  }));
+  // 单一 writer：agent_end 只含本次 newMessages；重绑定 store 时无需重建订阅者。
+  stream.subscribe(async (event) => {
+    if (event.type !== "agent_end") return;
+    const store = activeSessionStore;
+    if (store === undefined) return;
+    for (const item of event.messages) await store.append(item);
+  });
   const baseStreamFn = tenantScope?.streamFn ?? options.streamFn;
   let reasoningEffort: string | undefined = options.reasoningEffort;
   const allowTextToolMarkers = options.allowTextToolMarkers === true;
@@ -652,7 +828,6 @@ export function createAgent(options: AgentOptions = {}): Agent {
     emissionTools = new Set([...baseEmissionTools, ...pluginEmissionRefs.keys()]);
   };
   let activeSignal: AbortSignal | undefined;
-  let activePipeline: ReturnType<typeof createToolPipeline> | undefined;
   /** 发射工具在 commit 阶段经同一管线派发，此时不再重复 enqueue。 */
   let dispatchingEmission = false;
   /** withhold 策略下总是创建默认效果：插件（如 MCP）可在装配后声明发射工具。 */
@@ -677,6 +852,17 @@ export function createAgent(options: AgentOptions = {}): Agent {
       : undefined;
   if (socketSink !== undefined) void socketSink.ready().catch(() => {});
   const auditSink: AuditSink | undefined = options.auditSink ?? socketSink;
+  let auditClosed = false;
+  /** 审计连接由 agent 独占：所有输出排空后才关闭，且只关一次。 */
+  async function closeAuditSink(): Promise<void> {
+    if (auditClosed) return;
+    auditClosed = true;
+    if (socketSink !== undefined) await socketSink.close();
+    const injected = auditSink as ({ close?: () => void | Promise<void> } | undefined);
+    if (injected !== undefined && typeof injected.close === "function" && injected !== socketSink) {
+      await injected.close();
+    }
+  }
   /** egress 拒绝等未进入 durableEffects 的失败回执，供调用方观测。 */
   const failedEmissionReceipts: Receipt[] = [];
 
@@ -740,9 +926,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
       })();
   let persistedLineageCount = 0;
   async function persistCompaction(lineages: readonly CompactionLineage[]): Promise<void> {
-    if (sessionStore === undefined) return;
+    const store = activeSessionStore;
+    if (store === undefined) return;
     for (const lineage of lineages.slice(persistedLineageCount)) {
-      await sessionStore.appendRecap(lineage.recap, lineage.uris, {
+      await store.appendRecap(lineage.recap, lineage.uris, {
         threshold: lineage.threshold,
         preTokenCount: lineage.preTokenCount,
       });
@@ -854,8 +1041,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
       "- Answer environment questions (cwd, platform, git status, etc.) from the Environment section or by calling tools.",
       "- Reply in the same language the user uses. Keep answers concise and concrete.",
     ].filter((line) => line.length > 0);
-    // section 贡献是真实提示词的一部分，按注册入口的 order 排序后追加。
-    const sections = sectionRegistry.snapshot().map((slot) => slot.value.text);
+    // section 贡献是真实提示词的一部分，按注册入口的 order 排序后追加；在途 run 用捕获的旧快照。
+    const scopeSections = dispatchScope.getStore()?.sections;
+    const sections = scopeSections ?? sectionRegistry.snapshot().map((slot) => slot.value.text);
     if (sections.length > 0) lines.push("", "Plugin sections:", ...sections);
     return lines.join("\n");
   }
@@ -870,6 +1058,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   });
 
   let aborted = false;
+  let disposed = false;
+  let disposal: Promise<void> | undefined;
   let generation = 0;
   interface RunLease {
     readonly generation: number;
@@ -879,42 +1069,184 @@ export function createAgent(options: AgentOptions = {}): Agent {
   let activeRun: RunLease | undefined;
   /** 当前回合是否使用了 provider 原生 tool_calls（决定是否自动续跑消费工具结果）。 */
   let lastTurnHadNativeTools = false;
+  let lastRunMessages: readonly AgentMessage[] = [];
 
-  // 插件 API 的可变注册集合。每个 add* 返回幂等 disposer；disposeAll 按 LIFO 撤销。
+  // 插件 API 的工具/身份集合仍用 map 做快照；hook 的真实生产路径统一由 pluginManager 负载。
   interface PluginToolEntry {
     readonly tool: PluginTool;
     readonly token: object;
     readonly meta: ContributionContext;
     readonly dispose: () => void;
   }
+  interface AfterHookAccumulator {
+    readonly event: AgentEvent;
+    readonly overrides: Record<string, unknown>;
+  }
   const pluginTools = new Map<string, PluginToolEntry>();
   const declaredLoadout = new Map<string, PluginTool>();
-  const converters: Converter[] = [];
-  const contextTransforms: ContextTransform[] = [];
-  const beforeToolCalls: Array<(event: AgentEvent, signal?: AbortSignal) => void | Promise<void>> = [];
-  const afterToolCalls: Array<(event: AgentEvent, signal?: AbortSignal) => void | Promise<void>> = [];
-  const turnBoundaries: FinishTurn[] = [];
-  const prepareRequestFns: PrepareRequest[] = [];
-  const prepareNextTurnFns: PrepareNextTurn[] = [];
-  const steeringSources: QueueSource[] = [];
-  const followUpSources: QueueSource[] = [];
-  const streamFnProviders: StreamFn[] = [];
   // 插件生命周期（有序注册 / 幂等 disposer / LIFO 撤销）由 agent-framework 的核心管线提供。
   const pluginManager = options.pluginManager ?? new AgentPluginManager();
   const events = createEventBus();
+
+  // ── 调用快照（dispatch scope）─────────────────────────────────────────────
+  // 在途 run/tool 在开始时捕获 hook 条目、工具 descriptor、section/task/service 与插件世代；
+  // HMR 替换只影响之后的新调用，旧世代的 disposer 在在途 lease 归零后才执行。
+  interface FrozenService {
+    readonly name: string;
+    readonly realm: symbol;
+    readonly value: unknown;
+  }
+  interface DispatchScope {
+    readonly hooks: HookSnapshot;
+    readonly tools: ReadonlyMap<string, ToolDescriptor>;
+    readonly sections: readonly string[];
+    readonly tasks: readonly { readonly name: string; readonly handler: (() => void | Promise<void>) | undefined }[];
+    readonly services: readonly FrozenService[];
+    readonly generations: readonly HotGenerationState[];
+  }
+  interface HotGenerationState {
+    readonly id: string;
+    readonly generation: number;
+    readonly plugin: AgentPlugin;
+    readonly superseded: AgentPlugin | undefined;
+    status: HotPluginGeneration["status"];
+    inFlight: number;
+    disposeCount: number;
+    readonly disposers: Disposer[];
+    readonly installations: PluginInstallation[];
+    /** 本世代贡献的工具名：在途调用据此持有旧 descriptor。 */
+    readonly toolNames: readonly string[];
+    /** 本世代贡献的 service 槽位（name + realm）：在途调用据此解析旧值。 */
+    readonly serviceSlots: readonly { readonly name: string; readonly realm: symbol }[];
+    handle: HotPluginGeneration;
+  }
+  type FacadeHookOptions = { readonly failClosed?: boolean; readonly reverse?: boolean };
+  const dispatchScope = new AsyncLocalStorage<DispatchScope>();
+  const hotGenerations = new Map<string, HotGenerationState>();
+  const scopedHooks = (): HookSnapshot => dispatchScope.getStore()?.hooks ?? pluginManager.snapshot();
+  const hookRun = <I>(
+    chain: string,
+    input: I,
+    signal?: AbortSignal,
+    options?: FacadeHookOptions
+  ): Promise<I> => pluginManager.run(chain, input, signal, {
+    ...(options ?? {}),
+    snapshot: scopedHooks(),
+  });
+  const hookRunEach = <I>(
+    chain: string,
+    input: I,
+    signal: AbortSignal | undefined,
+    visit: (value: unknown, entry: HookEntry<I>) => void | Promise<void>
+  ): Promise<void> => pluginManager.runEach(chain, input, signal, visit, { snapshot: scopedHooks() });
+
+  function disposeGeneration(state: HotGenerationState): void {
+    if (state.status === "DISPOSED") return;
+    state.status = "DISPOSED";
+    state.disposeCount += 1;
+    for (const stop of [...state.disposers].reverse()) stop();
+    for (const installation of state.installations) {
+      const index = pluginInstallations.indexOf(installation);
+      if (index >= 0) pluginInstallations.splice(index, 1);
+      installationContributionDisposers.delete(installation);
+      const tracked = pluginTracking.get(installation.plugin);
+      if (tracked !== undefined) {
+        tracked();
+        pluginTracking.delete(installation.plugin);
+      }
+    }
+    if (hotGenerations.get(state.id) === state) hotGenerations.delete(state.id);
+  }
+  function retireIfIdle(state: HotGenerationState): void {
+    if (state.status === "RETIRING" && state.inFlight === 0) disposeGeneration(state);
+  }
+  function captureScope(): DispatchScope {
+    const generations = [...hotGenerations.values()].filter((state) => state.status === "ACTIVE");
+    for (const state of generations) state.inFlight += 1;
+    // 只冻结热插件工具：宿主在 run 中直接注册的工具仍按原语义即时可见。
+    const tools = new Map<string, ToolDescriptor>();
+    for (const state of generations) {
+      for (const name of state.toolNames) {
+        const entry = pluginTools.get(name);
+        if (entry !== undefined) tools.set(name, descriptorFor(entry.tool));
+      }
+    }
+    // service 与工具同源冻结：只冻结热插件贡献的槽位，宿主/非热服务仍按实时注册表解析。
+    const services: FrozenService[] = [];
+    for (const state of generations) {
+      for (const slot of state.serviceSlots) {
+        services.push({
+          name: slot.name,
+          realm: slot.realm,
+          value: serviceRegistry.resolve(slot.name, slot.realm),
+        });
+      }
+    }
+    const scope: DispatchScope = {
+      hooks: pluginManager.snapshot(),
+      tools,
+      sections: sectionRegistry.snapshot().map((slot) => slot.value.text),
+      tasks: taskRegistry.snapshot().map((slot) => ({ name: slot.name, handler: slot.value })),
+      services,
+      generations,
+    };
+    return scope;
+  }
+  function releaseScope(scope: DispatchScope): void {
+    for (const state of scope.generations) {
+      state.inFlight = Math.max(0, state.inFlight - 1);
+      retireIfIdle(state);
+    }
+  }
+  /** 在当前 scope 中运行；无论正常/异常都按同一 lease 视图释放世代引用。 */
+  async function withScope<T>(fn: () => Promise<T>): Promise<T> {
+    const scope = captureScope();
+    try {
+      return await dispatchScope.run(scope, fn);
+    } finally {
+      releaseScope(scope);
+    }
+  }
+
   /** 持久 inbox：外部可在运行中 steer()/followUp()，由下一轮轮首统一 poll。 */
   const inbox: Inbox = createInbox();
+  let hookSequence = 0;
+  const nextHookName = (chain: string): string => `${chain}#${++hookSequence}`;
+  function registerHook<I>(
+    chain: string,
+    fn: (input: I, signal?: AbortSignal) => unknown | Promise<unknown>,
+    name?: string
+  ): Disposer {
+    return pluginManager.addHook<I>(chain, fn, undefined, name ?? nextHookName(chain));
+  }
+
+  // legacy 字段赋值转换为 `legacy:<field>` 条目，参与同一链（最低优先级），不再旁路执行。
+  const legacyHooks = options.loopHooks;
+  if (legacyHooks?.prepareRequest !== undefined) {
+    pluginManager.setLegacy("prepareRequest", (input) =>
+      legacyHooks.prepareRequest!(input, activeSignal) ?? input);
+  }
+  if (legacyHooks?.prepareNextTurn !== undefined) {
+    pluginManager.setLegacy("prepareNextTurn", (input) =>
+      legacyHooks.prepareNextTurn!(input, activeSignal));
+  }
+  if (legacyHooks?.finishTurn !== undefined) {
+    pluginManager.setLegacy("turnBoundary", (input) =>
+      legacyHooks.finishTurn!(turnFromEvent(input as AgentEvent), activeSignal));
+  }
+  if (legacyHooks?.pollFollowUp !== undefined) {
+    pluginManager.setLegacy("pollFollowUp", async () =>
+      (await legacyHooks.pollFollowUp!(activeSignal)) ?? undefined);
+  }
+
+  async function pollQueueSources(signal: AbortSignal, kinds: "all" | "steering" = "all"): Promise<void> {
+    await hookRun("steering", inbox, signal);
+    // prepareNextTurn 只重轮询 steering：followUp 在这里重入会与 natural end 外层消费互相喂料而无限续跑。
+    if (kinds === "all") await hookRun("followUp", inbox, signal);
+  }
 
   function addDisposer(dispose: () => void): () => void {
     return pluginManager.addDisposer(dispose);
-  }
-
-  function addToList<T>(list: T[], fn: T): () => void {
-    list.push(fn);
-    return addDisposer(() => {
-      const index = list.indexOf(fn);
-      if (index >= 0) list.splice(index, 1);
-    });
   }
 
   /** 同名工具替换：旧条目先撤销，新条目用身份 disposer 登记，旧 disposer 晚到不误删。 */
@@ -948,6 +1280,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   let sectionSequence = 0;
   const installationContributionDisposers = new Map<PluginInstallation, Disposer[]>();
+  const pluginTracking = new Map<AgentPlugin, Disposer>();
   const contributionExecutors: ContributionExecutors = {
     tool: (item, ctx) => registerToolEntry(item.tool, ctx),
     hook: (item, ctx) =>
@@ -964,8 +1297,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
         required: ctx.required,
         source: ctx.source,
       }),
-    wrap: (item, ctx) =>
-      wrapRegistry.register({
+    wrap: (item, ctx) => {
+      // registry 仅承载公开快照；真实执行经 manager 的 wrap 链（含拓扑排序/环隔离）。
+      const stopRegistry = wrapRegistry.register({
         name: item.name,
         value: item.handler ?? (() => undefined),
         realm: ctx.realm,
@@ -973,7 +1307,20 @@ export function createAgent(options: AgentOptions = {}): Agent {
         replaceable: ctx.replaceable,
         required: ctx.required,
         source: ctx.source,
-      }),
+      });
+      const ownerPrefix = ctx.owner === undefined ? "" : `${ctx.owner}:`;
+      const stopHook = pluginManager.addHook<AgentEvent>(
+        "wrap",
+        (event, signal) => item.handler?.(event, signal),
+        ctx.priority ?? ctx.order,
+        `${ownerPrefix}${item.name}`,
+        { dependsOn: ctx.dependsOn }
+      );
+      return () => {
+        stopHook();
+        stopRegistry();
+      };
+    },
     task: (item, ctx) =>
       taskRegistry.register({
         name: item.name,
@@ -1057,7 +1404,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const installResult = stage.commit({
     install: (entry) => {
       pluginGeneration += 1;
-      return entry.item.install();
+      const dispose = entry.item.install();
+      // 保留 install() 原样 disposer；管理器只登记状态/顺序，不重复调用 install。
+      pluginTracking.set(entry.item, addDisposer(pluginManager.trackInstall(entry.item)));
+      return dispose;
     },
     apply: (entry, record) => {
       const generation = pluginGeneration;
@@ -1068,6 +1418,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         realm: entry.realm ?? defaultRealm,
         review: pluginReviews.find((item) => item.plugin === entry.item)?.review
           ?? { decision: "allowed", reason: "TRUSTED", source: { origin: "user", trusted: true } },
+        status: "ACTIVE",
       };
       pluginInstallations.push(installation);
       const contributionDisposers: Disposer[] = [];
@@ -1079,6 +1430,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const stop = contributionHost.apply(item, {
           realm: item.realm ?? entry.realm ?? defaultRealm,
           order: item.order ?? entry.order,
+          priority: item.priority ?? entry.item.priority,
+          dependsOn: item.dependsOn ?? entry.item.dependsOn,
+          owner: entry.item.name,
           replaceable: item.replaceable ?? entry.replaceable,
           required: item.required ?? entry.required,
           source: item.source ?? entry.source,
@@ -1090,24 +1444,62 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const tracked = addDisposer(stop);
         contributionDisposers.push(tracked);
       }
+      // 环只让目标插件 FAILED；其他插件的 hook 继续留在同一链上执行。
+      installation.status = pluginManager.syncPluginStatus(entry.item).status;
     },
-    unapply: (_entry, record) => {
+    unapply: (entry, record) => {
       const index = pluginInstallations.findIndex((item) => item.dispose === record.dispose);
       const installation = index >= 0 ? pluginInstallations[index] : undefined;
       if (installation === undefined) return;
       for (const stop of installationContributionDisposers.get(installation) ?? []) stop();
       installationContributionDisposers.delete(installation);
+      pluginTracking.get(entry.item)?.();
+      pluginTracking.delete(entry.item);
       pluginInstallations.splice(index, 1);
     },
   });
   if (installResult.error !== undefined) throw installResult.error;
+  // 最后一批贡献也可能补全依赖图：统一重算所有插件状态，环只影响目标插件。
+  for (const installation of pluginInstallations) {
+    installation.status = pluginManager.syncPluginStatus(installation.plugin).status;
+  }
+
+  // 有 streamFn 时 facade 自身也装配 broker，保证模型请求始终只有一条路由路径。
+  const providerBroker = options.providerBroker ?? (baseStreamFn !== undefined ? createProviderBroker() : undefined);
+  let providerId: string | undefined = options.provider;
+  let modelRef: string | undefined = options.model;
+  const BASE_PROVIDER = "base";
+  const PLUGIN_PROVIDER = "plugin";
+  const brokerRegistrations: Disposer[] = [];
+  let pluginProviderFn: ((request: AgentStreamRequest, signal?: AbortSignal) => unknown) | undefined;
+  let pluginProviderRegistration: Disposer | undefined;
+  if (providerBroker !== undefined && baseStreamFn !== undefined) {
+    brokerRegistrations.push(providerBroker.register(BASE_PROVIDER, baseStreamFn, { terminalPolicy: "passthrough" }));
+  }
 
   function activeStreamFn(): AgentStreamFn | undefined {
-    const provider = streamFnProviders[streamFnProviders.length - 1];
-    if (provider !== undefined) {
-      return (request: AgentStreamRequest) => provider(request) as AsyncIterable<AgentStreamChunk>;
+    // 单一管理器链的最后（最高优先级/最新注册）provider 生效。
+    const pluginFn = pluginManager.chain<AgentStreamRequest>("streamFn").snapshot().at(-1)?.fn as
+      | ((request: AgentStreamRequest, signal?: AbortSignal) => unknown)
+      | undefined;
+    const asStreamFn: AgentStreamFn | undefined = pluginFn === undefined
+      ? undefined
+      : (request) => pluginFn(request, request.signal) as AsyncIterable<AgentStreamChunk>;
+    if (pluginFn !== pluginProviderFn) {
+      pluginProviderRegistration?.();
+      pluginProviderRegistration = undefined;
+      pluginProviderFn = pluginFn;
+      if (asStreamFn !== undefined && providerBroker !== undefined) {
+        pluginProviderRegistration = providerBroker.register(PLUGIN_PROVIDER, asStreamFn, { terminalPolicy: "passthrough" });
+      }
     }
-    return baseStreamFn;
+    if (providerBroker === undefined) return asStreamFn ?? baseStreamFn;
+    return (request) => providerBroker.stream({
+      ...request,
+      ...(request.provider === undefined && request.model === undefined
+        ? { provider: asStreamFn !== undefined ? PLUGIN_PROVIDER : BASE_PROVIDER }
+        : {}),
+    });
   }
 
   function toolNamesSnapshot(): readonly string[] {
@@ -1128,8 +1520,276 @@ export function createAgent(options: AgentOptions = {}): Agent {
     return [...executableToolNames(builtins, capabilityDiagnostics), ...pluginNames];
   }
 
-  /** 上一次声明的工具名；只有集合真的变化时才向 transcript 注入 system 声明。 */
-  let declaredToolNames: readonly string[] = [...toolNamesSnapshot()];
+  /** 上一次声明的工具名优先取 committed transcript；没有声明时以真实 registry 为基线。 */
+  let declaredToolNames: readonly string[] = restoredTranscript.declaredTools ?? [...toolNamesSnapshot()];
+
+  /** 会话切换只替换 transcript 基线与写入目标，不重建 Agent/插件/provider 注册。 */
+  function rebindSessionStore(store: SessionStore): void {
+    if (activeRun !== undefined) throw new Error("ACTIVE_RUN: 会话切换必须等待当前 run 结束");
+    const projection = store.projection();
+    const replayed = replayCommittedTranscript(projection.messages);
+    const restoredUsage = aggregateUsage(replayed.messages);
+    stream.reset(createInitialState({
+      messages: replayed.messages,
+      systemPrompt: replayed.systemPrompt,
+      ...(restoredUsage === undefined ? {} : { usage: restoredUsage }),
+      ...(typeof restoredUsage?.durationMs === "number" ? { durationMs: restoredUsage.durationMs } : {}),
+      ...(typeof restoredUsage?.responseId === "string" ? { responseId: restoredUsage.responseId } : {}),
+    }));
+    activeSessionStore = store;
+    declaredToolNames = replayed.declaredTools ?? [...toolNamesSnapshot()];
+    persistedLineageCount = projection.lineage.length;
+    lastRunMessages = [];
+    lastTurnHadNativeTools = false;
+    inbox.clear("nextTurn");
+    inbox.clear("nextStep");
+    inbox.clear("followUp");
+  }
+
+  // ── 统一工具域：模型工具与 runTool 共用 registry/hooks/审计/effects/leases ──
+  const toolLeases = createToolLeaseManager();
+  /** 发射工具 callId → durable key，commit 后由 publisher 回填真实结果。 */
+  let emissionSlots = new Map<string, string>();
+  let commitPromise: Promise<readonly Receipt[]> | undefined;
+  let committed: Map<string, Receipt> | undefined;
+
+  function auditTool(event: ToolAuditEvent): void {
+    const decision = event.reason.includes("TOOL_INPUT_")
+      ? "TOOL_INPUT_REJECTED"
+      : event.reason === "TOOL_TIMEOUT_UNKNOWN"
+        ? "TOOL_OUTCOME_UNKNOWN"
+        : event.reason.startsWith("TOOL_TIMEOUT")
+          ? "TOOL_TIMEOUT"
+          : "TOOL_REJECTED";
+    recordAudit(event.tool, stableHash(JSON.stringify(event.args)), decision, event.reason, event.call.id);
+  }
+
+  /** 工具声明（builtin/plugin/loadout/MCP）投影为真实执行 schema。 */
+  function descriptorFor(
+    tool: PluginTool,
+    options: { readonly verify?: (signal?: AbortSignal) => void | Promise<void> } = {}
+  ): ToolDescriptor {
+    return {
+      name: tool.name,
+      inputSchema: inputSchemaFromParameters(tool.parameters),
+      execute: async (args, exec) => {
+        if (exec.signal?.aborted === true) throw new Error("ABORTED");
+        if (options.verify !== undefined) await options.verify(exec.signal);
+        const digest = stableHash(JSON.stringify(args));
+        exec.onUpdate(`executing ${tool.name}`);
+        if (isEmissionTool(tool.name) && durableEffects !== undefined && !dispatchingEmission) {
+          const key = `${tool.name}:${digest}`;
+          const quota = tenantScope?.quota;
+          if (quota !== undefined) {
+            const request = { tool: tool.name, tokens: 1 };
+            if (!quota.check(request) || !quota.reserve(request)) {
+              recordAudit(tool.name, digest, "QUOTA_DENIED", "QUOTA_EXHAUSTED", key);
+              throw new Error("QUOTA_EXHAUSTED");
+            }
+          }
+          const verdict = checkEgress(args, egressPolicy);
+          durableEffects.enqueue(tool.name, key, {
+            tool: tool.name,
+            args,
+            ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
+          });
+          recordAudit(tool.name, digest, "EMISSION_WITHHELD", key, "pending");
+          return { ok: true, withheld: true, tool: tool.name, key };
+        }
+        return (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, exec.signal);
+      },
+    };
+  }
+
+  const runToolDescriptors = new Map<string, ToolDescriptor>();
+  const pipelineRegistry: ToolRegistry = {
+    registerTool(tool) {
+      if (runToolDescriptors.has(tool.name)) throw new Error("TOOL_DUPLICATE");
+      runToolDescriptors.set(tool.name, tool);
+      return () => {
+        runToolDescriptors.delete(tool.name);
+      };
+    },
+    getTool(name) {
+      const transient = runToolDescriptors.get(name);
+      if (transient !== undefined) return transient;
+      const scoped = dispatchScope.getStore()?.tools.get(name);
+      if (scoped !== undefined) return scoped;
+      const loadout = declaredLoadout.get(name);
+      if (loadout !== undefined) return descriptorFor(loadout);
+      const plugin = pluginTools.get(name);
+      if (plugin !== undefined) return descriptorFor(plugin.tool);
+      const builtin = toolDefinitions.find((item) => item.name === name);
+      return builtin === undefined ? undefined : descriptorFor(builtin);
+    },
+    get size() {
+      const names = new Set([
+        ...runToolDescriptors.keys(),
+        ...declaredLoadout.keys(),
+        ...pluginTools.keys(),
+        ...toolDefinitions.map((item) => item.name),
+      ]);
+      return names.size;
+    },
+  };
+
+  const publisher: ToolPublisher = async (result) => {
+    // commit 派发阶段再次进入管线时不得等待自己尚未完成的 commit。
+    if (dispatchingEmission || emissionSlots.size === 0 || durableEffects === undefined) return result;
+    if (committed === undefined) {
+      if (commitPromise === undefined) commitPromise = durableEffects.commit();
+      const receipts = await commitPromise;
+      committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
+      for (const receipt of receipts) {
+        if (!receipt.ok) tenantScope?.quota.release(1);
+        recordAudit(
+          receipt.kind,
+          receipt.key,
+          receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED",
+          receipt.ok ? "OK" : "FAILED",
+          receipt.key
+        );
+      }
+    }
+    if (!usesDefaultEffects) return result;
+    const key = emissionSlots.get(result.callId);
+    const receipt = key === undefined ? undefined : committed.get(key);
+    if (receipt === undefined) return result;
+    const value = receipt.value;
+    const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
+    const content = receipt.ok
+      ? value === undefined ? NO_TOOL_RESULT : value
+      : { ok: false, error: "EMISSION_DISPATCH_FAILED", key };
+    const message = result.message ?? {
+      role: "toolResult" as const,
+      content,
+      toolCallId: result.callId,
+      toolName: result.tool ?? "",
+    };
+    return {
+      ...result,
+      isError: !receipt.ok || failed,
+      output: content,
+      message: { ...message, content },
+    };
+  };
+
+  const before: BeforeToolCallHook = async (input, toolSignal) => {
+    const name = input.tool;
+    const args = input.args;
+    const argsDigest = stableHash(JSON.stringify(args));
+    if (toolSignal?.aborted === true || activeSignal?.aborted === true) {
+      return { block: true, reason: "ABORTED" };
+    }
+    if (permissionGate !== undefined) {
+      const decision = await permissionGate.authorize(permissionStage, name, args);
+      if (decision.behavior !== "ALLOW") {
+        const reason = decision.reason ?? "PERMISSION_DENIED";
+        let approved = false;
+        let state: ApprovalState = "unavailable";
+        if (decision.behavior === "ASK") {
+          const resolved = await resolveApproval(permissionStage, name, args, reason, toolSignal);
+          approved = resolved.approved;
+          state = resolved.state;
+        }
+        if (!approved) {
+          const decisionName = state === "cancelled" ? "PERMISSION_CANCELLED" : "PERMISSION_DENIED";
+          recordAudit(name, argsDigest, decisionName, reason, input.call.id);
+          fiberLogger.warn(`${decisionName} stage=${permissionStage} tool=${name} reason=${reason}`);
+          return { block: true, reason: `PERMISSION_DENIED: ${reason}` };
+        }
+        recordAudit(name, argsDigest, "ASK_APPROVED", reason, input.call.id);
+      }
+    }
+    if (permissionPolicy !== undefined) {
+      const verdict = evaluatePermissionPolicy(permissionPolicy, {
+        stage: permissionStage,
+        tool: name,
+        input: args,
+      });
+      if (verdict.behavior === "DENY" || verdict.behavior === "ASK") {
+        let approved = false;
+        if (verdict.behavior === "ASK") {
+          approved = (await resolveApproval(permissionStage, name, args, verdict.reason, toolSignal)).approved;
+        }
+        if (!approved) {
+          const reason = verdict.reason ?? "POLICY_DENIED";
+          recordAudit(name, argsDigest, `TOOL_POLICY_${verdict.behavior}`, reason, input.call.id);
+          return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${reason}` };
+        }
+      }
+    }
+    const egress = checkEgress(args, egressPolicy);
+    if (egress.status === "denied") {
+      const key = `${name}:${argsDigest}`;
+      recordAudit(name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", input.call.id);
+      if (isEmissionTool(name)) {
+        failedEmissionReceipts.push({ kind: name, key, ok: false, value: { error: "EGRESS_DENIED" } });
+      }
+      return { block: true, reason: "EGRESS_DENIED" };
+    }
+    if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
+      emissionSlots.set(input.call.id, `${name}:${argsDigest}`);
+    }
+    const startEvent: AgentEvent = {
+      type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args,
+    };
+    await hookRun("beforeToolCall", startEvent, toolSignal ?? activeSignal, { failClosed: true });
+    await hookRun("wrap", startEvent, toolSignal ?? activeSignal, { failClosed: true });
+    return {};
+  };
+
+  const after: AfterToolCallHook = async (input, toolSignal) => {
+    const name = input.call.tool ?? input.call.name ?? "";
+    const overrides: Record<string, unknown> = {};
+    const capture = (value: unknown): void => {
+      if (typeof value !== "object" || value === null) return;
+      const record = value as Record<string, unknown>;
+      for (const key of ["content", "details", "structuredContent", "usage"] as const) {
+        if (key in record) overrides[key] = record[key];
+      }
+      if (typeof record.isError === "boolean") overrides.isError = record.isError;
+      if (typeof record.terminate === "boolean") overrides.terminate = record.terminate;
+    };
+    if (!isEmissionTool(name)) {
+      const args = input.call.input ?? input.call.args ?? {};
+      const argsDigest = stableHash(JSON.stringify(args));
+      recordAudit(
+        name,
+        argsDigest,
+        input.isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
+        stableHash(JSON.stringify(input.output ?? "")),
+        input.call.id
+      );
+    }
+    const endEvent: AgentEvent = {
+      type: "tool_execution_end" as const,
+      toolCallId: input.call.id,
+      toolName: name,
+      result: input.output,
+      isError: input.isError,
+    };
+    const accumulator: AfterHookAccumulator = { event: endEvent, overrides };
+    await hookRun("afterToolCall", accumulator, toolSignal ?? activeSignal, { failClosed: true });
+    capture(accumulator.overrides);
+    await hookRun("wrap", endEvent, toolSignal ?? activeSignal, { failClosed: true, reverse: true });
+    return overrides;
+  };
+
+  const toolContext: BatchContext = {
+    registry: pipelineRegistry,
+    audit: auditTool,
+    toolLeases,
+    beforeToolCall: before,
+    afterToolCall: after,
+    publisher,
+    timeoutMs: options.toolTimeoutMs,
+    timeoutConfirmationMs: options.toolTimeoutConfirmationMs,
+    get signal() {
+      return activeSignal;
+    },
+  };
+  const activePipeline = createToolPipeline(toolContext);
 
   const api: PluginApiSurface = {
     registerTool(tool) {
@@ -1139,34 +1799,43 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return addDisposer(stream.subscribe(handler));
     },
     addConverter(fn) {
-      return addToList(converters, fn);
+      return registerHook<unknown>("converter", (input) => fn(input));
     },
     addContextTransform(fn) {
-      return addToList(contextTransforms, fn);
+      return registerHook<unknown>("contextTransform", (input) => fn(input));
     },
     addBeforeToolCall(fn) {
-      return addToList(beforeToolCalls, fn);
+      return registerHook<AgentEvent>("beforeToolCall", (event, signal) => fn(event, signal));
     },
     addAfterToolCall(fn) {
-      return addToList(afterToolCalls, fn);
+      return registerHook<AfterHookAccumulator>("afterToolCall", async (input, signal) => {
+        const override = await fn(input.event, signal);
+        if (typeof override === "object" && override !== null) Object.assign(input.overrides, override);
+      });
     },
     addTurnBoundary(fn) {
-      return addToList(turnBoundaries, fn);
+      return registerHook<AgentEvent>("turnBoundary", (event, signal) => fn(event, signal));
     },
     addPrepareRequest(fn) {
-      return addToList(prepareRequestFns, fn);
+      return registerHook<unknown>("prepareRequest", (input, signal) => fn(input, signal));
     },
     addPrepareNextTurn(fn) {
-      return addToList(prepareNextTurnFns, fn);
+      return registerHook<unknown>("prepareNextTurn", (input, signal) => fn(input, signal));
     },
     provideSteering(source) {
-      return addToList(steeringSources, source);
+      return registerHook<Inbox>("steering", async (inbox) => {
+        const message = await source.next() as AgentMessage | undefined;
+        if (message !== undefined) inbox.steer(message);
+      }, `steering:${source.name ?? nextHookName("steering")}`);
     },
     provideFollowUp(source) {
-      return addToList(followUpSources, source);
+      return registerHook<Inbox>("followUp", async (inbox) => {
+        const message = await source.next() as AgentMessage | undefined;
+        if (message !== undefined) inbox.followUp(message);
+      }, `followUp:${source.name ?? nextHookName("followUp")}`);
     },
     provideStreamFn(fn) {
-      return addToList(streamFnProviders, fn);
+      return registerHook<unknown>("streamFn", (input) => fn(input));
     },
     declareToolLoadout(tools) {
       declaredLoadout.clear();
@@ -1226,6 +1895,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       pluginManager.disposeAll();
       pluginInstallations.length = 0;
       installationContributionDisposers.clear();
+      pluginTracking.clear();
     },
   };
 
@@ -1241,33 +1911,35 @@ export function createAgent(options: AgentOptions = {}): Agent {
   // 模型在纯文本流中用该标记请求工具调用（stub 期间尚无结构化 tool-call 通道）。
   const TOOL_MARKER_RE = /@@TOOL:([A-Za-z0-9_.:-]+):(.*?)@@/g;
   // 与 runLoop 的默认终局判断相反：无工具调用的单轮也应结束，而非显式续跑。
+  const TURN_CONTINUE_DECISION = { action: "continue" } as const;
   const TURN_END_DECISION = { action: "end" } as const;
   // 工具结果仅回传本地执行信息，不重新进入模型（避免 stub 下的无限续跑）。
   const NO_TOOL_RESULT = "";
 
-  /** 把内置工具的简化参数表投影为 provider 可用的工具描述。 */
-  function toToolSchema(tool: ToolDefinition): AgentToolSchema {
+  /** 从真实工具声明投影 provider schema：builtin、插件、loadout 与 MCP 共用同一来源。 */
+  function toToolSchema(tool: PluginTool): AgentToolSchema {
     return {
       name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
+      description: tool.description ?? tool.name,
+      parameters: (tool.parameters ?? []).map((parameter) => ({
+        name: parameter.name,
+        type: parameter.type,
+        description: parameter.description ?? parameter.name,
+        ...(parameter.required === true ? { required: true } : {}),
+      })),
     };
   }
 
   /** provider schema 从最终 active registry 生成，未支持工具不进入模型可见面。 */
   function providerToolSchemas(): AgentToolSchema[] {
     const active = new Set(activeToolNamesSnapshot());
-    // 同名后到者覆盖先到者：插件替换 builtin 后 schema 不再出现旧条目。
     const schemas = new Map<string, AgentToolSchema>();
-    for (const tool of toolDefinitions) {
+    const add = (tool: PluginTool): void => {
       if (active.has(tool.name)) schemas.set(tool.name, toToolSchema(tool));
-    }
-    const addPluginTool = (tool: PluginTool): void => {
-      if (!active.has(tool.name)) return;
-      schemas.set(tool.name, { name: tool.name, description: tool.name, parameters: [] });
     };
-    for (const entry of pluginTools.values()) addPluginTool(entry.tool);
-    for (const tool of declaredLoadout.values()) addPluginTool(tool);
+    for (const tool of toolDefinitions) add(tool);
+    for (const entry of pluginTools.values()) add(entry.tool);
+    for (const tool of declaredLoadout.values()) add(tool);
     return [...schemas.values()];
   }
 
@@ -1277,6 +1949,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   function startRun(userText: string | undefined, externalSignal?: AbortSignal): Promise<readonly AgentMessage[]> {
+    if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再接受新 run");
     if (activeRun !== undefined) throw new Error("ACTIVE_RUN: 同一 Agent 同时只能运行一个 prompt/continue");
     const controller = new AbortController();
     const onAbort = (): void => {
@@ -1289,7 +1962,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
     activeRun = lease;
     aborted = false;
     lastTurnHadNativeTools = false;
-    const execution = executeRun(lease, userText).finally(() => {
+    const execution = withScope(() => executeRun(lease, userText)).finally(() => {
       externalSignal?.removeEventListener("abort", onAbort);
       if (activeRun === lease) activeRun = undefined;
     });
@@ -1304,245 +1977,31 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (userText === undefined && stream.getState().messages.length === 0) return stream.getState().messages;
     await stream.emit({ type: "agent_start" }, signal);
     // task 贡献作为后台作业在轮首执行（失败不影响主流程，由 hook chain 归一化）。
-    for (const slot of taskRegistry.snapshot()) {
+    const tasks = dispatchScope.getStore()?.tasks
+      ?? taskRegistry.snapshot().map((slot) => ({ name: slot.name, handler: slot.value }));
+    for (const task of tasks) {
       try {
-        await slot.value?.();
+        await task.handler?.();
       } catch (error) {
-        fiberLogger.warn(`plugin task ${slot.name} failed: ${String(error)}`);
+        fiberLogger.warn(`plugin task ${task.name} failed: ${String(error)}`);
       }
     }
 
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
-    for (const source of steeringSources) {
-      inbox.steer(await source.next() as AgentMessage);
-    }
-    for (const source of followUpSources) {
-      inbox.followUp(await source.next() as AgentMessage);
-    }
+    await pollQueueSources(signal);
+    // followUp 不在这里 promote：自然终局由 runLoop 外层 pollFollowUp 消费；
+    // 硬终局保留的队列在下一个 run 的自然终局外层消费，不会永久滞留。
 
-    const toolRegistry = new Map<string, (args: Readonly<Record<string, unknown>>, signal?: AbortSignal) => unknown | Promise<unknown>>();
-    for (const item of contributions) {
-      if (item.kind !== "tool") continue;
-      const tool = item.tool;
-      toolRegistry.set(tool.name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    }
-    for (const [name, entry] of pluginTools) toolRegistry.set(name, (args, toolSignal) => (entry.tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    for (const [name, tool] of declaredLoadout) toolRegistry.set(name, (args, toolSignal) => (tool.execute as (input: never, signal?: AbortSignal) => unknown)(args as never, toolSignal));
-    /** 发射工具 callId → durable key，commit 后由 publisher 回填真实结果。 */
-    const emissionSlots = new Map<string, string>();
-    let commitPromise: Promise<readonly Receipt[]> | undefined;
-    let committed: Map<string, Receipt> | undefined;
-    const publisher: ToolPublisher = async (result) => {
-      if (emissionSlots.size === 0 || durableEffects === undefined) return result;
-      if (committed === undefined) {
-        // 并行 finalize 会同时触发 publisher；单次 commit 必须共享同一个 in-flight promise。
-        if (commitPromise === undefined) commitPromise = durableEffects.commit();
-        const receipts = await commitPromise;
-        committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
-        for (const receipt of receipts) {
-          if (!receipt.ok) tenantScope?.quota.release(1);
-          recordAudit(
-            receipt.kind,
-            receipt.key,
-            receipt.ok ? "EMISSION_DISPATCHED" : "EMISSION_FAILED",
-            receipt.ok ? "OK" : "FAILED",
-            receipt.key
-          );
-        }
-      }
-      if (!usesDefaultEffects) return result;
-      const key = emissionSlots.get(result.callId);
-      const receipt = key === undefined ? undefined : committed.get(key);
-      if (receipt === undefined) return result;
-      const value = receipt.value;
-      const failed = typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === false;
-      const content = receipt.ok
-        ? value === undefined ? NO_TOOL_RESULT : value
-        : { ok: false, error: "EMISSION_DISPATCH_FAILED", key };
-      const message = result.message ?? {
-        role: "toolResult" as const,
-        content,
-        toolCallId: result.callId,
-        toolName: result.tool ?? "",
-      };
-      return {
-        ...result,
-        isError: !receipt.ok || failed,
-        output: content,
-        message: { ...message, content },
-      };
-    };
-
-    const before: BeforeToolCallHook = async (input, toolSignal) => {
-      const name = input.tool;
-      const args = input.args;
-      const argsDigest = stableHash(JSON.stringify(args));
-      if (toolSignal?.aborted === true || activeSignal?.aborted === true) {
-        return { block: true, reason: "ABORTED" };
-      }
-      if (permissionGate !== undefined) {
-        const decision = await permissionGate.authorize(permissionStage, name, args);
-        if (decision.behavior !== "ALLOW") {
-          const reason = decision.reason ?? "PERMISSION_DENIED";
-          let approved = false;
-          let state: ApprovalState = "unavailable";
-          if (decision.behavior === "ASK") {
-            const resolved = await resolveApproval(permissionStage, name, args, reason, toolSignal);
-            approved = resolved.approved;
-            state = resolved.state;
-          }
-          if (!approved) {
-            const decisionName = state === "cancelled" ? "PERMISSION_CANCELLED" : "PERMISSION_DENIED";
-            recordAudit(name, argsDigest, decisionName, reason, input.call.id);
-            fiberLogger.warn(`${decisionName} stage=${permissionStage} tool=${name} reason=${reason}`);
-            return { block: true, reason: `PERMISSION_DENIED: ${reason}` };
-          }
-          recordAudit(name, argsDigest, "ASK_APPROVED", reason, input.call.id);
-        }
-      }
-      if (permissionPolicy !== undefined) {
-        const verdict = evaluatePermissionPolicy(permissionPolicy, {
-          stage: permissionStage,
-          tool: name,
-          input: args,
-        });
-        if (verdict.behavior === "DENY" || verdict.behavior === "ASK") {
-          let approved = false;
-          if (verdict.behavior === "ASK") {
-            approved = (await resolveApproval(permissionStage, name, args, verdict.reason, toolSignal)).approved;
-          }
-          if (!approved) {
-            const reason = verdict.reason ?? "POLICY_DENIED";
-            recordAudit(name, argsDigest, `TOOL_POLICY_${verdict.behavior}`, reason, input.call.id);
-            return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${reason}` };
-          }
-        }
-      }
-      const egress = checkEgress(args, egressPolicy);
-      if (egress.status === "denied") {
-        const key = `${name}:${argsDigest}`;
-        recordAudit(name, argsDigest, "EGRESS_DENIED", "EGRESS_DENIED", input.call.id);
-        if (isEmissionTool(name)) {
-          failedEmissionReceipts.push({ kind: name, key, ok: false, value: { error: "EGRESS_DENIED" } });
-        }
-        return { block: true, reason: "EGRESS_DENIED" };
-      }
-      if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
-        emissionSlots.set(input.call.id, `${name}:${argsDigest}`);
-      }
-      for (const fn of beforeToolCalls) {
-        await fn(
-          { type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args },
-          toolSignal ?? signal
-        );
-      }
-      // wrap 贡献形成按 order 排序的环绕链，工具调用前依次执行。
-      for (const slot of wrapRegistry.snapshot()) {
-        await slot.value?.(
-          { type: "tool_execution_start", toolCallId: input.call.id, toolName: name, args },
-          toolSignal ?? signal
-        );
-      }
-      return {};
-    };
-
-    const after: AfterToolCallHook = async (input, toolSignal) => {
-      const name = input.call.tool ?? input.call.name ?? "";
-      const overrides: Record<string, unknown> = {};
-      const capture = (value: unknown): void => {
-        if (typeof value !== "object" || value === null) return;
-        const record = value as Record<string, unknown>;
-        for (const key of ["content", "details", "structuredContent", "usage"] as const) {
-          if (key in record) overrides[key] = record[key];
-        }
-        if (typeof record.isError === "boolean") overrides.isError = record.isError;
-        if (typeof record.terminate === "boolean") overrides.terminate = record.terminate;
-      };
-      if (!isEmissionTool(name)) {
-        const args = input.call.input ?? input.call.args ?? {};
-        const argsDigest = stableHash(JSON.stringify(args));
-        recordAudit(
-          name,
-          argsDigest,
-          input.isError ? "TOOL_FAILED" : "TOOL_EXECUTED",
-          stableHash(JSON.stringify(input.output ?? "")),
-          input.call.id
-        );
-      }
-      for (const fn of afterToolCalls) {
-        capture(await fn(
-          {
-            type: "tool_execution_end",
-            toolCallId: input.call.id,
-            toolName: input.call.tool ?? input.call.name ?? "",
-            result: input.output,
-            isError: input.isError,
-          },
-          toolSignal ?? signal
-        ));
-      }
-      const endEvent = {
-        type: "tool_execution_end" as const,
-        toolCallId: input.call.id,
-        toolName: name,
-        result: input.output,
-        isError: input.isError,
-      };
-      for (const slot of [...wrapRegistry.snapshot()].reverse()) {
-        await slot.value?.(endEvent, toolSignal ?? signal);
-      }
-      return overrides;
-    };
-
-    const pipelineRegistry = createToolRegistry();
-    for (const [name, execute] of toolRegistry) {
-      const pipelineTool: ToolDescriptor = {
-        name,
-        inputSchema: { type: "object", properties: {}, additionalProperties: true },
-        execute: (args, exec) => {
-          if (exec.signal?.aborted === true) throw new Error("ABORTED");
-          const digest = stableHash(JSON.stringify(args));
-          exec.onUpdate(`executing ${name}`);
-          if (isEmissionTool(name) && durableEffects !== undefined && !dispatchingEmission) {
-            const key = `${name}:${digest}`;
-            // 配额是 coeffect：withhold 入队前先在本 realm 的 QuotaService 原子 reserve。
-            const quota = tenantScope?.quota;
-            if (quota !== undefined) {
-              const request = { tool: name, tokens: 1 };
-              if (!quota.check(request) || !quota.reserve(request)) {
-                recordAudit(name, digest, "QUOTA_DENIED", "QUOTA_EXHAUSTED", key);
-                throw new Error("QUOTA_EXHAUSTED");
-              }
-            }
-            const verdict = checkEgress(args, egressPolicy);
-            durableEffects.enqueue(name, key, {
-              tool: name,
-              args,
-              ...(verdict.status === "allowed" ? { target: verdict.target } : {}),
-            });
-            recordAudit(name, digest, "EMISSION_WITHHELD", key, "pending");
-            return { ok: true, withheld: true, tool: name, key };
-          }
-          return execute(args, exec.signal);
-        },
-      };
-      pipelineRegistry.registerTool(pipelineTool);
-    }
-    activePipeline = createToolPipeline({
-      registry: pipelineRegistry,
-      signal,
-      beforeToolCall: before,
-      afterToolCall: after,
-      publisher,
-      timeoutMs: options.toolTimeoutMs,
-    });
+    // 工具域在 agent 作用域只建一次；每回合仅重置发射槽与 durable commit 快照。
+    emissionSlots = new Map<string, string>();
+    commitPromise = undefined;
+    committed = undefined;
 
     const effectiveStreamFn = activeStreamFn();
     const emitConverted = async (input: unknown): Promise<void> => {
-      for (const converter of converters) {
-        const event = await converter(input);
-        if (event !== undefined) await stream.emit(event, signal);
-      }
+      await hookRunEach("converter", input, signal, async (value) => {
+        if (value !== undefined) await stream.emit(value as AgentEvent, signal);
+      });
     };
 
     const runtime: LoopRuntime = {
@@ -1551,9 +2010,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
       turnBudget: options.turnBudget,
       emit: (event) => stream.emit(event, signal),
       getState: () => stream.getState(),
-      prepareNextTurn: async () => {
-        for (const fn of prepareNextTurnFns) await fn(stream.getState(), signal);
-        await options.loopHooks?.prepareNextTurn?.(stream.getState(), signal);
+      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> =>
+        asNextTurnUpdate(await hookRun("prepareNextTurn", stream.getState(), signal)),
+      pollSources: async (phase: SourcePollPhase): Promise<void> => {
+        await pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
       declareToolChanges: () => {
         const next = toolNamesSnapshot();
@@ -1566,29 +2026,32 @@ export function createAgent(options: AgentOptions = {}): Agent {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
         const prompt = resolveSystemPrompt();
         // 系统提示词只进入请求，不写入会话状态，避免 transcript 出现 system 行。
+        // 工具声明 system 消息可能排在 transcript 首位；按内容判重，保证提示词恰好注入一次。
+        const alreadyInjected = base.messages?.some((message) => message.role === "system" && message.content === prompt) === true;
         const seeded = {
           ...(request as object),
           messages:
-            prompt.length > 0 && base.messages?.[0]?.role !== "system"
+            prompt.length > 0 && !alreadyInjected
               ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
               : (base.messages ?? []),
         };
-        let result: unknown = seeded;
-        for (const transform of contextTransforms) result = await transform(result);
-        for (const fn of prepareRequestFns) result = await fn(result, signal);
-        return await options.loopHooks?.prepareRequest?.(result, signal) ?? result;
+        const transformed = await hookRun("contextTransform", seeded, signal);
+        return await hookRun("prepareRequest", transformed, signal);
       },
       pollFollowUp: async () => {
         const followUps = inbox.poll("followUp").map((item) => item.body);
-        return await options.loopHooks?.pollFollowUp?.(signal) ?? followUps;
+        return await hookRun("pollFollowUp", followUps, signal);
       },
       finishTurn: async (turn) => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-        for (const fn of turnBoundaries) await fn(event, signal);
-        const legacy = await options.loopHooks?.finishTurn?.(turn, signal);
-        if (legacy !== undefined) return legacy;
-        // 原生工具调用需要续跑一轮，让模型消费工具结果；文本标记协议保持单轮收束。
-        return lastTurnHadNativeTools && turn.toolResults.length > 0 ? undefined : TURN_END_DECISION;
+        const outcome = await hookRun("turnBoundary", event, signal);
+        if (isLoopDecision(outcome)) return outcome;
+        // 原生工具调用需要显式续跑一轮，让模型消费工具结果。
+        if (lastTurnHadNativeTools && turn.toolResults.length > 0) return TURN_CONTINUE_DECISION;
+        // 文本标记协议保持单轮收束：结果已落盘，不能把 toolCalls 交给默认续跑反复解析。
+        if (turn.toolResults.length > 0) return TURN_END_DECISION;
+        // 无显式决策时交还 runLoop 走 natural end，由外层消费 follow-up / explicitContinuation。
+        return undefined;
       },
 
       async streamAssistant(
@@ -1602,7 +2065,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         lastTurnHadNativeTools = false;
         let partialSeq = 0;
         let stopReason: AssistantResult["stopReason"] = "stop";
-        let terminal: { usage?: unknown; durationMs?: number; responseId?: string } = {};
+        let terminal: { usage?: UsageSnapshot; durationMs?: number; responseId?: string } = {};
         let failure: unknown;
         const snapshot = (): AgentMessage => ({
           role: "assistant",
@@ -1617,6 +2080,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
               messages: base.messages ?? [],
               tools: base.tools ?? providerToolSchemas(),
               ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+              ...(providerId !== undefined ? { provider: providerId } : {}),
+              ...(modelRef !== undefined ? { model: modelRef } : {}),
               signal,
             } as AgentStreamRequest;
             for await (const chunk of effectiveStreamFn(enriched)) {
@@ -1634,7 +2099,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
               } else if (chunk.type === "done") {
                 stopReason = chunk.stopReason;
                 terminal = {
-                  ...(chunk.usage !== undefined ? { usage: chunk.usage } : {}),
+                  ...(typeof chunk.usage === "object" && chunk.usage !== null ? { usage: chunk.usage as UsageSnapshot } : {}),
                   ...(chunk.durationMs !== undefined ? { durationMs: chunk.durationMs } : {}),
                   ...(chunk.responseId !== undefined ? { responseId: chunk.responseId } : {}),
                 };
@@ -1702,6 +2167,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
             content: allowTextToolMarkers ? content.replace(TOOL_MARKER_RE, "") : content,
             ...(thinking.length > 0 ? { thinking } : {}),
             ...(records.length > 0 ? { toolCalls: records } : {}),
+            ...(terminal.usage !== undefined ? { usage: terminal.usage } : {}),
+            ...(terminal.durationMs !== undefined ? { durationMs: terminal.durationMs } : {}),
+            ...(terminal.responseId !== undefined ? { responseId: terminal.responseId } : {}),
           },
           toolCalls,
           stopReason,
@@ -1740,7 +2208,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     } finally {
       unsubscribeCompaction?.();
     }
-    return stream.getState().messages;
+    const allMessages = stream.getState().messages;
+    lastRunMessages = allMessages.slice(initialMessageCount);
+    return allMessages;
   }
 
   function toSnapshots<T>(registry: {
@@ -1765,6 +2235,143 @@ export function createAgent(options: AgentOptions = {}): Agent {
     }));
   }
 
+  /** 与 waitForIdle 共用的 lease 视图：先等 run，再等 tool lease，最后等 listener。 */
+  async function drainLeases(): Promise<void> {
+    while (activeRun !== undefined) await activeRun.promise.catch(() => {});
+    await toolLeases.waitForIdle();
+    await stream.waitForIdle();
+  }
+
+  const serviceSlotsOf = (candidate: AgentPlugin): readonly { readonly name: string; readonly realm: symbol }[] =>
+    candidate.contributions.flatMap((item) =>
+      item.kind === "service" ? [{ name: item.name, realm: item.realm ?? defaultRealm }] : []
+    );
+
+  /** 热重载插件的独立安装事务：新世代先完整安装成功，才替换旧世代。 */
+  function hotSwapPlugin(id: string, plugin: AgentPlugin): HotPluginGeneration {
+    if (disposed) throw new Error("AGENT_DISPOSED");
+    if (typeof id !== "string" || id.length === 0) throw new Error("HOT_PLUGIN_ID_REQUIRED");
+    const previous = hotGenerations.get(id);
+    // 替换前保留旧 service 槽：事务中途失败时连带恢复，避免同名注册覆盖后留下空洞。
+    const oldServiceSlots = previous === undefined ? [] : serviceRegistry.snapshot().filter((slot) =>
+      previous.serviceSlots.some((owned) => owned.name === slot.name && owned.realm === slot.realm)
+    );
+    const hotGeneration = ++pluginGeneration;
+    const tx = createPluginTransaction<AgentPlugin>({ generation: () => hotGeneration });
+    // 热重载来源是宿主本地文件，与初始宿主插件一致按可信处理；贡献仍走同一审查/注册入口。
+    tx.stage([{ item: plugin, meta: { name: plugin.name, trusted: true } }]);
+    const issues = tx.validate();
+    if (issues.length > 0) throw new Error(`PLUGIN_VALIDATION_FAILED: ${issues.map((issue) => issue.reason).join(",")}`);
+    const contributionStops: Disposer[] = [];
+    const installations: PluginInstallation[] = [];
+    const result = tx.commit({
+      install: (entry) => {
+        const dispose = entry.item.install();
+        pluginTracking.set(entry.item, addDisposer(pluginManager.trackInstall(entry.item)));
+        return dispose;
+      },
+      apply: (entry, record) => {
+        const installation: PluginInstallation = {
+          plugin: entry.item,
+          generation: hotGeneration,
+          dispose: record.dispose,
+          realm: defaultRealm,
+          review: {
+            decision: "allowed",
+            reason: "HOT_RELOAD",
+            source: { origin: "user", trusted: true },
+          },
+          status: "ACTIVE",
+        };
+        pluginInstallations.push(installation);
+        installations.push(installation);
+        const contributionDisposers: Disposer[] = [];
+        installationContributionDisposers.set(installation, contributionDisposers);
+        for (const item of entry.item.contributions) {
+          if (!entry.trusted && item.kind !== "section" && item.kind !== "hook") continue;
+          const stop = contributionHost.apply(item, {
+            realm: item.realm ?? defaultRealm,
+            order: item.order ?? entry.order,
+            priority: item.priority ?? entry.item.priority,
+            dependsOn: item.dependsOn ?? entry.item.dependsOn,
+            owner: entry.item.name,
+            replaceable: item.replaceable ?? entry.replaceable,
+            required: item.required ?? entry.required,
+            source: item.source ?? entry.source,
+            trusted: item.trusted ?? entry.trusted,
+            generation: hotGeneration,
+          });
+          contributionDisposers.push(stop);
+          contributionStops.push(stop);
+        }
+        installation.status = pluginManager.syncPluginStatus(entry.item).status;
+      },
+      unapply: (entry, record) => {
+        const index = pluginInstallations.findIndex((item) => item.dispose === record.dispose);
+        if (index >= 0) pluginInstallations.splice(index, 1);
+        for (const installation of installations) installationContributionDisposers.delete(installation);
+        const tracked = pluginTracking.get(entry.item);
+        tracked?.();
+        pluginTracking.delete(entry.item);
+      },
+    });
+    if (result.error !== undefined) {
+      // 事务回滚只调用 install() 原样 disposer；这里补足部分已注册的贡献，并恢复被覆盖的旧 service。
+      for (const stop of [...contributionStops].reverse()) stop();
+      for (const slot of oldServiceSlots) {
+        serviceRegistry.register({
+          name: slot.name,
+          value: slot.value,
+          realm: slot.realm,
+          order: slot.order,
+          replaceable: slot.replaceable,
+          required: slot.required,
+          source: slot.source,
+        });
+      }
+      throw result.error;
+    }
+    if (previous !== undefined && previous.status === "ACTIVE") {
+      previous.status = "RETIRING";
+      retireIfIdle(previous);
+    }
+    const state: HotGenerationState = {
+      id,
+      generation: hotGeneration,
+      plugin,
+      superseded: previous?.plugin,
+      status: "ACTIVE",
+      inFlight: 0,
+      disposeCount: 0,
+      disposers: [...result.installed.map((record) => record.dispose), ...contributionStops].map(addDisposer),
+      installations,
+      toolNames: plugin.contributions.flatMap((item) => item.kind === "tool" ? [item.tool.name] : []),
+      serviceSlots: serviceSlotsOf(plugin),
+      handle: undefined as unknown as HotPluginGeneration,
+    };
+    state.handle = {
+      id,
+      generation: hotGeneration,
+      plugin,
+      get superseded() { return state.superseded; },
+      get status() { return state.status; },
+      get inFlight() { return state.inFlight; },
+      get disposeCount() { return state.disposeCount; },
+      dispose: () => disposeGeneration(state),
+    };
+    hotGenerations.set(id, state);
+    return state.handle;
+  }
+
+  function revertHotPlugin(handle: HotPluginGeneration): void {
+    const state = [...hotGenerations.values()].find((item) => item.handle === handle);
+    if (state === undefined || state.status === "DISPOSED") return;
+    const superseded = state.superseded;
+    state.status = "RETIRING";
+    retireIfIdle(state);
+    if (superseded !== undefined && !disposed) hotSwapPlugin(handle.id, superseded);
+  }
+
   return {
     prompt(text, signal) {
       if (typeof text !== "string") return Promise.reject(new Error("prompt: expected a string"));
@@ -1787,10 +2394,40 @@ export function createAgent(options: AgentOptions = {}): Agent {
     followUp: (message) => {
       inbox.followUp(message);
     },
+    inject: (message) => inbox.inject(message),
+    setQueueMode: (mode) => inbox.setMode(mode),
+    getQueueMode: () => inbox.getMode(),
+    queueSize: (target) => inbox.size(target),
     // D11（延期）：框架 createCompactionListener 原语可用；facade 自动装配需要注入
     // surface/offloader 并补齐零回归测试，当前保持调用方自行订阅，按 O-03 延期。
     subscribe: (listener) => stream.subscribe(listener),
-    sessionStore,
+    get sessionStore() {
+      return activeSessionStore;
+    },
+    attachSessionStore: (store) => rebindSessionStore(store),
+    resumeSession: (frameId) => {
+      const store = activeSessionStore;
+      if (store === undefined) throw new Error("SESSION_STORE_REQUIRED: resume 需要已绑定 SessionStore");
+      rebindSessionStore(store.resume(frameId));
+    },
+    async forkSession(fromId) {
+      const store = activeSessionStore;
+      if (store === undefined) throw new Error("SESSION_STORE_REQUIRED: fork 需要已绑定 SessionStore");
+      const forked = await store.fork(fromId);
+      rebindSessionStore(forked);
+      return forked;
+    },
+    async truncateSession(frameId) {
+      const store = activeSessionStore;
+      if (store === undefined) throw new Error("SESSION_STORE_REQUIRED: truncate 需要已绑定 SessionStore");
+      const truncated = await store.truncate(frameId);
+      rebindSessionStore(truncated);
+      return truncated;
+    },
+    get usageSummary() {
+      return usageSummaryFrom(stream.getState().messages);
+    },
+    lastRunUsage: () => usageSummaryFrom(lastRunMessages),
     compaction,
     abort() {
       aborted = true;
@@ -1807,9 +2444,42 @@ export function createAgent(options: AgentOptions = {}): Agent {
       inbox.clear("followUp");
       stream.reset();
     },
-    async waitForIdle() {
-      while (activeRun !== undefined) await activeRun.promise.catch(() => {});
-      await stream.waitForIdle();
+    waitForIdle: () => drainLeases(),
+    dispose() {
+      if (disposal !== undefined) return disposal;
+      disposal = (async () => {
+        // 1) 停止新准入；2) abort 并 drain run/tool/listener；3) 撤销插件；4) 关闭审计。
+        disposed = true;
+        aborted = true;
+        activeRun?.controller.abort("AGENT_DISPOSED");
+        await toolLeases.close();
+        await drainLeases();
+        pluginManager.disposeAll();
+        for (const state of [...hotGenerations.values()]) {
+          state.status = "RETIRING";
+          retireIfIdle(state);
+        }
+        pluginProviderRegistration?.();
+        pluginProviderRegistration = undefined;
+        for (const stop of brokerRegistrations) stop();
+        brokerRegistrations.length = 0;
+        await closeAuditSink();
+      })();
+      return disposal;
+    },
+    closeAdmission() {
+      disposed = true;
+    },
+    get disposed() {
+      return disposed;
+    },
+    get activeLeaseCount() {
+      return (activeRun === undefined ? 0 : 1) + toolLeases.activeCount;
+    },
+    hotSwapPlugin,
+    revertHotPlugin,
+    get hotPluginGenerations() {
+      return [...hotGenerations.values()].map((state) => state.handle);
     },
     ...api,
     api,
@@ -1818,70 +2488,49 @@ export function createAgent(options: AgentOptions = {}): Agent {
     resolveLogSink: (options) => resolveLogSink(options),
     logger,
     async runTool(call) {
-      // 裸回调入口也必须经过同一管线：权限、审批、egress、超时与 cleanup 共用一套实现。
-      const check: BeforeToolCallHook = async (input) => {
-        if (permissionGate !== undefined) {
-          const decision = await permissionGate.authorize(permissionStage, input.tool, input.args);
-          if (decision.behavior !== "ALLOW") {
-            let approved = false;
-            if (decision.behavior === "ASK") {
-              approved = (
-                await resolveApproval(permissionStage, input.tool, input.args, decision.reason, activeSignal)
-              ).approved;
-            }
-            if (!approved) {
-              return { block: true, reason: `PERMISSION_DENIED: ${decision.reason ?? "PERMISSION_DENIED"}` };
-            }
-          }
-        }
-        if (permissionPolicy !== undefined) {
-          const verdict = evaluatePermissionPolicy(permissionPolicy, {
-            stage: permissionStage,
-            tool: input.tool,
-            input: input.args,
-          });
-          if (verdict.behavior !== "ALLOW" && verdict.behavior !== "PASSTHROUGH") {
-            return { block: true, reason: `TOOL_POLICY_${verdict.behavior}: ${verdict.reason ?? "denied"}` };
-          }
-        }
-        if (checkEgress(input.args, egressPolicy).status === "denied") {
-          return { block: true, reason: "EGRESS_DENIED" };
-        }
-        return {};
-      };
+      if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再接受新 runTool");
+      // 与模型工具共用同一受管 registry/context：同一 hooks、wrap、审计、effects/quota、
+      // timeout 与 cleanup；runToolCall 只关掉事件 sink 与消息追加。
       let invoked = false;
-      const registry = createToolRegistry();
-      registry.registerTool({
-        name: call.name,
-        inputSchema: { type: "object", properties: {}, additionalProperties: true },
-        execute: async () => {
-          if (isCriticalLayerDegraded(securityBackend.capabilities())) {
-            throw new Error("CRITICAL_LAYER_DEGRADED");
+      const stop = pipelineRegistry.registerTool(
+        descriptorFor(
+          { name: call.name, execute: () => call.execute() },
+          {
+            verify: async (toolSignal) => {
+              // commit 派发阶段已经完成安全边界检查，不再重复 backend.run。
+              if (dispatchingEmission) return;
+              if (isCriticalLayerDegraded(securityBackend.capabilities())) {
+                throw new Error("CRITICAL_LAYER_DEGRADED");
+              }
+              if (toolSignal?.aborted === true) throw new Error("ABORTED");
+              await securityBackend.run({ argv: [call.name] });
+              invoked = true;
+            },
           }
-          await securityBackend.run({ argv: [call.name] });
-          invoked = true;
-          return call.execute();
-        },
-      });
+        )
+      );
+      // 先登记调用自己的工具，再捕获 scope：runTool 的本次调用必须命中自己的 descriptor。
+      return withScope(async () => {
       try {
-        const pipeline = createToolPipeline({
-          registry,
-          signal: activeSignal,
-          beforeToolCall: check,
-          timeoutMs: options.toolTimeoutMs,
-        });
-        const result = await pipeline.runToolCall({
+        const result = await activePipeline.runToolCall({
           id: `runTool-${++runToolSeq}`,
           tool: call.name,
           input: {},
         });
         if (result.isError === true || !invoked) {
-          return { ok: false, reason: String(result.reason ?? "TOOL_FAILED") };
+          return {
+            ok: false,
+            reason: String(result.reason ?? "TOOL_FAILED"),
+            ...(result.reconciliation === true ? { reconciliation: true } : {}),
+          };
         }
         return { ok: true, value: result.output };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      } finally {
+        stop();
       }
+      });
     },
     get aborted() {
       return aborted;
@@ -1917,7 +2566,11 @@ export function createAgent(options: AgentOptions = {}): Agent {
       return pluginGeneration;
     },
     resolveService(name, realm) {
-      return serviceRegistry.resolve(name, realm);
+      if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再解析 service");
+      const frozen = dispatchScope.getStore()?.services.find(
+        (slot) => slot.name === name && slot.realm === (realm ?? defaultRealm)
+      );
+      return frozen === undefined ? serviceRegistry.resolve(name, realm) : frozen.value;
     },
     async runTask(name, realm) {
       await taskRegistry.resolve(name, realm)?.();
@@ -1948,9 +2601,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         verified: result.ok && sealed.ok,
       };
     },
-    async closeAudit() {
-      if (socketSink !== undefined) await socketSink.close();
-    },
+    closeAudit: () => closeAuditSink(),
     createProviderStreamFn(config, fetchImpl) {
       return createProviderStreamFn(
         {
@@ -1961,6 +2612,32 @@ export function createAgent(options: AgentOptions = {}): Agent {
         },
         fetchImpl
       );
+    },
+    providerBroker,
+    registerProvider(id, streamFn, registrationOptions) {
+      if (providerBroker === undefined) throw new Error("PROVIDER_BROKER_REQUIRED: 未注入 providerBroker");
+      const dispose = providerBroker.register(id, streamFn, registrationOptions);
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        dispose();
+      };
+    },
+    unregisterProvider(id) {
+      providerBroker?.unregister(id);
+    },
+    setProviderRoutes(routes) {
+      providerBroker?.setRoutes(routes);
+    },
+    setProviderFallback(providerIds) {
+      providerBroker?.setFallback(providerIds);
+    },
+    setProvider(id) {
+      providerId = id;
+    },
+    setModel(model) {
+      modelRef = model;
     },
   };
 }

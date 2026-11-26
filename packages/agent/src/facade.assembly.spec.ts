@@ -8,7 +8,7 @@ function tool(name: string, execute: () => unknown) {
 }
 
 describe("T-04 facade 装配收敛", () => {
-  test("运行中注入 steer/followUp 在下一轮进入 transcript", async () => {
+  test("natural end：steer 续跑，followUp 在同一次 run 的外层消费", async () => {
     let turn = 0;
     const agent = createAgent({
       includeBuiltins: false,
@@ -27,11 +27,11 @@ describe("T-04 facade 装配收敛", () => {
 
     const messages = await agent.prompt("start");
 
+    // 末轮无显式决策 → natural end → 外层消费 followUp，无需下一次 prompt/continue。
     expect(turn).toBe(3);
-    const userContents = messages
-      .filter((message) => message.role === "user")
-      .map((message) => String(message.content));
-    expect(userContents).toEqual(["start", "steer-注入", "followUp-注入"]);
+    expect(agent.queueSize("followUp")).toBe(0);
+    expect(messages.filter((message) => message.role === "user").map((message) => String(message.content)))
+      .toEqual(["start", "steer-注入", "followUp-注入"]);
   });
 
   test("reset 清理持久 inbox 中尚未消费的注入", async () => {

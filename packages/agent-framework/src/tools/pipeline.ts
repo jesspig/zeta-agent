@@ -124,6 +124,121 @@ export function createToolRegistry(): ToolRegistry {
   };
 }
 
+export type ToolLeaseOutcome = "completed" | "cancelled" | "unknown";
+
+export interface ToolLease {
+  readonly id: string;
+  readonly signal: AbortSignal;
+  readonly outcome: ToolLeaseOutcome | undefined;
+  readonly settledPromise: Promise<ToolLeaseOutcome>;
+  cancel(reason?: string): void;
+  settle(outcome: ToolLeaseOutcome): void;
+}
+
+export interface ToolLeaseManager {
+  /** 每次独立工具调用建立一个 lease；父信号取消时同步取消本 lease。 */
+  acquire(id: string, parents?: readonly (AbortSignal | undefined)[]): ToolLease;
+  readonly activeIds: readonly string[];
+  readonly activeCount: number;
+  waitForIdle(): Promise<void>;
+  cancelAll(reason?: string): void;
+  /** dispose：先取消，再在宽限期内等待确认；未确认者强制记为 unknown 并返回其 id。 */
+  close(options?: { readonly graceMs?: number }): Promise<readonly string[]>;
+}
+
+export function createToolLeaseManager(): ToolLeaseManager {
+  const leases = new Set<MutableToolLease>();
+  let disposed = false;
+
+  return {
+    acquire(id, parents = []) {
+      if (disposed) throw new Error("TOOL_LEASE_MANAGER_DISPOSED");
+      const lease = new MutableToolLease(id, parents, () => leases.delete(lease));
+      leases.add(lease);
+      return lease;
+    },
+    get activeIds() {
+      return [...leases].map((lease) => lease.id);
+    },
+    get activeCount() {
+      return leases.size;
+    },
+    async waitForIdle() {
+      while (leases.size > 0) await Promise.all([...leases].map((lease) => lease.settledPromise));
+    },
+    cancelAll(reason = "TOOL_LEASE_CANCELLED") {
+      for (const lease of leases) lease.cancel(reason);
+    },
+    async close(options = {}) {
+      if (disposed) return [];
+      disposed = true;
+      this.cancelAll("TOOL_LEASE_DISPOSED");
+      const graceMs = Math.max(0, options.graceMs ?? 50);
+      const pending = [...leases];
+      if (pending.length === 0) return [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const grace = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), graceMs);
+      });
+      const settled = Promise.all(pending.map((lease) => lease.settledPromise)).then(() => true as const);
+      const confirmed = await Promise.race([settled, grace]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (confirmed) return [];
+      const unknown = pending.filter((lease) => lease.outcome === undefined);
+      for (const lease of unknown) lease.settle("unknown");
+      return unknown.map((lease) => lease.id);
+    },
+  };
+}
+
+class MutableToolLease implements ToolLease {
+  readonly signal: AbortSignal;
+  readonly settledPromise: Promise<ToolLeaseOutcome>;
+  private readonly controller = new AbortController();
+  private readonly listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+  private settleFn!: (outcome: ToolLeaseOutcome) => void;
+  private result: ToolLeaseOutcome | undefined;
+
+  constructor(
+    readonly id: string,
+    parents: readonly (AbortSignal | undefined)[],
+    private readonly onSettle: () => void
+  ) {
+    this.settledPromise = new Promise<ToolLeaseOutcome>((resolve) => {
+      this.settleFn = resolve;
+    });
+    this.signal = this.controller.signal;
+    for (const parent of parents) {
+      if (parent === undefined) continue;
+      if (parent.aborted) {
+        this.controller.abort(parent.reason ?? "ABORTED");
+        continue;
+      }
+      const listener = (): void => this.cancel(parent.reason ?? "ABORTED");
+      parent.addEventListener("abort", listener, { once: true });
+      this.listeners.push({ signal: parent, listener });
+    }
+  }
+
+  get outcome(): ToolLeaseOutcome | undefined {
+    return this.result;
+  }
+
+  cancel(reason = "TOOL_LEASE_CANCELLED"): void {
+    if (this.result !== undefined) return;
+    this.controller.abort(reason);
+  }
+
+  settle(outcome: ToolLeaseOutcome): void {
+    if (this.result !== undefined) return;
+    this.result = outcome;
+    for (const entry of this.listeners) entry.signal.removeEventListener("abort", entry.listener);
+    this.listeners.length = 0;
+    this.onSettle();
+    this.settleFn(outcome);
+  }
+}
+
 export interface TerminationController {
   readonly signal: AbortSignal;
   readonly terminated: boolean;
@@ -214,8 +329,22 @@ export interface ToolPublisher {
   (result: ToolResult): ToolResult | Promise<ToolResult>;
 }
 
+export interface ToolAuditEvent {
+  readonly call: ToolCall;
+  readonly tool: string;
+  readonly args: Readonly<Record<string, unknown>>;
+  readonly reason: string;
+  readonly phase: "prepare" | "execute";
+}
+
 export interface BatchContext {
   readonly registry: ToolRegistry;
+  /** 统一拒绝/超时审计出口；调用方负责落盘，不在 pipeline 内直连审计实现。 */
+  readonly audit?: (event: ToolAuditEvent) => void;
+  /** 每次独立调用的 lease 所有者；idle 与 dispose 据此等待。 */
+  readonly toolLeases?: ToolLeaseManager;
+  /** 超时后等待工具确认终止的宽限期；超时未确认即返回 unknown。 */
+  readonly timeoutConfirmationMs?: number;
   readonly guard?: PermissionGuard;
   readonly verdicts?: readonly PermissionVerdict[];
   readonly bypass?: boolean;
@@ -288,6 +417,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+class ToolTimeoutError extends Error {
+  constructor() {
+    super("TOOL_TIMEOUT");
+    this.name = "ToolTimeoutError";
+  }
+}
+
 function errorResult(call: ToolCall, reason: string, startedAt: number, endedAt: number): ToolResult {
   // 字符串输出让 String(content) 仍能读到原因，兼容旧调用方的文本断言。
   const output = reason;
@@ -306,6 +442,19 @@ function errorResult(call: ToolCall, reason: string, startedAt: number, endedAt:
       toolName: toolName(call),
     },
   };
+}
+
+function rejectCall(
+  call: ToolCall,
+  reason: string,
+  startedAt: number,
+  endedAt: number,
+  ctx: BatchContext,
+  phase: ToolAuditEvent["phase"],
+  args: Readonly<Record<string, unknown>>
+): ToolResult {
+  ctx.audit?.({ call, tool: toolName(call), args, reason, phase });
+  return errorResult(call, reason, startedAt, endedAt);
 }
 
 interface MutableBefore {
@@ -419,6 +568,8 @@ export interface ExecutedToolCall {
   readonly durationMs: number;
   readonly isError: boolean;
   readonly reason?: string;
+  readonly outcome?: ToolLeaseOutcome;
+  readonly reconciliation?: boolean;
   readonly terminate: boolean;
   readonly structuredContent?: unknown;
   readonly updates: readonly { readonly partialResult: unknown }[];
@@ -440,7 +591,9 @@ export async function prepareToolCall(
   const normalized = asPipelineCall(call);
   const clock = ctx.clock ?? (() => performance.now());
   const tool = ctx.registry.getTool(toolName(normalized));
-  if (tool === undefined) return errorResult(normalized, "TOOL_NOT_FOUND", clock(), clock());
+  if (tool === undefined) {
+    return rejectCall(normalized, "TOOL_NOT_FOUND", clock(), clock(), ctx, "prepare", normalizeToolArgs(toolInput(normalized)));
+  }
 
   try {
     let raw: unknown = toolInput(normalized);
@@ -451,16 +604,27 @@ export async function prepareToolCall(
     const guard = ctx.guard ?? createPermissionGuard();
     const verdict = guard.evaluate(ctx.verdicts ?? [], { bypass: ctx.bypass ?? false });
     if (verdict.behavior === "DENY") {
-      return errorResult(normalized, `TOOL_PERMISSION_DENIED: ${verdict.reason ?? "denied"}`, clock(), clock());
+      return rejectCall(
+        normalized,
+        `TOOL_PERMISSION_DENIED: ${verdict.reason ?? "denied"}`,
+        clock(), clock(), ctx, "prepare", preparedArgs
+      );
     }
     if (verdict.behavior === "ASK") {
-      return errorResult(normalized, `TOOL_PERMISSION_ASK: ${verdict.reason ?? "confirmation required"}`, clock(), clock());
+      return rejectCall(
+        normalized,
+        `TOOL_PERMISSION_ASK: ${verdict.reason ?? "confirmation required"}`,
+        clock(), clock(), ctx, "prepare", preparedArgs
+      );
     }
 
     const before = await runBeforeHooks({ call: normalized, tool: tool.name, args: preparedArgs }, ctx, ctx.signal);
     if (before.block === true) {
       const reason = `TOOL_BLOCKED_BY_HOOK: ${before.reason ?? "blocked"}`;
-      return { ...errorResult(normalized, reason, clock(), clock()), terminate: before.terminate === true };
+      return {
+        ...rejectCall(normalized, reason, clock(), clock(), ctx, "prepare", preparedArgs),
+        terminate: before.terminate === true,
+      };
     }
     // hook 改写参数后必须重新校验，否则 before 阶段能注入未声明字段。
     const args = before.args ?? preparedArgs;
@@ -473,7 +637,11 @@ export async function prepareToolCall(
       terminate: before.terminate === true,
     };
   } catch (error) {
-    return errorResult(normalized, `TOOL_PREPARE_ERROR: ${errorMessage(error)}`, clock(), clock());
+    return rejectCall(
+      normalized,
+      `TOOL_PREPARE_ERROR: ${errorMessage(error)}`,
+      clock(), clock(), ctx, "prepare", normalizeToolArgs(toolInput(normalized))
+    );
   }
 }
 
@@ -484,6 +652,11 @@ export async function executePreparedToolCall(
 ): Promise<ExecutedToolCall> {
   const clock = ctx.clock ?? (() => performance.now());
   const call = prepared.call;
+  const lease = ctx.toolLeases?.acquire(call.id, [ctx.controller?.signal, ctx.signal]);
+  const parentSignal = ctx.controller?.signal ?? ctx.signal;
+  const timeoutMs = prepared.tool.timeoutMs ?? ctx.timeoutMs;
+  // 无超时且已有父信号时沿用父信号的身份（既有契约）；超时或无父信号时交给独立 lease。
+  const execSignal = timeoutMs !== undefined || parentSignal === undefined ? lease?.signal ?? parentSignal : parentSignal;
   let settled = false;
   let terminateRequested = false;
   const pending: Promise<unknown>[] = [];
@@ -511,19 +684,23 @@ export async function executePreparedToolCall(
       terminateRequested = true;
     },
     terminated: () => ctx.controller?.terminated === true,
-    signal: ctx.controller?.signal ?? ctx.signal,
+    signal: execSignal,
   };
 
   const startedAt = clock();
   let output: unknown;
   let endedAt = startedAt;
   let executionError: unknown;
-  const timeoutMs = prepared.tool.timeoutMs ?? ctx.timeoutMs;
+  let timeoutUnconfirmed = false;
   const maxAttempts = Math.max(1, prepared.tool.retry?.maxAttempts ?? 1);
   const retryDelay = Math.max(0, prepared.tool.retry?.delayMs ?? 0);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let attemptSettled = false;
+    let notifySettled: (() => void) | undefined;
+    const settledPromise = new Promise<void>((resolve) => {
+      notifySettled = resolve;
+    });
     try {
       const returned = prepared.tool.execute(prepared.args, exec);
       if (
@@ -533,18 +710,26 @@ export async function executePreparedToolCall(
       ) {
         output = await new Promise<unknown>((resolve, reject) => {
           const timer =
-            timeoutMs === undefined ? undefined : setTimeout(() => reject(new Error("TOOL_TIMEOUT")), timeoutMs);
+            timeoutMs === undefined
+              ? undefined
+              : setTimeout(() => {
+                  // 超时只取消本次调用的独立 lease，不触碰整批的 signal。
+                  lease?.cancel("TOOL_TIMEOUT");
+                  reject(new ToolTimeoutError());
+                }, timeoutMs);
           Promise.resolve(returned).then(
             (value) => {
               if (timer !== undefined) clearTimeout(timer);
               endedAt = clock();
               attemptSettled = true;
+              notifySettled?.();
               resolve(value);
             },
             (error) => {
               if (timer !== undefined) clearTimeout(timer);
               endedAt = clock();
               attemptSettled = true;
+              notifySettled?.();
               reject(error);
             }
           );
@@ -553,33 +738,70 @@ export async function executePreparedToolCall(
         // 同步返回时立刻停表，后续 onUpdate 的 promise 等待不计入 durationMs。
         endedAt = clock();
         attemptSettled = true;
+        notifySettled?.();
         output = returned;
       }
+      lease?.settle("completed");
       executionError = undefined;
       break;
     } catch (error) {
       executionError = error;
       if (!attemptSettled) endedAt = clock();
+      if (error instanceof ToolTimeoutError) {
+        // 取消后给工具一个确认窗口；未确认即视为 unknown，绝不按普通可重试失败处理。
+        let graceTimer: ReturnType<typeof setTimeout> | undefined;
+        const confirmed = await Promise.race([
+          settledPromise.then(() => true as const),
+          new Promise<false>((resolve) => {
+            graceTimer = setTimeout(() => resolve(false), Math.max(0, ctx.timeoutConfirmationMs ?? 25));
+          }),
+        ]);
+        if (graceTimer !== undefined) clearTimeout(graceTimer);
+        timeoutUnconfirmed = !confirmed;
+        lease?.settle(confirmed ? "cancelled" : "unknown");
+        break;
+      }
       if (attempt < maxAttempts && retryDelay > 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, retryDelay));
       }
     }
   }
+  if (lease !== undefined && lease.outcome === undefined) {
+    lease.settle(lease.signal.aborted ? "cancelled" : "completed");
+  }
   settled = true;
   await Promise.allSettled(pending);
   const durationMs = Math.max(0, endedAt - startedAt);
   const terminate = prepared.terminate || terminateRequested;
-  const failure = (reason: string): ExecutedToolCall => ({
+  const failure = (
+    reason: string,
+    options: { readonly outcome?: "cancelled" | "unknown"; readonly reconciliation?: boolean } = {}
+  ): ExecutedToolCall => ({
     kind: "executed",
     prepared,
     output: { error: reason },
     durationMs,
     isError: true,
     reason,
+    outcome: options.outcome ?? "completed",
+    ...(options.reconciliation === true ? { reconciliation: true } : {}),
     terminate,
     updates,
   });
 
+  if (executionError instanceof ToolTimeoutError) {
+    const reason = timeoutUnconfirmed ? "TOOL_TIMEOUT_UNKNOWN" : "TOOL_TIMEOUT";
+    ctx.audit?.({
+      call,
+      tool: toolName(call),
+      args: prepared.args,
+      reason,
+      phase: "execute",
+    });
+    return failure(reason, {
+      ...(timeoutUnconfirmed ? { outcome: "unknown" as const, reconciliation: true } : { outcome: "cancelled" as const }),
+    });
+  }
   if (executionError !== undefined) {
     return failure(`TOOL_EXECUTION_ERROR: ${errorMessage(executionError)}`);
   }
@@ -613,6 +835,7 @@ export async function executePreparedToolCall(
     output,
     durationMs,
     isError: failedOutput,
+    outcome: "completed",
     ...(failedOutput ? { reason: "TOOL_OUTPUT_ERROR" } : {}),
     terminate,
     structuredContent,
@@ -659,6 +882,8 @@ export async function finalizeExecutedToolCall(
     isError: after.isError ?? executed.isError,
     durationMs: executed.durationMs,
     reason: executed.reason,
+    outcome: executed.outcome,
+    ...(executed.reconciliation === true ? { reconciliation: true } : {}),
     terminate: after.terminate ?? executed.terminate,
     structuredContent,
     details: after.details,
@@ -682,10 +907,14 @@ export async function finalizeExecutedToolCall(
 }
 
 /** 发布：先经过 publisher（facade 的 durable commit 回填），再按完成顺序通知 sink。 */
-export async function publishResult(result: ToolResult, ctx: BatchContext): Promise<ToolResult> {
+export async function publishResult(
+  result: ToolResult,
+  ctx: BatchContext,
+  options: { readonly sink?: boolean } = {}
+): Promise<ToolResult> {
   try {
     const published = ctx.publisher === undefined ? result : await ctx.publisher(result);
-    if (ctx.completionSink !== undefined) await ctx.completionSink(published);
+    if (options.sink !== false && ctx.completionSink !== undefined) await ctx.completionSink(published);
     return published;
   } catch (error) {
     const reason = `TOOL_PUBLISH_ERROR: ${errorMessage(error)}`;
@@ -748,9 +977,12 @@ export async function executeBatch(
   );
 }
 
-/** 公开嵌套调用入口：复用同一流水线，但不发事件、不加消息。 */
+/**
+ * 公开嵌套调用入口：与模型工具共用 registry/hooks/审计/effects/timeout/cleanup；
+ * 只关掉事件 sink 与消息追加，publisher（durable commit）仍走同一路径。
+ */
 export async function runToolCall(call: UnifiedToolCall, ctx: BatchContext): Promise<ToolResult> {
-  const result = await executeCall(call, ctx);
+  const result = await publishResult(await executeCall(call, ctx), ctx, { sink: false });
   const { message: _message, ...withoutMessage } = result;
   void _message;
   return withoutMessage;

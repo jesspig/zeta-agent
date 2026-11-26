@@ -18,14 +18,18 @@ import {
   type AgentMessage,
   type AgentState,
   type EventStream,
+  type UsageSnapshot,
 } from "./agent";
-import { createInbox, type Inbox } from "./inbox";
+import { createInbox, type Inbox, type InboxMessage, type QueueMode, type QueueTarget } from "./inbox";
 import {
+  asNextTurnUpdate,
   runLoop,
   type AssistantResult,
   type LastTurn,
   type LoopDecision,
   type LoopRuntime,
+  type NextTurnUpdate,
+  type SourcePollPhase,
   type ToolCall,
 } from "./loop";
 import { createToolPipeline, createToolRegistry } from "../tools/pipeline";
@@ -86,6 +90,7 @@ export interface CorePluginApi extends AgentPluginApi {
   disposeAll(): void;
 }
 
+const CONTINUE_DECISION: LoopDecision = Object.freeze({ action: "continue" });
 const END_DECISION: LoopDecision = Object.freeze({ action: "end" });
 
 type CoreTool = {
@@ -116,6 +121,7 @@ export class Agent {
   private readonly loopHooks: CoreLoopHooks;
   private readonly turnBudget: number | undefined;
   private readonly inbox: Inbox = createInbox();
+  private activeSignal: AbortSignal | undefined;
 
   private abortedValue = false;
   private generation = 0;
@@ -138,6 +144,30 @@ export class Agent {
     this.systemPrompt = options.systemPrompt;
     this.loopHooks = options.loopHooks ?? {};
     this.turnBudget = options.turnBudget;
+
+    // legacy 字段 hook 经 setLegacy 进入同一链（最低优先级），生产路径不再旁路调用。
+    const legacyHooks = this.loopHooks;
+    if (legacyHooks.prepareRequest !== undefined) {
+      this.manager.setLegacy("prepareRequest", (input) =>
+        legacyHooks.prepareRequest!(input, this.activeSignal) ?? input);
+    }
+    if (legacyHooks.prepareNextTurn !== undefined) {
+      this.manager.setLegacy("prepareNextTurn", (input) =>
+        legacyHooks.prepareNextTurn!(input, this.activeSignal));
+    }
+    if (legacyHooks.finishTurn !== undefined) {
+      this.manager.setLegacy("turnBoundary", (input) => {
+        const event = input as AgentEvent;
+        const turn: LastTurn = event.type === "turn_end"
+          ? { message: event.message, toolResults: event.toolResults }
+          : { message: { role: "assistant", content: "" }, toolResults: [] };
+        return legacyHooks.finishTurn!(turn, this.activeSignal);
+      });
+    }
+    if (legacyHooks.pollFollowUp !== undefined) {
+      this.manager.setLegacy("pollFollowUp", async () =>
+        (await legacyHooks.pollFollowUp!(this.activeSignal)) ?? undefined);
+    }
 
     for (const tool of options.tools ?? []) this.tools.set(tool.name, tool);
 
@@ -230,6 +260,28 @@ export class Agent {
     this.inbox.followUp(message);
   }
 
+  inject(message: AgentMessage): InboxMessage {
+    return this.inbox.inject(message);
+  }
+
+  setQueueMode(mode: QueueMode): void {
+    this.inbox.setMode(mode);
+  }
+
+  getQueueMode(): QueueMode {
+    return this.inbox.getMode();
+  }
+
+  queueSize(target: QueueTarget): number {
+    return this.inbox.size(target);
+  }
+
+  private async pollQueueSources(signal: AbortSignal, kinds: "all" | "steering" = "all"): Promise<void> {
+    await this.manager.run("steering", this.inbox, signal);
+    // prepareNextTurn 只重轮询 steering：followUp 在这里重入会与 natural end 外层消费互相喂料而无限续跑。
+    if (kinds === "all") await this.manager.run("followUp", this.inbox, signal);
+  }
+
   async waitForIdle(): Promise<void> {
     while (this.activeRun !== undefined) {
       await this.activeRun.promise.catch(() => {});
@@ -298,13 +350,14 @@ export class Agent {
 
   private async executeRun(lease: RunLease, userText?: string): Promise<readonly AgentMessage[]> {
     const signal = lease.controller.signal;
+    this.activeSignal = signal;
     if (userText === undefined && this.stream.getState().messages.length === 0) return this.stream.getState().messages;
     await this.stream.emit({ type: "agent_start" }, signal);
 
     const inbox = this.inbox;
     if (userText !== undefined) inbox.steer({ role: "user", content: userText });
-    await this.manager.run("steering", inbox, signal);
-    await this.manager.run("followUp", inbox, signal);
+    await this.pollQueueSources(signal);
+    // followUp 交给 runLoop 外层：natural end 同轮消费，硬终局保留到下一个 run 的自然终局。
 
     const registry = createToolRegistry();
     for (const [name, tool] of this.tools) {
@@ -324,32 +377,36 @@ export class Agent {
       turnBudget: this.turnBudget,
       emit: (event) => this.stream.emit(event, signal),
       getState: () => this.stream.getState(),
-      prepareNextTurn: async () => {
-        await this.manager.run("prepareNextTurn", this.stream.getState(), signal);
-        await this.loopHooks.prepareNextTurn?.(this.stream.getState(), signal);
+      prepareNextTurn: async (): Promise<NextTurnUpdate | undefined> =>
+        asNextTurnUpdate(await this.manager.run("prepareNextTurn", this.stream.getState(), signal)),
+      pollSources: async (phase: SourcePollPhase): Promise<void> => {
+        await this.pollQueueSources(signal, phase === "prepareNextTurn" ? "steering" : "all");
       },
       prepareRequest: async (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
         const prompt = this.resolveSystemPrompt();
+        const alreadyInjected = base.messages?.some((message) => message.role === "system" && message.content === prompt) === true;
         const seeded = {
           ...(request as object),
-          messages: prompt.length > 0 && base.messages?.[0]?.role !== "system"
+          messages: prompt.length > 0 && !alreadyInjected
             ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
             : (base.messages ?? []),
         };
-        const prepared = await this.manager.run("prepareRequest", seeded, signal);
-        return await this.loopHooks.prepareRequest?.(prepared, signal) ?? prepared;
+        return await this.manager.run("prepareRequest", seeded, signal);
       },
       finishTurn: async (turn: LastTurn): Promise<LoopDecision | undefined> => {
         const event: AgentEvent = { type: "turn_end", message: turn.message, toolResults: turn.toolResults };
-        await this.manager.run("turnBoundary", event, signal);
-        const legacy = await this.loopHooks.finishTurn?.(turn, signal);
-        if (legacy !== undefined) return legacy;
-        return this.lastTurnHadNativeTools && turn.toolResults.length > 0 ? undefined : END_DECISION;
+        const outcome = await this.manager.run("turnBoundary", event, signal);
+        if (isLoopDecision(outcome)) return outcome;
+        // 原生工具结果必须被下一轮消费：显式 continue；否则 natural end 交给 runLoop 外层。
+        if (this.lastTurnHadNativeTools && turn.toolResults.length > 0) return CONTINUE_DECISION;
+        // 非原生 toolCalls（兼容文本标记等）保持单轮收束，避免默认续跑反复解析。
+        if (turn.toolResults.length > 0) return END_DECISION;
+        return undefined;
       },
       pollFollowUp: async () => {
         const followUps = inbox.poll("followUp").map((item) => item.body);
-        return await this.loopHooks.pollFollowUp?.(signal) ?? followUps;
+        return await this.manager.run("pollFollowUp", followUps, signal);
       },
       streamAssistant: async (request): Promise<AssistantResult> => this.streamAssistant(request, signal),
       toolPipeline: createToolPipeline({
@@ -378,7 +435,7 @@ export class Agent {
     let content = "";
     const calls: ToolCall[] = [];
     let stopReason: AssistantResult["stopReason"] = "stop";
-    let terminal: { usage?: unknown; durationMs?: number; responseId?: string } = {};
+    let terminal: { usage?: UsageSnapshot; durationMs?: number; responseId?: string } = {};
     let failure: unknown;
     this.lastTurnHadNativeTools = false;
     try {
@@ -398,7 +455,7 @@ export class Agent {
             } else if (record.type === "done") {
               stopReason = isStopReason(record.stopReason) ? record.stopReason : "stop";
               terminal = {
-                ...(record.usage !== undefined ? { usage: record.usage } : {}),
+                ...(typeof record.usage === "object" && record.usage !== null ? { usage: record.usage as UsageSnapshot } : {}),
                 ...(typeof record.durationMs === "number" ? { durationMs: record.durationMs } : {}),
                 ...(typeof record.responseId === "string" ? { responseId: record.responseId } : {}),
               };
@@ -406,6 +463,11 @@ export class Agent {
             } else if (record.type === "error") {
               stopReason = "error";
               failure = record.error;
+              // 错误终态只保留可诊断元数据；usage 不进入消息，避免重试后重复计费。
+              terminal = {
+                ...(typeof record.durationMs === "number" ? { durationMs: record.durationMs } : {}),
+                ...(typeof record.responseId === "string" ? { responseId: record.responseId } : {}),
+              };
               break;
             }
           }
@@ -419,7 +481,13 @@ export class Agent {
     if (stopReason === "error") content = `Error: ${messageOf(failure)}`;
     this.lastTurnHadNativeTools = calls.length > 0;
     return {
-      message: { role: "assistant", content },
+      message: {
+        role: "assistant",
+        content,
+        ...(terminal.usage !== undefined ? { usage: terminal.usage } : {}),
+        ...(terminal.durationMs !== undefined ? { durationMs: terminal.durationMs } : {}),
+        ...(terminal.responseId !== undefined ? { responseId: terminal.responseId } : {}),
+      },
       toolCalls: stopReason === "error" || stopReason === "aborted" ? [] : calls,
       stopReason,
       ...terminal,
@@ -427,6 +495,12 @@ export class Agent {
     };
   }
 
+}
+
+function isLoopDecision(value: unknown): value is LoopDecision {
+  if (typeof value !== "object" || value === null) return false;
+  const action = (value as { readonly action?: unknown }).action;
+  return action === "continue" || action === "end";
 }
 
 function isStopReason(value: unknown): value is AssistantResult["stopReason"] {
