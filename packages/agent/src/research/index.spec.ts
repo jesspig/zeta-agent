@@ -13,6 +13,22 @@ describe("T-25 研究轨公开出口与默认装配边界", () => {
     expect("issueEvaluatorSeal" in agent).toBe(false);
   });
 
+  test("低阶 promote 系列不再从公开 API 可达，真实回归 runner 公开", () => {
+    for (const lowLevel of [
+      "promote",
+      "promoteWithDigest",
+      "promoteWithObservationEquivalence",
+      "replayPromotion",
+      "recordPromotionRejection",
+      "createPromotionState",
+    ]) {
+      expect(lowLevel in agent).toBe(false);
+    }
+    expect(typeof agent.runCoreInvariants).toBe("function");
+    expect(typeof agent.createOrderedReplaySurface).toBe("function");
+    expect(typeof agent.referenceFitness).toBe("function");
+  });
+
   test("研究轨仍不进入默认装配", () => {
     for (const id of listAssembly()) {
       expect(id).not.toMatch(/research|promotion|fitness|experience|evolution/i);

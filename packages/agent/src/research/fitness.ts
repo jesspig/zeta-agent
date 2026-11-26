@@ -128,9 +128,23 @@ export function evaluateFitness(
   return { reward: auc - weight * penalty, auc, penalty, scoredTraces };
 }
 
+/**
+ * 唯一参考公式：reward = 平均 attainment AUC − λ·平均并行惩罚，
+ * λ = 0.25，AUC 最少两点。所有默认路径共用这一组参数。
+ */
+export const REFERENCE_FITNESS_CONFIG: FitnessEvaluatorConfig = Object.freeze({
+  parallelismWeight: 0.25,
+  minEvalForAuc: 2,
+});
+
+export function referenceFitness(sealed: SealedEvaluation): FitnessEvaluation {
+  return evaluateFitness(sealed, REFERENCE_FITNESS_CONFIG);
+}
+
 export function createFitnessEvaluator(config: FitnessEvaluatorConfig = {}): FitnessEvaluator {
+  const effective = Object.keys(config).length === 0 ? REFERENCE_FITNESS_CONFIG : config;
   return Object.freeze({
-    evaluate: (sealed: SealedEvaluation) => evaluateFitness(sealed, config),
+    evaluate: (sealed: SealedEvaluation) => evaluateFitness(sealed, effective),
   });
 }
 

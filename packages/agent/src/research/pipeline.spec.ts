@@ -26,13 +26,18 @@ import {
   sha256Hex,
   type Candidate,
 } from "./promotion";
-import { issuePromotionSeal } from "./seal";
+import {
+  bindPromotionAuthorization,
+  consumePromotionAuthorization,
+  issuePromotionSeal,
+} from "./seal";
 import {
   assertPipelineInvariants,
   CORE_INVARIANT_IDS,
   createPromotionPipeline,
   createRegressionGate,
   PROMOTION_STAGES,
+  runCoreInvariants,
   type PromotionOutcome,
 } from "./pipeline";
 
@@ -301,6 +306,118 @@ describe("T-25 绕过默认 promote / evaluator 必须失败", () => {
     const committed = f.pipeline.run(f.request).candidate;
     const forged = { ...committed, fitness: 999 };
     expect(() => promote(createPromotionState(), forged)).toThrow(/PROMOTION_SEAL_BODY_MISMATCH/);
-    expect(() => promote(createPromotionState(), { ...committed, qualified: true })).not.toThrow();
+    expect(() => promote(createPromotionState(), { ...committed, qualified: true })).toThrow(
+      /PROMOTION_AUTHORIZATION_CONSUMED/
+    );
+  });
+});
+
+describe("T-21 一次性晋升授权与真实回归", () => {
+  test("pipeline 消费授权后裸 promote/replayPromotion 拒绝复用 seal", () => {
+    const f = fixture();
+    const committed = f.pipeline.run(f.request).candidate;
+    expect(() => promote(createPromotionState(), committed)).toThrow(
+      /PROMOTION_AUTHORIZATION_CONSUMED/
+    );
+    expect(() => replayPromotion([committed])).toThrow(/PROMOTION_AUTHORIZATION_CONSUMED/);
+    expect(() =>
+      promoteWithDigest(createPromotionState(), committed, {
+        artifact: "x",
+        expectedDigest: sha256Hex("x"),
+      })
+    ).toThrow(/PROMOTION_AUTHORIZATION_CONSUMED/);
+  });
+
+  test("授权绑定 candidate/artifact/snapshot/identity/nonce，错绑定与二次消费均拒绝", () => {
+    const body = {
+      id: "cand-1",
+      fitness: 0.5,
+      qualified: true,
+      fingerprint: undefined,
+    };
+    const seal = issuePromotionSeal({ candidateId: "cand-1", identityDigest: "id", body });
+    const candidate: Candidate = { ...body, seal };
+    const binding = {
+      candidateId: "cand-1",
+      artifactDigest: "a".repeat(64),
+      snapshotDigest: "s".repeat(64),
+      identityDigest: "id",
+      nonce: "n-1",
+    };
+    expect(bindPromotionAuthorization(seal, binding)).toBe(true);
+    expect(() => consumePromotionAuthorization(seal, { ...binding, nonce: "n-2" })).toThrow(
+      /BINDING_MISMATCH/
+    );
+    expect(consumePromotionAuthorization(seal, binding)).toBe(true);
+    expect(() => consumePromotionAuthorization(seal, binding)).toThrow(/CONSUMED/);
+    expect(() => promote(createPromotionState(), candidate)).toThrow(/CONSUMED/);
+  });
+
+  test("24 条不变量真实执行；failed replay 与空 episode 均被拒绝", () => {
+    const f = fixture();
+    const result = f.pipeline.run(f.request);
+    expect(result.regression.results).toHaveLength(24);
+    expect(result.regression.passed).toBe(true);
+    const context = {
+      candidateId: f.request.candidateId,
+      events: f.request.events,
+      replay: result.replay,
+      evaluation: result.evaluation,
+      heldOut: result.heldOut,
+      ab: result.ab,
+      snapshotDigest: f.snapshot.manifest.digest,
+    };
+    expect(runCoreInvariants(context).passed).toBe(true);
+    expect(runCoreInvariants({ ...context, replay: { ...result.replay, failed: ["a"] } }).passed).toBe(
+      false
+    );
+    expect(runCoreInvariants({ ...context, events: [] }).passed).toBe(false);
+  });
+
+  test("宿主注入恒真 gate 不能让空 episode 通过真实回归", () => {
+    const f = fixture();
+    const store = createFrozenStore();
+    const snapshot = store.freeze(f.id, episodeEvidence([]));
+    const pipeline = createPromotionPipeline({
+      identity: f.id,
+      store,
+      snapshot,
+      regressionGate: createRegressionGate({ run: () => true }),
+      heldOutThreshold: 0.5,
+    });
+    const result = pipeline.run({ ...f.request, events: [] });
+    expect(result.decision.reason).toBe("regression-failed");
+    expect(result.regression.failedIds.length).toBeGreaterThan(0);
+    expect(result.stages).toEqual([...PROMOTION_STAGES.slice(0, 6)]);
+  });
+
+  test("failed replay 的真实反例被回归门拦下", () => {
+    const f = fixture();
+    const failedEvents = f.request.events.map((event) => ({
+      ...event,
+      outcomes: event.outcomes.map((outcome, index) =>
+        index === 0 ? { ...outcome, failed: true } : outcome
+      ),
+    }));
+    const store = createFrozenStore();
+    const snapshot = store.freeze(f.id, episodeEvidence(failedEvents));
+    const pipeline = createPromotionPipeline({
+      identity: f.id,
+      store,
+      snapshot,
+      regressionGate: createRegressionGate({ run: () => true }),
+      heldOutThreshold: 0.5,
+    });
+    const result = pipeline.run({ ...f.request, events: failedEvents });
+    expect(result.decision.reason).toBe("regression-failed");
+    expect(result.regression.failedIds).toContain(CORE_INVARIANT_IDS[10]!);
+  });
+
+  test("held-out 在 search 前沿之后只评一次", () => {
+    const f = fixture();
+    const result = f.pipeline.run(f.request);
+    expect(result.frontier).toContain(f.request.candidateId);
+    expect(result.heldOutEvaluations).toBe(1);
+    expect(result.nonce.length).toBeGreaterThan(0);
   });
 });

@@ -90,6 +90,7 @@ import {
   type ToolRegistry,
 } from "@zeta-agent/agent-framework";
 import {
+  createContext,
   createPluginTransaction,
   reviewExtension,
   DEFAULT_EXTENSION_POLICY,
@@ -118,12 +119,16 @@ import { builtinToolDefinitions, type ToolDefinition, type ToolResourceLimits } 
 import {
   createEffectBridge,
   createLogger,
+  createOtlpSpanExporter,
+  createSpanCollector,
   resolveLogSink,
   type EffectBridge,
   type Logger,
   type LoggerOptions,
+  type OtlpSpan,
   type SinkOptions,
   type SinkResolution,
+  type SpanExporter,
 } from "@zeta-agent/observability";
 import {
   confinedPath,
@@ -539,6 +544,12 @@ export interface AgentOptions {
   readonly structuredBackend?: StructuredExecutionBackend;
   readonly observability?: LoggerOptions;
   readonly effectBridge?: EffectBridge;
+  /** 显式开启后为本 agent 注入 per-agent observer，把真实 effect 树转成 span。默认关闭。 */
+  readonly observabilitySpans?: boolean;
+  /** span 的 OTLP/HTTP 真实 wire endpoint；与 observabilitySpans 一起启用。 */
+  readonly otlpTracesEndpoint?: string;
+  /** 可注入的 span sink；优先于 otlpTracesEndpoint。 */
+  readonly spanExporter?: SpanExporter;
   readonly coreContext?: CoreContextLike;
   readonly allowedDirectories?: readonly string[];
   /** 系统提示词；缺省时注入 cwd/platform/tools 等运行环境信息。 */
@@ -706,6 +717,8 @@ export interface Agent extends PluginApiSurface {
   waitForIdle(): Promise<void>;
   runTool(call: AgentToolCall): Promise<ToolFailure>;
   emitEffect(meta: EffectMeta): void;
+  /** 显式启用 observabilitySpans 后返回真实 effect 树转出的 span 快照。 */
+  spans(): readonly OtlpSpan[];
   resolveLogSink(options: SinkOptions): SinkResolution;
   readonly api: PluginApiSurface;
   readonly logger: Logger;
@@ -1168,6 +1181,21 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const logger = createLogger(options.observability ?? defaultLoggerOptions());
   const effectBridge = options.effectBridge ?? createEffectBridge();
   const fiberLogger = logger.forFiber("agent");
+  // per-agent observer：仅在显式启用时构造真实 framework context，effect 树经 bridge 转 span。
+  // 默认不注入，保持 useContext() 的基线语义不变。
+  const observedContext =
+    options.observabilitySpans === true
+      ? createContext({ uid: `agent:${logger.runId}`, observer: effectBridge })
+      : undefined;
+  const spanExporter =
+    options.spanExporter ??
+    (options.otlpTracesEndpoint === undefined
+      ? undefined
+      : createOtlpSpanExporter({ endpoint: options.otlpTracesEndpoint }));
+  const spanCollector =
+    observedContext === undefined
+      ? undefined
+      : createSpanCollector({ bridge: effectBridge, exporter: spanExporter });
 
   stream.subscribe((event) => {
     const content = "message" in event ? String(event.message.content) : event.type;
@@ -1971,7 +1999,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
       declaredLoadout.clear();
       for (const tool of tools) declaredLoadout.set(tool.name, tool);
     },
-    useContext: () => options.coreContext,
+    useContext: () => options.coreContext ?? observedContext,
     events,
     capabilities: () => securityBackend.capabilities(),
     onEffect: (handler) => effectBridge.onEffect(handler),
@@ -2616,6 +2644,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
         pluginProviderRegistration = undefined;
         for (const stop of brokerRegistrations) stop();
         brokerRegistrations.length = 0;
+        spanCollector?.dispose();
+        if (observedContext !== undefined) await observedContext.dispose();
         await closeAuditSink();
       })();
       return disposal;
@@ -2638,10 +2668,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
     api,
     tenantScope,
     emitEffect: (meta) => effectBridge.emit(meta),
+    spans: () => spanCollector?.spans() ?? Object.freeze([]),
     resolveLogSink: (options) => resolveLogSink(options),
     logger,
     async runTool(call) {
       if (disposed) throw new Error("AGENT_DISPOSED: dispose 后不再接受新 runTool");
+      // 真实工具调用在 per-agent 观测 context 上生成 effect，effect 树经 bridge 转 span。
+      const observedDisposer = observedContext?.effect(() => () => {}, `tool:${call.name}`);
       // 与模型工具共用同一受管 registry/context：同一 hooks、wrap、审计、effects/quota、
       // timeout 与 cleanup；runToolCall 只关掉事件 sink 与消息追加。
       let invoked = false;
@@ -2682,6 +2715,7 @@ export function createAgent(options: AgentOptions = {}): Agent {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
       } finally {
         stop();
+        if (observedDisposer !== undefined) await observedDisposer();
       }
       });
     },

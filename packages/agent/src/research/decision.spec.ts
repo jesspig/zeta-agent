@@ -12,7 +12,9 @@ import {
   assertPermission,
   assertProbeViewNoScore,
   assertReplayInvariants,
+  assertReplayFresh,
   createLiveSurface,
+  createOrderedReplaySurface,
   createProposerSurface,
   createReplaySurface,
   createScopedSurface,
@@ -280,5 +282,45 @@ describe("T-24 trace / score / verdict 权限分层", () => {
 
   test("身份摘要参与审计的 argsDigest，避免跨身份混用视图", () => {
     expect(identityDigest(identity())).toHaveLength(64);
+  });
+});
+
+describe("T-21 有序 replay surface 与新鲜事实", () => {
+  test("按冻结顺序推进；乱序/非法动作抛错", () => {
+    const { store, snapshot, sequence } = frozen();
+    const surface = createOrderedReplaySurface({ identity: identity(), store, snapshot });
+    expect(surface.expectedOrder).toEqual(["a", "b", "c"]);
+    expect(surface.next()).toBe("a");
+    expect(() => surface.probe("b")).toThrow(/REPLAY_ORDER_VIOLATION/);
+    expect(() => surface.apply({ kind: "probe", cellId: "c" })).toThrow(/ILLEGAL_ACTION/);
+    expect(surface.apply({ kind: "probe", cellId: "a" })?.cellId).toBe("a");
+    expect(surface.next()).toBe("b");
+    expect(surface.apply({ kind: "probe", cellId: "b" })?.cellId).toBe("b");
+    expect(surface.apply({ kind: "probe", cellId: "c" })?.cellId).toBe("c");
+    expect(surface.next()).toBeUndefined();
+    expect(() => surface.probe("c")).toThrow(/REPLAY_ORDER_VIOLATION/);
+  });
+
+  test("两次 replay 不共享观察对象，且不能沿用陈旧事实", () => {
+    const { store, snapshot, sequence } = frozen();
+    const first = replayEpisode(sequence, { identity: identity(), store, snapshot });
+    const second = replayEpisode(sequence, { identity: identity(), store, snapshot });
+    expect(assertReplayFresh(first, sequence)).toBe(true);
+    expect(assertReplayFresh(second, sequence)).toBe(true);
+    expect(first.observations[0]).not.toBe(second.observations[0]);
+    expect(() =>
+      assertReplayFresh(
+        {
+          ...second,
+          observations: second.observations.map((item, index) =>
+            index === 0 ? { ...item, score: 0.99 } : item
+          ),
+        },
+        sequence
+      )
+    ).toThrow(/STALE_FACT/);
+    expect(() =>
+      assertReplayFresh({ ...second, observations: [...second.observations, ...second.observations] }, sequence)
+    ).toThrow(/REPLAY/);
   });
 });

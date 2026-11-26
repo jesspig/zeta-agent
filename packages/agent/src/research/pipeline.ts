@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { AuditSink } from "@zeta-agent/security";
 import {
   assertReplayInvariants,
@@ -12,6 +13,7 @@ import {
   createABHarness,
   createFitnessEvaluator,
   dominates,
+  paretoFrontier,
   scoreHeldOut,
   type ABComparison,
   type FitnessEvaluation,
@@ -39,9 +41,12 @@ import {
   type PromotionState,
 } from "./promotion";
 import {
+  bindPromotionAuthorization,
+  consumePromotionAuthorization,
   issueEvaluatorSeal,
   issuePromotionSeal,
   isSealedPromotion,
+  type PromotionAuthorizationBinding,
 } from "./seal";
 
 export type PromotionStage =
@@ -130,6 +135,140 @@ export function assertRegressionPassed(report: RegressionReport): true {
   return true;
 }
 
+/** 24 条不变量读取的真实上下文；legacy 看已执行结果，plugin 从冻结事件独立重算。 */
+export interface RegressionContext {
+  readonly candidateId: string;
+  readonly events: readonly EpisodeEvent[];
+  readonly replay: ReplayResult;
+  readonly evaluation: FitnessEvaluation;
+  readonly heldOut: HeldOutResult;
+  readonly ab: ABComparison;
+  readonly snapshotDigest: string;
+}
+
+function probeActions(events: readonly EpisodeEvent[]): readonly { kind: string; cellId: string }[] {
+  const actions: { kind: string; cellId: string }[] = [];
+  for (const event of events) {
+    for (const action of event.batch) {
+      if (action.kind === "probe" || action.kind === "step") {
+        actions.push({ kind: action.kind, cellId: action.cellId });
+      }
+    }
+  }
+  return actions;
+}
+
+function expectedScores(events: readonly EpisodeEvent[]): number[] {
+  const byCell = new Map<string, number>();
+  for (const event of events) {
+    for (const outcome of event.outcomes) byCell.set(outcome.cellId, outcome.failed ? 0 : outcome.score);
+  }
+  return probeActions(events).map((action) => byCell.get(action.cellId) ?? Number.NaN);
+}
+
+function expectedValidity(events: readonly EpisodeEvent[]): boolean[] {
+  const byCell = new Map<string, boolean>();
+  for (const event of events) {
+    for (const outcome of event.outcomes) byCell.set(outcome.cellId, outcome.valid);
+  }
+  return probeActions(events).map((action) => byCell.get(action.cellId) ?? false);
+}
+
+function expectedFailed(events: readonly EpisodeEvent[]): string[] {
+  const ids: string[] = [];
+  for (const event of events) {
+    for (const outcome of event.outcomes) if (outcome.failed) ids.push(outcome.cellId);
+  }
+  return ids;
+}
+
+function safely(check: () => boolean): boolean {
+  try {
+    return check() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 真实执行 24 条不变量（12 条 × legacy/plugin）。每条都是可失败的谓词，
+ * 不接受宿主注入的恒真 gate；failed replay 与空 episode 会在这里被拒绝。
+ */
+export function runCoreInvariants(context: RegressionContext): RegressionReport {
+  const { replay, events, evaluation, heldOut, ab } = context;
+  const scores = expectedScores(events);
+  const validity = expectedValidity(events);
+  const failed = expectedFailed(events);
+  const actions = probeActions(events);
+  const cells = new Set(
+    events.flatMap((event) => [...event.before, ...event.after].map((cell) => cell.id))
+  );
+
+  // legacy：直接审阅本轮 replay 的真实执行结果。
+  const legacy: readonly (() => boolean)[] = [
+    () => replay.spent === replay.order.length,
+    () => new Set(replay.order).size === replay.order.length,
+    () => replay.legal.length === replay.spent && replay.legal.every(Boolean),
+    () => replay.best <= replay.runBest,
+    () => replay.spent <= replay.budget,
+    () => replay.failed.length === 0,
+    () => events.length > 0 && events.every((event) => event.batch.length > 0),
+    () => replay.observations.length === replay.order.length,
+    () => replay.observations.every((item, index) => item.budgetSpent === index + 1),
+    () => replay.identityDigest.length > 0,
+    () => Number.isFinite(evaluation.reward) && evaluation.scoredTraces > 0,
+    () => Number.isFinite(heldOut.score) && Number.isFinite(ab.delta ?? 0),
+  ];
+
+  // plugin：从冻结事件独立重算，不复用 replay 已经给出的可信事实。
+  const plugin: readonly (() => boolean)[] = [
+    () => actions.length === replay.budget,
+    () => actions.map((action) => action.cellId).join("|") === replay.order.join("|"),
+    () =>
+      events.every((event) =>
+        event.outcomes.every(
+          (outcome) =>
+            Number.isFinite(outcome.score) && typeof outcome.valid === "boolean"
+        )
+      ),
+    () => replay.observations.every((item, index) => item.score === scores[index]),
+    () => replay.failed.join("|") === failed.join("|"),
+    () =>
+      events.every(
+        (event) => event.parallelism >= 1 && event.parallelism <= event.batch.length
+      ),
+    () => new Set(events.flatMap((event) => event.outcomes.map((item) => item.cellId))).size ===
+      events.reduce((total, event) => total + event.outcomes.length, 0),
+    () => actions.every((action) => cells.has(action.cellId)),
+    () => replay.observations.every((item, index) => item.valid === validity[index]),
+    () =>
+      events.length === 0 ||
+      replay.identityDigest === identityDigest(events[0]!.identity),
+    () => context.snapshotDigest.length > 0,
+    () => ab.treatmentScore === evaluation.reward,
+  ];
+
+  const results: { id: string; passed: boolean }[] = [];
+  const failedIds: string[] = [];
+  const missingIds: string[] = [];
+  for (let index = 0; index < CORE_INVARIANT_IDS.length; index += 1) {
+    const id = CORE_INVARIANT_IDS[index]!;
+    const check = index % 2 === 0 ? legacy[index / 2] : plugin[(index - 1) / 2];
+    const passed = check === undefined ? false : safely(check);
+    results.push({ id, passed });
+    if (!passed) failedIds.push(id);
+  }
+  for (const id of CORE_INVARIANT_IDS) {
+    if (!results.some((result) => result.id === id)) missingIds.push(id);
+  }
+  return Object.freeze({
+    passed: failedIds.length === 0 && missingIds.length === 0,
+    results: Object.freeze(results),
+    failedIds: Object.freeze(failedIds),
+    missingIds: Object.freeze(missingIds),
+  });
+}
+
 export interface PromotionPipelineOptions {
   readonly identity: EpisodeIdentity;
   readonly store: FrozenStore;
@@ -160,6 +299,8 @@ export interface PromotionRequest {
   readonly observationKeys: readonly string[];
   /** HMR generation 作为版本谱系标签，必须为正整数。 */
   readonly generation: number;
+  /** 一次性授权 nonce；缺省由 pipeline 生成，禁止外部复用同一授权。 */
+  readonly nonce?: string;
 }
 
 export interface HeldOutResult {
@@ -180,6 +321,14 @@ export interface PromotionOutcome {
   readonly reasons: readonly string[];
   readonly stages: readonly PromotionStage[];
   readonly generation: number;
+  /** 本轮真实执行的 24 条不变量报告，作为回归证据随结果返回。 */
+  readonly regression: RegressionReport;
+  /** 在 held-out 评分之前算出的 search 阶段 Pareto 前沿。 */
+  readonly frontier: readonly string[];
+  /** held-out 评分次数；正常路径恒为 1，绝不重复评分。 */
+  readonly heldOutEvaluations: number;
+  /** 一次性授权绑定的 nonce，便于审计追踪。 */
+  readonly nonce: string;
 }
 
 export interface PromotionPipeline {
@@ -204,6 +353,15 @@ function emptyReplay(identity: EpisodeIdentity): ReplayResult {
 
 function emptyEvaluation(): FitnessEvaluation {
   return Object.freeze({ reward: 0, auc: 0, penalty: 0, scoredTraces: 0 });
+}
+
+function emptyRegressionReport(): RegressionReport {
+  return Object.freeze({
+    passed: false,
+    results: Object.freeze([]),
+    failedIds: Object.freeze([]),
+    missingIds: CORE_INVARIANT_IDS,
+  });
 }
 
 function sealedCandidate(
@@ -277,6 +435,18 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
   return {
     stages: PROMOTION_STAGES,
     run(request) {
+      if (request.nonce !== undefined && (typeof request.nonce !== "string" || request.nonce.length === 0)) {
+        throw new Error("INVALID_PROMOTION_NONCE");
+      }
+      const nonce = request.nonce ?? randomBytes(16).toString("hex");
+      const authorizationBinding = (): PromotionAuthorizationBinding =>
+        Object.freeze({
+          candidateId: request.candidateId,
+          artifactDigest: digest,
+          snapshotDigest: snapshot.manifest.digest,
+          identityDigest: identityDigest(identity),
+          nonce,
+        });
       const stages: PromotionStage[] = [];
       const reasons: string[] = [];
       const advance = (stage: PromotionStage): void => {
@@ -305,6 +475,9 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
         false,
         identityDigest(identity)
       );
+      let heldOutEvaluations = 0;
+      let frontierIds: readonly string[] = Object.freeze([]);
+      let regression: RegressionReport = emptyRegressionReport();
 
       const reject = (reason: PromotionRejectionReason): PromotionOutcome => {
         reasons.push(reason);
@@ -322,6 +495,10 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
           reasons: Object.freeze(reasons),
           stages: Object.freeze(stages),
           generation: request.generation,
+          regression,
+          frontier: frontierIds,
+          heldOutEvaluations,
+          nonce,
         });
       };
 
@@ -348,7 +525,7 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
           snapshot,
           incumbentScore: incumbent?.fitness,
         });
-        assertReplayInvariants(replay);
+        assertReplayInvariants(replay, { events: request.events });
       } catch (error) {
         throw new Error(
           `PIPELINE_BUDGET_VIOLATION: ${error instanceof Error ? error.message : String(error)}`
@@ -376,7 +553,34 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
         identityDigest: identityDigest(identity),
       });
 
+      // A/B 结果先算出，供回归不变量读取；阶段推进仍在 compare。
+      const harness = createABHarness();
+      if (incumbent !== undefined) harness.control.record(incumbent.id, incumbent.fitness);
+      harness.treatment.record(request.candidateId, evaluation.reward);
+      ab = compareAB(harness, incumbent?.id ?? "__no-incumbent__", request.candidateId);
+
       advance("eligibility");
+      // held-out 只能在 search 阶段前沿确定之后评一次；前沿本身只用 search 目标。
+      const searchKeys = objectiveKeys.filter((key) => key !== "heldOut");
+      const frontierKeys = searchKeys.length > 0 ? searchKeys : objectiveKeys;
+      const searchCandidate = objectiveVector(request.candidateId, request.objectives, frontierKeys);
+      const searchIncumbent =
+        incumbent === undefined
+          ? undefined
+          : objectiveVector(
+              incumbent.id,
+              Object.fromEntries(
+                frontierKeys.map((key) => [key, key === "reward" ? incumbent.fitness : 0])
+              ),
+              frontierKeys
+            );
+      frontierIds = Object.freeze(
+        paretoFrontier(
+          [searchCandidate, ...(searchIncumbent === undefined ? [] : [searchIncumbent])],
+          frontierKeys
+        ).map((vector) => vector.id)
+      );
+      heldOutEvaluations += 1;
       heldOut = Object.freeze({
         score: scoreHeldOut(request.heldOutScores, request.split),
         threshold: heldOutThreshold,
@@ -409,14 +613,21 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
       }
 
       advance("regression");
-      const regression = regressionGate.verify(request.candidateId);
-      if (!regression.passed) return reject("regression-failed");
+      // 真实 24 条不变量是权威回归依据；注入的 gate 只作为附加适配器，
+      // 即使宿主注入恒真 gate 也无法绕过这里的真实执行。
+      regression = runCoreInvariants({
+        candidateId: request.candidateId,
+        events: request.events,
+        replay,
+        evaluation,
+        heldOut,
+        ab,
+        snapshotDigest: snapshot.manifest.digest,
+      });
+      const injectedRegression = regressionGate.verify(request.candidateId);
+      if (!regression.passed || !injectedRegression.passed) return reject("regression-failed");
 
       advance("compare");
-      const harness = createABHarness();
-      if (incumbent !== undefined) harness.control.record(incumbent.id, incumbent.fitness);
-      harness.treatment.record(request.candidateId, evaluation.reward);
-      ab = compareAB(harness, incumbent?.id ?? "__no-incumbent__", request.candidateId);
       if (incumbent !== undefined && !ab.eligible) return reject("not-strictly-better");
 
       advance("commit");
@@ -426,7 +637,10 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
         true,
         identityDigest(identity)
       );
+      const binding = authorizationBinding();
+      bindPromotionAuthorization(candidate.seal, binding);
       const state = promote(baseState, candidate);
+      consumePromotionAuthorization(candidate.seal, binding);
       const decision = state.history[state.history.length - 1]!;
       record("RESEARCH_PROMOTION_COMMITTED", request, digest);
       return Object.freeze({
@@ -441,6 +655,10 @@ export function createPromotionPipeline(options: PromotionPipelineOptions): Prom
         reasons: Object.freeze(reasons),
         stages: Object.freeze(stages),
         generation: request.generation,
+        regression,
+        frontier: frontierIds,
+        heldOutEvaluations,
+        nonce,
       });
     },
   };

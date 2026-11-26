@@ -24,6 +24,7 @@ const CASES = [
   "./red-cases/session-cas-lease-and-bad-frame.case.mjs",
   "./red-cases/mcp-schema-oauth.case.mjs",
   "./red-cases/t20-profile-conformance.case.mjs",
+  "./red-cases/t22-evidence-observability-orchestration.case.mjs",
 ];
 
 const { TIMEOUT_MS } = await import("./red-cases/common.mjs");

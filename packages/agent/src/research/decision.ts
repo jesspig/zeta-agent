@@ -330,6 +330,69 @@ export function createLiveSurface(options: LiveSurfaceOptions): DecisionSurface 
   };
 }
 
+/**
+ * 有序 replay surface：只允许按冻结事件的探测顺序推进，乱序/非法动作直接抛错。
+ * 每次 probe 都从冻结证据重新计算观察，绝不复用上一次 replay 的观察对象。
+ */
+export interface OrderedReplaySurface extends DecisionSurface {
+  readonly expectedOrder: readonly string[];
+  next(): string | undefined;
+  apply(action: DecisionAction): ProbeView | undefined;
+}
+
+export function createOrderedReplaySurface(options: ReplaySurfaceOptions): OrderedReplaySurface {
+  const inner = createReplaySurface(options);
+  const expectedOrderIds: string[] = [];
+  for (const event of resolveFrozen(options).events) {
+    for (const action of event.batch) {
+      if (action.kind === "probe" || action.kind === "step") expectedOrderIds.push(action.cellId);
+    }
+  }
+  const expectedOrder = Object.freeze(expectedOrderIds);
+  let cursor = 0;
+
+  const surface: OrderedReplaySurface = {
+    mode: inner.mode,
+    identity: inner.identity,
+    get budget() {
+      return inner.budget;
+    },
+    get spent() {
+      return inner.spent;
+    },
+    cells: () => inner.cells(),
+    isEvaluated: (cellId) => inner.isEvaluated(cellId),
+    legal(action) {
+      if (!isRecord(action)) return false;
+      if (action.kind === "control") return inner.legal(action);
+      if (action.kind !== "probe" && action.kind !== "step") return false;
+      return action.cellId === expectedOrder[cursor];
+    },
+    expectedOrder,
+    next: () => expectedOrder[cursor],
+    probe(cellId) {
+      const expected = expectedOrder[cursor];
+      if (expected === undefined || cellId !== expected) {
+        throw new Error(`REPLAY_ORDER_VIOLATION: ${cellId}`);
+      }
+      const view = inner.probe(cellId);
+      cursor += 1;
+      return view;
+    },
+    observe: (cellId) => inner.observe(cellId),
+    verdict: (cellId) => inner.verdict(cellId),
+    apply(action) {
+      if (!surface.legal(action)) {
+        const label = isRecord(action) ? String(action.kind) : "unknown";
+        throw new Error(`ILLEGAL_ACTION: ${label}`);
+      }
+      if (action.kind === "control") return undefined;
+      return surface.probe(action.cellId);
+    },
+  };
+  return surface;
+}
+
 export const EPISODE_LOG_PATH = "episodes.json";
 
 export interface EpisodeOutcome {
@@ -626,9 +689,36 @@ export function replayEpisode(events: readonly EpisodeEvent[], options: ReplayOp
   });
 }
 
+/** 新鲜度：每条观察都由本轮 probe 重新提交，不复用上一次 replay 的可信事实。 */
+export function assertReplayFresh(
+  result: ReplayResult,
+  events: readonly EpisodeEvent[]
+): true {
+  if (result.observations.length !== result.order.length) {
+    throw new Error("REPLAY_FRESHNESS_OBSERVATION_COUNT");
+  }
+  if (new Set(result.observations).size !== result.observations.length) {
+    throw new Error("REPLAY_REUSED_FACT");
+  }
+  const byCell = new Map<string, EpisodeOutcome>();
+  for (const event of events) {
+    for (const outcome of event.outcomes) byCell.set(outcome.cellId, outcome);
+  }
+  for (const observation of result.observations) {
+    const outcome = byCell.get(observation.cellId);
+    if (outcome === undefined) throw new Error("REPLAY_FRESHNESS_OUTCOME_MISSING");
+    const expected = outcome.failed ? 0 : outcome.score;
+    if (observation.score !== expected || observation.valid !== outcome.valid) {
+      throw new Error("REPLAY_STALE_FACT");
+    }
+  }
+  return true;
+}
+
 export interface ReplayInvariantOptions {
   readonly expectedBudget?: number;
   readonly expectedSpent?: number;
+  readonly events?: readonly EpisodeEvent[];
 }
 
 export function assertReplayInvariants(
@@ -652,6 +742,7 @@ export function assertReplayInvariants(
       throw new Error("REPLAY_FAILED_ATTEMPT_SCORED");
     }
   }
+  if (options.events !== undefined) assertReplayFresh(result, options.events);
   return true;
 }
 

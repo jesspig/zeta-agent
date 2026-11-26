@@ -10,6 +10,7 @@ import {
   dominates,
   evaluateFitness,
   paretoFrontier,
+  referenceFitness,
   scoreHeldOut,
   type FitnessPoint,
   type FitnessTrace,
@@ -68,6 +69,15 @@ describe("T-25 fitness evaluator：AUC/惩罚/可插拔", () => {
     expect(() => evaluateFitness(sealed([trace({ runBest: -1 })]))).toThrow(
       /INVALID_FITNESS/
     );
+  });
+
+  test("参考公式黄金向量：AUC=1/2、惩罚=5/6、reward=7/24", () => {
+    const golden = referenceFitness(sealed());
+    expect(golden.auc).toBeCloseTo(0.5, 10);
+    expect(golden.penalty).toBeCloseTo(5 / 6, 10);
+    expect(golden.reward).toBeCloseTo(7 / 24, 10);
+    expect(golden.scoredTraces).toBe(1);
+    expect(createFitnessEvaluator().evaluate(sealed())).toEqual(golden);
   });
 });
 
