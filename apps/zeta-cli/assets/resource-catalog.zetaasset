@@ -1,9 +1,33 @@
 {
   "schema": "zeta-local-resources/1",
   "prompts": [
-    { "id": "system:local", "encoding": "utf8", "path": "prompts/system.md" },
-    { "id": "skills:registry", "encoding": "utf8", "path": "skills/index.json" }
+    {
+      "id": "system:local",
+      "resourceId": "system-prompt",
+      "encoding": "utf8",
+      "path": "prompts/system.md",
+      "bytes": 630,
+      "sha256": "453cbacc323af55eb3afa3567bf4c65409de171c7f6bc0c6948e276b1d85e6d9"
+    }
   ],
-  "skills": [{ "id": "builtin:read", "source": "agent:assembly" }],
-  "schemaFiles": [{ "id": "config:schema", "encoding": "utf8", "path": "schema/config.json" }]
+  "skills": [
+    {
+      "id": "skills:registry",
+      "resourceId": "skills-index",
+      "encoding": "utf8",
+      "path": "skills/builtins/SKILL.md",
+      "bytes": 542,
+      "sha256": "96014f15fb91a360d3c3774865babc1a4633f21addc85425f4d67c558899a1c9"
+    }
+  ],
+  "schemaFiles": [
+    {
+      "id": "config:schema",
+      "resourceId": "config-schema",
+      "encoding": "utf8",
+      "path": "schema/config.zetaasset",
+      "bytes": 482,
+      "sha256": "c25c56f6e378059ee4bfb4a602df570a8b393afae4a3ebaf61154dd4a3b84a24"
+    }
+  ]
 }

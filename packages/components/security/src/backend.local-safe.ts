@@ -60,6 +60,8 @@ export type WriteStage =
 export type OpenRaceStage = "after-lstat-before-open" | "after-open";
 
 export interface LocalSafeBackendOptions {
+  /** 后端自述名；local-full 复用同一真实边界时使用自己的名字。 */
+  readonly name?: string;
   readonly allowedDirectories?: readonly string[];
   readonly platform?: NodePlatform;
   /** 故障注入：返回 true 时写入在触碰宿主前失败，用于回滚测试。 */
@@ -291,6 +293,7 @@ function defaultSpawn(platform: NodePlatform): SpawnImpl {
 
 /** 结构化文件/进程边界：所有文件 I/O 与进程生成都封装在此，工具层不持有宿主 I/O。 */
 export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): StructuredExecutionBackend {
+  const name = options.name ?? "local-safe";
   const allowed = options.allowedDirectories ?? [];
   const platform = options.platform ?? currentPlatform();
   const now = options.now ?? Date.now;
@@ -302,7 +305,7 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
       : { operations: { ...support.operations.operations, ...options.operations } };
 
   const record = (operation: OperationName, target: string | undefined, ok: boolean): BackendEvidence => {
-    const entry: BackendEvidence = { backend: "local-safe", operation, target, at: now(), ok };
+    const entry: BackendEvidence = { backend: name, operation, target, at: now(), ok };
     evidenceLog.push(entry);
     return entry;
   };
@@ -757,13 +760,30 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
   };
 
   return createStructuredExecutionBackend({
-    name: "local-safe",
+    name,
     capabilities: { ...support.capabilities } as Capabilities,
     executor: () => ({ exitCode: 1, stdout: "", stderr: "SHELL_UNSUPPORTED_ON_LOCAL_SAFE", isolated: null }),
     operations,
     file,
     shell,
     evidence: () => [...evidenceLog],
+  });
+}
+
+/**
+ * local-full：复用同一真实文件/进程边界，但显式启用 shell.start。
+ * 不是把 local-safe 改成 active，而是用 profile 声明驱动真实执行器：
+ * 声明 active 的每一项都由本文件的真实实现支撑，失败仍关闭。
+ */
+export function createLocalFullBackend(options: LocalSafeBackendOptions = {}): StructuredExecutionBackend {
+  const support = profileSupport("local-full", options.platform ?? currentPlatform());
+  return createLocalSafeBackend({
+    ...options,
+    name: options.name ?? "local-full",
+    operations: {
+      ...support.operations.operations,
+      ...options.operations,
+    },
   });
 }
 
@@ -1060,7 +1080,7 @@ export function createStructuredRecordingBackend(options: StructuredRecordingOpt
   });
 }
 
-/** 按 profile 构造后端：只有 local-safe 暴露真实文件边界；其他档位明确失败关闭。 */
+/** 按 profile 构造后端：local-safe 收敛、local-full 真实可执行；沙箱档位明确失败关闭。 */
 export function createProfileBackend(
   profile: Parameters<typeof profileSupport>[0],
   options: { readonly platform?: NodePlatform; readonly allowedDirectories?: readonly string[] } = {}
@@ -1068,6 +1088,9 @@ export function createProfileBackend(
   const support = profileSupport(profile, options.platform ?? currentPlatform());
   if (profile === "local-safe") {
     return createLocalSafeBackend({ allowedDirectories: options.allowedDirectories ?? [] });
+  }
+  if (profile === "local-full") {
+    return createLocalFullBackend({ allowedDirectories: options.allowedDirectories ?? [] });
   }
   return createStructuredExecutionBackend({
     name: profile,

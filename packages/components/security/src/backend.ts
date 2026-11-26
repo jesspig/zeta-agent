@@ -375,10 +375,18 @@ export function createUnconnectedBackend(options: UnconnectedBackendOptions = {}
 }
 
 /** 后端档位与平台支持矩阵。 */
-export type BackendProfile = "local-safe" | "inproc-vm" | "bwrap-session" | "container" | "remote" | "microvm";
+export type BackendProfile =
+  | "local-safe"
+  | "local-full"
+  | "inproc-vm"
+  | "bwrap-session"
+  | "container"
+  | "remote"
+  | "microvm";
 
 export const BACKEND_PROFILES: readonly BackendProfile[] = Object.freeze([
   "local-safe",
+  "local-full",
   "inproc-vm",
   "bwrap-session",
   "container",
@@ -410,6 +418,42 @@ export interface ProfileSupport {
   readonly reason: string | null;
 }
 
+/**
+ * 系统级沙箱支持报告（T-20 / F-T13-01）。
+ * 未接入真实 seccomp/jail 时一律 unsupported；Windows 明确标为平台受限。
+ * 禁止用合成 marker 冒充 active：该报告只描述事实，不产生任何能力。
+ */
+export interface SystemSandboxSupport {
+  readonly state: "active" | "degraded" | "unsupported";
+  readonly platform: NodePlatform;
+  readonly platformLimited: boolean;
+  readonly mechanism: string | null;
+  readonly reason: string;
+}
+
+export function systemSandboxSupport(
+  platform: NodePlatform = currentPlatform()
+): SystemSandboxSupport {
+  if (platform === "win32") {
+    return {
+      state: "unsupported",
+      platform,
+      platformLimited: true,
+      mechanism: null,
+      reason:
+        "PLATFORM_LIMITED: Windows 无 seccomp/jail 系统级沙箱；插件在普通子进程 vm 内求值，失败关闭，不声明 active",
+    };
+  }
+  return {
+    state: "unsupported",
+    platform,
+    platformLimited: false,
+    mechanism: null,
+    reason:
+      "NO_REAL_SYSTEM_SANDBOX: 未接入 bwrap/seccomp/microvm；插件在普通子进程 vm 内求值，失败关闭，不声明 active",
+  };
+}
+
 const ALL_UNSUPPORTED: OperationCapabilityReport = Object.freeze({
   operations: Object.freeze({
     "file.read": "unsupported",
@@ -427,6 +471,33 @@ const ALL_UNSUPPORTED: OperationCapabilityReport = Object.freeze({
  * Windows 下隔离/seccomp 明确 unsupported；其他平台为未接线的 degraded，同样失败关闭。
  */
 export function profileSupport(profile: BackendProfile, platform: NodePlatform = currentPlatform()): ProfileSupport {
+  if (profile === "local-full") {
+    // 真实 shell 执行器已接入（T-12），文件系统边界为 active；
+    // isolation/seccomp 未引入系统级沙箱，必须如实标记 unsupported，不能声明 active。
+    return {
+      profile,
+      platform,
+      capabilities: {
+        isolation: "unsupported",
+        seccomp: "unsupported",
+        fsConfinement: "active",
+        auditSink: "unsupported",
+        egressDefaultDeny: "unsupported",
+      },
+      operations: {
+        operations: {
+          "file.read": "active",
+          "file.list": "active",
+          "file.write": "active",
+          "file.applyPatch": "active",
+          "shell.start": "active",
+          "session.open": "active",
+          cleanup: "active",
+        },
+      },
+      reason: null,
+    };
+  }
   if (profile === "local-safe") {
     return {
       profile,

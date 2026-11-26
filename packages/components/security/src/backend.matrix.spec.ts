@@ -23,7 +23,7 @@ describe("T-09 后端支持矩阵", () => {
 
   test("BACKEND_PROFILES 覆盖 local-safe 与四个沙箱档位", () => {
     expect([...BACKEND_PROFILES].sort()).toEqual(
-      [...sandboxProfiles, "local-safe"].sort() as BackendProfile[]
+      [...sandboxProfiles, "local-safe", "local-full"].sort() as BackendProfile[]
     );
   });
 

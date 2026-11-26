@@ -14,6 +14,7 @@ export * from "./plugins/isolated-evaluator";
 export * from "./session/surface";
 export * from "./session/recap";
 export * from "./session/offload";
+export * from "./session/file-workspace-store";
 export {
   PERMISSION_BEHAVIORS,
   createPermissionGuard,

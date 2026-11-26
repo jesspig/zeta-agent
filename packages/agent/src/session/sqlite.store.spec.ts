@@ -40,10 +40,25 @@ function create(options?: ConformanceFactoryOptions) {
     path: options?.destination ?? primaryPath,
     sessionId: options?.sessionId,
     faults: options?.faults,
+    writerId: options?.writerId,
+    leaseOwner: options?.leaseOwner,
+    leaseTtlMs: options?.leaseTtlMs,
+    retryMs: options?.retryMs,
+    now: options?.now,
   });
 }
 const factory = Object.assign(create, {
   destination: () => join(primaryPath ?? tempPath(), "..", "clone.sqlite"),
+  seedBadFrame: () => {
+    const db = new Database(primaryPath ?? tempPath());
+    try {
+      db.query(
+        "INSERT INTO frames (id, seq, parent_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run("torn", 999, null, "message", "{broken", "bad");
+    } finally {
+      db.close();
+    }
+  },
 });
 
 runSessionStoreConformance("SQLite", factory);

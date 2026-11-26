@@ -31,6 +31,57 @@ function decodeBase64(value: string): Uint8Array {
   return new Uint8Array([...atob(value)].map((char) => char.charCodeAt(0)));
 }
 
+/** prompts/get 结果归一化为 MCP 工具结果；二进制块原样保留，交由 sink 门禁处理。 */
+export function promptResultToCallResult(result: unknown): McpCallResult {
+  if (!isRecord(result)) throw new Error("MCP_INVALID_PROMPT_RESULT");
+  if (Array.isArray(result.content)) return { content: result.content as readonly unknown[] };
+  if (!Array.isArray(result.messages)) return { content: [] };
+  const content: unknown[] = [];
+  for (const message of result.messages) {
+    if (!isRecord(message)) continue;
+    const raw = message.content;
+    if (typeof raw === "string") {
+      content.push({ type: "text", text: raw });
+      continue;
+    }
+    if (!Array.isArray(raw)) continue;
+    for (const part of raw) {
+      if (!isRecord(part)) continue;
+      if (part.type === "text" && typeof part.text === "string") {
+        content.push({ type: "text", text: part.text });
+      } else if (part.type === "image" || part.type === "audio" || part.type === "resource") {
+        content.push(part);
+      } else {
+        content.push({ type: "text", text: JSON.stringify(part) });
+      }
+    }
+  }
+  return { content };
+}
+
+/** resources/read 结果归一化：text 进模型，blob 必须经 sink 落盘。 */
+export function resourceResultToCallResult(result: unknown): McpCallResult {
+  if (!isRecord(result)) throw new Error("MCP_INVALID_RESOURCE_RESULT");
+  if (Array.isArray(result.content)) return { content: result.content as readonly unknown[] };
+  if (!Array.isArray(result.contents)) return { content: [] };
+  const content = result.contents.map((raw) => {
+    if (!isRecord(raw)) return { type: "text", text: "" };
+    if (typeof raw.text === "string") return { type: "text", text: raw.text };
+    if (typeof raw.blob === "string") {
+      return {
+        type: "resource",
+        resource: {
+          ...(typeof raw.uri === "string" ? { uri: raw.uri } : {}),
+          ...(typeof raw.mimeType === "string" ? { mimeType: raw.mimeType } : {}),
+          blob: raw.blob,
+        },
+      };
+    }
+    return { type: "text", text: JSON.stringify(raw) };
+  });
+  return { content };
+}
+
 /**
  * MCP 工具结果的双投影：text 块进入模型 content；structuredContent 只留给程序；
  * image/audio/resource 等二进制内容必须经 sink 落盘，模型只看到不可伪造的 ref。

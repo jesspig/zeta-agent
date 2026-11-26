@@ -72,6 +72,10 @@ interface ChatChunk {
 }
 
 function toOpenAiParameters(schema: AgentToolSchema): Record<string, unknown> {
+  // MCP 等插件提供的原始 JSON Schema 原样透传，保留嵌套对象/数组、required 与 description。
+  if (schema.inputSchema !== undefined && typeof schema.inputSchema === "object" && schema.inputSchema !== null) {
+    return schema.inputSchema as Record<string, unknown>;
+  }
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   for (const parameter of schema.parameters) {

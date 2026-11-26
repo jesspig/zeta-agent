@@ -143,16 +143,18 @@ function toAnthropicTools(tools: AgentStreamRequest["tools"]): unknown[] | undef
   return tools.map((schema) => ({
     name: schema.name,
     description: schema.description,
-    input_schema: {
-      type: "object",
-      properties: Object.fromEntries(
-        schema.parameters.map((parameter) => [
-          parameter.name,
-          { type: parameter.type, description: parameter.description },
-        ]),
-      ),
-      required: schema.parameters.filter((parameter) => parameter.required === true).map((p) => p.name),
-    },
+    input_schema: schema.inputSchema !== undefined && typeof schema.inputSchema === "object" && schema.inputSchema !== null
+      ? schema.inputSchema
+      : {
+          type: "object",
+          properties: Object.fromEntries(
+            schema.parameters.map((parameter) => [
+              parameter.name,
+              { type: parameter.type, description: parameter.description },
+            ]),
+          ),
+          required: schema.parameters.filter((parameter) => parameter.required === true).map((p) => p.name),
+        },
   }));
 }
 

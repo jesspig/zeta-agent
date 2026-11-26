@@ -1,7 +1,7 @@
 import { isCriticalLayerDegraded, type ExecutionBackend } from "@zeta-agent/security";
 import type { Disposer } from "@zeta-agent/framework";
 import type { McpServerConfig } from "./config";
-import { createMcpProtocol } from "./protocol";
+import { createMcpProtocol, type McpInitializeOptions } from "./protocol";
 import { nextPageCursor, paginate } from "./transport";
 
 export interface McpToolAnnotations {
@@ -94,6 +94,8 @@ export interface McpPromptDescriptor {
 
 export interface McpConnection {
   readonly server: string;
+  /** 握手时服务器声明的能力；prompts/resources/roots 的注册一律以此门控。 */
+  readonly serverCapabilities: Readonly<Record<string, unknown>>;
   /** 返回当前已知工具清单（通知到达时已先刷新）。 */
   listTools(): Promise<readonly McpToolDescriptor[]>;
   /** 显式刷新；tools/list_changed 时由连接自动调用。 */
@@ -119,7 +121,7 @@ export interface McpConnectionOptions {
   /** tools/list_changed 合并窗口（毫秒）；缺省 10ms。 */
   readonly toolsChangedDebounceMs?: number;
   readonly pageDeadlineMs?: number;
-  readonly handshake?: McpRequestOptions;
+  readonly handshake?: McpInitializeOptions;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -224,6 +226,7 @@ export async function createMcpConnection(options: McpConnectionOptions): Promis
 
   return {
     server: server.name,
+    serverCapabilities: protocol.serverCapabilities,
     listTools: async () => tools,
     async refresh() {
       generation += 1;

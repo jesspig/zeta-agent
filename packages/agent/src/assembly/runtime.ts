@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createContext, defineComponent, type ContextFiber } from "@zeta-agent/framework";
 import {
   createPluginHotReloader,
@@ -7,10 +9,10 @@ import {
 } from "../plugins/hot-reload";
 import type { PrincipalInput } from "@zeta-agent/capabilities";
 import {
-  createLocalSafeBackend,
   createProfileBackend,
   resolveStructuredBackend,
   type BackendProfile,
+  type StructuredExecutionBackend,
 } from "@zeta-agent/security";
 import {
   createAgent,
@@ -26,15 +28,23 @@ import {
   type ProviderBrokerOptions,
   type ProviderRegistrationOptions,
 } from "../providers/broker";
-import { createResourceRegistry, type ResourceRegistry } from "../resources/registry";
+import { createResourceRegistry, type ResourceEntry, type ResourceRegistry } from "../resources/registry";
+import { installResourcePlugin, type ResourcePluginHandle } from "../resources/plugin";
 import { createJsonlSessionStore } from "../session/jsonl-store";
 import { createSqliteSessionStore } from "../session/sqlite-store";
 import type { SessionStore } from "../session/store";
+import {
+  createFileWorkspaceStore,
+  type CompactionBudget,
+  type CompactionMode,
+  type WorkspaceStore,
+} from "@zeta-agent/agent-framework";
 import {
   createTenantGovernance,
   type TenantGovernance,
   type TenantScope,
 } from "../tenant/governance";
+import { createExperienceStore } from "../research/experience";
 import { resolveAssemblyProfile, type AssemblyProfile } from "./builtins";
 import {
   createAssemblyManifest,
@@ -42,7 +52,12 @@ import {
   type InstalledResource,
 } from "./manifest";
 import { diagnoseCapabilities } from "./profile";
-import { createRuntimeProtocol, type RuntimeProtocol } from "./protocol";
+import { diagnoseProfilePolicy, policyForProfile } from "./profile-policy";
+import {
+  createRuntimeProtocol,
+  createStoreSessionControl,
+  type RuntimeProtocol,
+} from "./protocol";
 
 export interface DefaultRuntimeOptions {
   readonly streamFn?: AgentStreamFn;
@@ -59,6 +74,13 @@ export interface DefaultRuntimeOptions {
   /** 按路径创建正式后端；不传时保持 T-10 的纯内存会话零回归。 */
   readonly sessionStorePath?: string;
   readonly sessionStoreBackend?: "jsonl" | "sqlite";
+  /** 文件持久 workspace 根目录；提供后压缩块跨进程可取回。 */
+  readonly workspaceStorePath?: string;
+  /** 显式开启压缩并指定预算；未提供时保持既有装配零回归。 */
+  readonly compactionBudget?: CompactionBudget;
+  readonly compactionMode?: CompactionMode;
+  /** 压缩外置块与工具输出的字节上限；与阈值联动。 */
+  readonly compactionMaxOutputBytes?: number;
   readonly permissionGate?: AgentOptions["permissionGate"];
   readonly approvalChannel?: AgentOptions["approvalChannel"];
   readonly egressPolicy?: AgentOptions["egressPolicy"];
@@ -82,6 +104,8 @@ export interface DefaultRuntimeOptions {
   }[];
   readonly provider?: string;
   readonly model?: string;
+  /** 单文件嵌入资源（prompts/skills/schema）；与磁盘资源合并进同一注册表。 */
+  readonly embeddedResources?: readonly ResourceEntry[];
 }
 
 export interface DefaultRuntime {
@@ -91,12 +115,17 @@ export interface DefaultRuntime {
   readonly profile: AssemblyProfile;
   readonly resources: ResourceRegistry;
   readonly sessionStore: SessionStore | undefined;
+  readonly workspaceStore: WorkspaceStore | undefined;
   readonly services: Readonly<Record<string, unknown>>;
   readonly rootFiber: ContextFiber;
   readonly tenantScope: TenantScope | undefined;
   readonly governance: TenantGovernance | undefined;
   readonly hotReload: PluginHotReloader | undefined;
   readonly providerBroker: ProviderBroker;
+  /** 真实安全后端；暴露供 profile conformance 与 shell 真实验收使用。 */
+  readonly backend: StructuredExecutionBackend;
+  /** 按 profile 安装的真实资源 coeffect + watcher；local-safe 不安装。 */
+  readonly resourceWatcher: ResourcePluginHandle | undefined;
   dispose(): Promise<void>;
 }
 
@@ -107,23 +136,30 @@ export interface DefaultRuntime {
  */
 export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}): Promise<DefaultRuntime> {
   const profile = resolveAssemblyProfile(options.profile);
+  const policy = policyForProfile(profile);
   const allowedDirectories = options.allowedDirectories ?? [process.cwd()];
-  const backendProfile = options.backendProfile ?? "local-safe";
-  const securityBackend =
-    backendProfile === "local-safe"
-      ? createLocalSafeBackend({ allowedDirectories })
-      : createProfileBackend(backendProfile, { allowedDirectories });
+  const agentRoot = options.agentRoot ?? join(process.cwd(), ".zeta-agent");
+  const projectRoot = options.projectRoot ?? process.cwd();
+  // profile 声明与后端执行必须同源：显式冲突直接失败关闭，禁止两套装配。
+  if (options.backendProfile !== undefined && options.backendProfile !== policy.backend) {
+    throw new Error(
+      `PROFILE_BACKEND_MISMATCH: ${profile} requires ${policy.backend}, got ${options.backendProfile}`
+    );
+  }
+  const backendProfile: BackendProfile = policy.backend;
+  const securityBackend = createProfileBackend(backendProfile, { allowedDirectories });
   const structuredBackend = resolveStructuredBackend(securityBackend, allowedDirectories);
-  const diagnostics = diagnoseCapabilities(
-    profile,
-    securityBackend.capabilities(),
-    structuredBackend.operations
-  );
+  const diagnostics = [
+    ...diagnoseCapabilities(profile, securityBackend.capabilities(), structuredBackend.operations),
+    ...diagnoseProfilePolicy(profile),
+  ];
 
   const resources = createResourceRegistry({
-    agentRoot: options.agentRoot ?? join(process.cwd(), ".zeta-agent"),
-    projectRoot: options.projectRoot ?? process.cwd(),
+    agentRoot,
+    projectRoot,
+    ...(options.embeddedResources === undefined ? {} : { embedded: options.embeddedResources }),
   });
+
   const installed = resources.discover().entries;
   const installedResources: readonly InstalledResource[] = installed.map((entry) => ({
     id: entry.id,
@@ -137,26 +173,39 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     diagnostics,
   });
 
-  const ownsGovernance = options.tenantGovernance === undefined && options.principalInput !== undefined;
-  // runtime 自身只承载一个 principal：显式声明单租户默认路径，不借共享回退。
+  const ownsGovernance =
+    options.tenantGovernance === undefined &&
+    (options.principalInput !== undefined || policy.tenantMode === "multi-tenant");
+  // runtime 自身只承载一个 principal；multi-tenant profile 强制 origin 与 per-realm 工厂。
   const governance = options.tenantGovernance ?? (ownsGovernance
     ? createTenantGovernance({
-        mode: "single-tenant",
+        mode: policy.tenantMode,
+        ...(policy.tenantMode === "multi-tenant"
+          ? { createExperienceStore: () => createExperienceStore() }
+          : {}),
         ...(options.tokensPerTenant === undefined ? {} : { tokensPerTenant: options.tokensPerTenant }),
       })
     : undefined);
   const tenantScope = governance?.resolve(options.principalInput ?? {});
 
-  const sessionId = options.sessionId ?? `zeta-${process.pid}`;
+  // local-safe 保持 T-10 内存零回归；其余 profile 默认使用真实持久 SessionStore。
+  const sessionStorePath =
+    options.sessionStorePath ?? (policy.persistentSession ? join(agentRoot, "session.jsonl") : undefined);
+  if (sessionStorePath !== undefined) mkdirSync(dirname(sessionStorePath), { recursive: true });
+  const sessionId =
+    options.sessionId ??
+    (sessionStorePath === undefined
+      ? `zeta-${process.pid}`
+      : `zeta:${createHash("sha256").update(sessionStorePath).digest("hex").slice(0, 16)}`);
   const explicitSessionStore = options.sessionStore ?? tenantScope?.sessionStore;
-  const ownsSessionStore = explicitSessionStore === undefined && options.sessionStorePath !== undefined;
+  const ownsSessionStore = explicitSessionStore === undefined && sessionStorePath !== undefined;
   const sessionStore =
     explicitSessionStore ??
-    (options.sessionStorePath === undefined
+    (sessionStorePath === undefined
       ? undefined
       : options.sessionStoreBackend === "sqlite"
-        ? createSqliteSessionStore({ path: options.sessionStorePath, sessionId })
-        : createJsonlSessionStore({ path: options.sessionStorePath, sessionId }));
+        ? createSqliteSessionStore({ path: sessionStorePath, sessionId })
+        : createJsonlSessionStore({ path: sessionStorePath, sessionId }));
 
   const providerBroker = options.providerBroker ?? createProviderBroker({
     ...(options.providerRoutes === undefined ? {} : { routes: options.providerRoutes }),
@@ -168,10 +217,23 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     providerBroker.register(registration.id, registration.streamFn, registration.options);
   }
 
+  const workspaceStore = options.workspaceStorePath === undefined
+    ? undefined
+    : createFileWorkspaceStore({ root: options.workspaceStorePath });
+  const compactionEnabled = options.compactionBudget !== undefined || workspaceStore !== undefined;
+  const compaction = compactionEnabled
+    ? {
+        budget: options.compactionBudget ?? { totalContextLimit: 128_000, compactionThreshold: 96_000 },
+        ...(options.compactionMode === undefined ? {} : { mode: options.compactionMode }),
+        ...(workspaceStore === undefined ? {} : { workspaceStore }),
+        ...(options.compactionMaxOutputBytes === undefined ? {} : { maxOutputBytes: options.compactionMaxOutputBytes }),
+      }
+    : undefined;
   const agent = createAgent({
     tenantScope,
     streamFn: options.streamFn,
     providerBroker,
+    ...(compaction === undefined ? {} : { compaction }),
     ...(options.provider === undefined ? {} : { provider: options.provider }),
     ...(options.model === undefined ? {} : { model: options.model }),
     allowedDirectories,
@@ -187,7 +249,15 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     sessionStore,
   });
 
-  const protocol = createRuntimeProtocol(agent, sessionId);
+  const sessionControl = sessionStore === undefined
+    ? undefined
+    : createStoreSessionControl({
+        store: sessionStore,
+        agent,
+        workspaceStore,
+        ...(options.compactionMaxOutputBytes === undefined ? {} : { maxOutputBytes: options.compactionMaxOutputBytes }),
+      });
+  const protocol = createRuntimeProtocol(agent, sessionId, sessionControl);
 
   // root fiber 持有运行时生命周期；dispose 是唯一的逆操作。
   const ctx = createContext({ uid: `zeta:runtime:${sessionId}` });
@@ -200,6 +270,11 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     })
   );
   await rootFiber.ready;
+
+  /** 资源 coeffect/watcher 按 profile 安装；local-safe 收敛不安装。 */
+  const resourceWatcher = policy.resourceWatcher
+    ? installResourcePlugin({ ctx, registry: resources, roots: [agentRoot, projectRoot] })
+    : undefined;
 
   const hotReloadUnits =
     options.hotReloadDirs === undefined || options.hotReloadDirs.length === 0
@@ -241,7 +316,16 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
 
   const services: Record<string, unknown> = {};
   for (const name of manifest.services) {
-    services[name] = resources;
+    if (name === "resources:watcher") {
+      if (resourceWatcher === undefined) throw new Error("RESOURCE_WATCHER_UNAVAILABLE");
+      services[name] = resourceWatcher;
+    } else if (name === "session:control") {
+      if (sessionControl === undefined) throw new Error("SESSION_CONTROL_UNAVAILABLE");
+      services[name] = sessionControl;
+    } else {
+      // skills / prompts / themes registry 都指向同一真实注册表，不是占位值。
+      services[name] = resources;
+    }
   }
   for (const name of manifest.session) {
     services[name] = {
@@ -260,18 +344,22 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     profile,
     resources,
     sessionStore,
+    workspaceStore,
     services,
     rootFiber,
     tenantScope,
     governance,
     hotReload,
     providerBroker,
+    backend: securityBackend,
+    resourceWatcher,
     dispose() {
       if (disposal !== undefined) return disposal;
       // 所有权顺序：停止新准入与 watcher → agent 排空 run/tool/listener/插件/审计
       // → ctx fiber → session → tenant governance → backend。重复调用共享同一 promise。
       disposal = (async () => {
         agent.closeAdmission();
+        resourceWatcher?.close();
         await hotReload?.close();
         await agent.dispose();
         await ctx.dispose();

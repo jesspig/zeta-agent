@@ -1,7 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { hostTarget, startDaemon } from "@zeta-agent/deploy";
 import { createMemorySessionControl, type RpcRuntime } from "@zeta-agent/deploy";
-import type { RuntimeProtocol } from "@zeta-agent/agent";
+import { createJsonlSessionStore, type RuntimeProtocol } from "@zeta-agent/agent";
 import { parseArgs } from "./args";
 import { createCliRpcRuntime, startCliDaemon } from "./daemon";
 import { createProbeHandle } from "./probes";
@@ -17,10 +20,18 @@ function protocol(): RuntimeProtocol {
   };
 }
 
+const dirs: string[] = [];
+afterEach(() => {
+  while (dirs.length > 0) rmSync(dirs.pop()!, { recursive: true, force: true });
+});
+
 function bundle() {
   const target = hostTarget() ?? "linux-x64";
+  const dir = mkdtempSync(join(tmpdir(), "zeta-cli-daemon-"));
+  dirs.push(dir);
   return {
     runtime: { protocol: protocol() },
+    sessionStore: createJsonlSessionStore({ path: join(dir, "session.jsonl") }),
     probes: createProbeHandle(
       {
         target,
@@ -34,6 +45,12 @@ function bundle() {
   };
 }
 
+function bundle_without_store() {
+  const { sessionStore: _omitted, ...rest } = bundle() as ReturnType<typeof bundle> & { sessionStore?: unknown };
+  void _omitted;
+  return rest;
+}
+
 describe("T-21 CLI daemon / remote / RPC 接线", () => {
   test("--daemon/--remote、--endpoint、--token 解析", () => {
     const daemon = parseArgs(["--daemon", "--token", "t"]);
@@ -42,6 +59,10 @@ describe("T-21 CLI daemon / remote / RPC 接线", () => {
     const remote = parseArgs(["--remote", "--endpoint", "http://127.0.0.1:4100", "--token", "t"]);
     expect(remote.mode).toBe("remote");
     expect(remote.endpoint).toBe("http://127.0.0.1:4100");
+  });
+
+  test("缺少真实 SessionStore 时 CLI 控制面失败关闭，不用内存 stub 冒充", () => {
+    expect(() => createCliRpcRuntime(bundle_without_store())).toThrow("SESSION_STORE_REQUIRED");
   });
 
   test("CLI daemon 真实启动并响应 RPC 帧", async () => {
@@ -55,6 +76,29 @@ describe("T-21 CLI daemon / remote / RPC 接线", () => {
     const reply = (await response.json()) as Record<string, unknown>;
     expect(reply.result).toMatchObject({ ok: true, action: "prompt" });
     await handle.stop();
+  });
+
+  test("CLI daemon 的 session.* 经真实 SessionStore 返回持久化消息", async () => {
+    const b = bundle();
+    await b.sessionStore!.append({ role: "user", content: "cli-persistent-marker" });
+    const handle = startCliDaemon(parseArgs(["--daemon", "--token", "t"]), b, { port: 0 });
+    try {
+      const response = await fetch(`${handle.url}/rpc`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer t" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 7,
+          method: "session.load",
+          params: { sessionId: b.sessionStore!.sessionId },
+        }),
+      });
+      const reply = (await response.json()) as { error?: unknown; result?: { messages?: readonly { content?: unknown }[] } };
+      expect(reply.error).toBeUndefined();
+      expect(reply.result?.messages?.some((message) => message.content === "cli-persistent-marker")).toBe(true);
+    } finally {
+      await handle.stop();
+    }
   });
 
   test("CLI remote 把远程响应写入 stdout writer，错误不污染 stdout", async () => {

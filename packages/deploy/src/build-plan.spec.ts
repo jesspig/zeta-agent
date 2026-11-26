@@ -17,7 +17,13 @@ describe("T-20 12 target 构建计划", () => {
       expect(plan.target.split("-")[0]).toBe(plan.os);
       expect(plan.libc === "musl").toBe(plan.target.includes("musl"));
       expect(plan.baseline).toBe(plan.target.includes("baseline"));
-      expect(plan.assets).toEqual(["arch-marker.zetaasset", "resource-catalog.zetaasset"]);
+      expect(plan.assets).toEqual([
+        "arch-marker.zetaasset",
+        "resource-catalog.zetaasset",
+        "prompts/system.md",
+        "skills/builtins/SKILL.md",
+        "schema/config.zetaasset",
+      ]);
     }
     expect(LOCAL_BUILD_PLANS.filter((plan) => plan.libc === "musl")).toHaveLength(2);
     expect(LOCAL_BUILD_PLANS.filter((plan) => plan.baseline)).toHaveLength(4);

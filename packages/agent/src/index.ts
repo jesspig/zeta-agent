@@ -16,6 +16,8 @@ export * from "./resources/parser";
 export * from "./resources/keys";
 export * from "./resources/watch";
 export * from "./resources/plugin";
+export { createFileWorkspaceStore } from "@zeta-agent/agent-framework";
+export type { WorkspaceStore } from "@zeta-agent/agent-framework";
 export * from "./session/store";
 export * from "./session/jsonl-store";
 export * from "./session/sqlite-store";

@@ -109,21 +109,19 @@ function dispatchLines(
 export function createStdioMcpTransport(options: {
   readonly write: (line: string) => void | Promise<void>;
   /** 宿主把 server 输出按行喂入：调用 onLine(整行字符串)。 */
-  readonly feed: (onLine: (line: string) => void) => Disposer;
+  readonly feed?: (onLine: (line: string) => void) => Disposer;
+  /** 真实字节通道：宿主把任意字节块喂入，帧边界由本传输按换行自行切分。 */
+  readonly feedBytes?: (onChunk: (chunk: string) => void) => Disposer;
 }): McpTransport {
   const notifications = listenerSet<McpJsonRpcNotification>();
   const requests = listenerSet<McpJsonRpcRequest>();
   const pending = new Map<number, (response: McpJsonRpcResponse) => void>();
   let disposed = false;
-  const stopFeed = options.feed((line) => {
-    if (line.length === 0) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
+  const handleMessage = (parsed: Record<string, unknown>): void => {
+    if (typeof parsed.id === "number" && typeof parsed.method === "string") {
+      void requests.emit(parsed as unknown as McpJsonRpcRequest);
       return;
     }
-    if (!isRecord(parsed) || parsed.jsonrpc !== "2.0") return;
     if (typeof parsed.id === "number") {
       const resolve = pending.get(parsed.id);
       if (resolve !== undefined) {
@@ -133,7 +131,23 @@ export function createStdioMcpTransport(options: {
     } else if (typeof parsed.method === "string") {
       void notifications.emit(parsed as unknown as McpJsonRpcNotification);
     }
-  });
+  };
+  const handleLine = (line: string): void => {
+    if (line.length === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (!isRecord(parsed) || parsed.jsonrpc !== "2.0") return;
+    handleMessage(parsed);
+  };
+  if (options.feed === undefined && options.feedBytes === undefined) throw new Error("MCP_STDIO_FEED_REQUIRED");
+  const buffer = { value: "" };
+  const stopFeed = options.feedBytes !== undefined
+    ? options.feedBytes((chunk) => dispatchLines(chunk, buffer, handleMessage))
+    : options.feed!(handleLine);
   const send = async (message: unknown): Promise<void> => {
     if (disposed) throw new Error("MCP_TRANSPORT_DISPOSED");
     await options.write(`${JSON.stringify(message)}\n`);

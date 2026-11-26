@@ -13,6 +13,9 @@ export interface PluginTool<P = never> {
   readonly name: string;
   readonly description?: string;
   readonly parameters?: readonly PluginToolParameter[];
+  /** 原始 JSON Schema（如 MCP tools/list 的 inputSchema/outputSchema）原样保留，供 provider 消费。 */
+  readonly inputSchema?: unknown;
+  readonly outputSchema?: unknown;
   readonly execute: (input: P, signal?: AbortSignal) => unknown | Promise<unknown>;
 }
 

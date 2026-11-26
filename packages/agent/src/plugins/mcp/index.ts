@@ -15,7 +15,12 @@ import {
   type McpToolDescriptor,
   type McpTransportFactory,
 } from "./client";
-import { projectMcpResult, type McpResultSink } from "./result-projection";
+import {
+  projectMcpResult,
+  promptResultToCallResult,
+  resourceResultToCallResult,
+  type McpResultSink,
+} from "./result-projection";
 import {
   isEmissionMcpTool,
   mcpServersKey,
@@ -30,6 +35,7 @@ export * from "./protocol";
 export * from "./transport";
 export * from "./result-projection";
 export * from "./oauth-grant";
+export * from "./oauth-flow";
 
 export interface McpPluginOptions {
   /** facade 插件 API：工具注册、发射工具声明都经由它，保持单一执行路径。 */
@@ -50,6 +56,8 @@ export interface McpPluginOptions {
   readonly notify?: (keys: readonly CoeffectKey<any>[]) => Promise<void>;
   /** 二进制/资源落盘边界；缺省时遇到二进制内容直接失败关闭。 */
   readonly resultSink?: McpResultSink;
+  /** 客户端 roots 列表；仅在显式提供时向 server 声明 roots 能力并注册 roots/list 处理器。 */
+  readonly roots?: readonly { readonly uri: string; readonly name?: string }[];
   readonly componentName?: string;
 }
 
@@ -57,10 +65,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 原始 JSON Schema → provider 可消费的参数表，保留 required 与 description。 */
+/** 原始 JSON Schema → provider 可消费的参数表，保留 required 与 description（含 object/array 顶层项）。 */
 export function parametersFromInputSchema(schema: unknown): readonly {
   readonly name: string;
-  readonly type: "string" | "number" | "boolean";
+  readonly type: "string" | "number" | "boolean" | "object" | "array";
   readonly description: string;
   readonly required?: boolean;
 }[] {
@@ -72,6 +80,8 @@ export function parametersFromInputSchema(schema: unknown): readonly {
     const type = raw.type === "number" || raw.type === "integer" ? "number"
       : raw.type === "boolean" ? "boolean"
       : raw.type === "string" ? "string"
+      : raw.type === "object" ? "object"
+      : raw.type === "array" ? "array"
       : undefined;
     if (type === undefined) return [];
     return [{
@@ -88,6 +98,10 @@ export interface McpSnapshot {
   readonly emissionToolNames: readonly string[];
   readonly connectionCount: number;
   readonly sessions: readonly string[];
+  /** 按 advertised capability 注册的 prompts/resources/roots。 */
+  readonly promptNames: readonly string[];
+  readonly resourceUris: readonly string[];
+  readonly rootsRegistered: number;
 }
 
 export interface McpPluginHandle {
@@ -145,7 +159,10 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
       const disposers: Disposer[] = [];
       const toolNames: string[] = [];
       const emissionToolNames: string[] = [];
+      const promptNames: string[] = [];
+      const resourceUris: string[] = [];
       const sessions: string[] = [];
+      let rootsRegistered = 0;
       let connectionCount = 0;
 
       const unwind = async (): Promise<void> => {
@@ -174,7 +191,14 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
           const session: McpSession = await openMcpSession(server, backend);
           sessions.push(session.realm);
           const transport = await transportFactory(server, session);
-          const connection = await createMcpConnection({ server, transport, session });
+          const connection = await createMcpConnection({
+            server,
+            transport,
+            session,
+            handshake: {
+              capabilities: options.roots === undefined ? {} : { roots: { listChanged: false } },
+            },
+          });
           connectionCount += 1;
 
           // 连接句柄纳入 ctx.effect：fiber/context 卸载时由宿主关闭。
@@ -187,12 +211,20 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
             })
           );
 
-          for (const tool of await connection.listTools()) {
-            const name = mcpToolName(server.name, tool.name);
+          const sinkOptions = options.resultSink === undefined ? {} : { sink: options.resultSink };
+          /** 单一注册入口：权限门禁 + 工具清单 + 原始 schema 保真，全部走 facade 同一路径。 */
+          const declare = (
+            name: string,
+            description: string,
+            parameters: ReturnType<typeof parametersFromInputSchema>,
+            inputSchema: unknown,
+            outputSchema: unknown,
+            execute: (args: Readonly<Record<string, unknown>>) => Promise<unknown>,
+            emission: boolean
+          ): void => {
             mcpToolNames.add(name);
             toolNames.push(name);
-            if (isEmissionMcpTool(tool)) emissionToolNames.push(name);
-
+            if (emission) emissionToolNames.push(name);
             if (permissionGate !== undefined) {
               disposers.push(
                 permissionGate.declareTools([{ tool: name, stages: [permissionStage] }])
@@ -201,11 +233,73 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
             disposers.push(
               api.registerTool({
                 name,
-                description: tool.description ?? `MCP tool ${tool.name}`,
-                parameters: parametersFromInputSchema(tool.inputSchema),
-                execute: (args: Readonly<Record<string, unknown>>) => connection.callTool(tool.name, args),
+                description,
+                parameters,
+                ...(inputSchema === undefined ? {} : { inputSchema }),
+                ...(outputSchema === undefined ? {} : { outputSchema }),
+                execute,
               } as never)
             );
+          };
+          const advertises = (capability: string): boolean => isRecord(connection.serverCapabilities[capability]);
+
+          // 工具/提示/资源一律按服务器 advertised capability 门控，未声明的能力不注册、不调用。
+          if (advertises("tools")) {
+            for (const tool of await connection.listTools()) {
+              declare(
+                mcpToolName(server.name, tool.name),
+                tool.description ?? `MCP tool ${tool.name}`,
+                parametersFromInputSchema(tool.inputSchema),
+                tool.inputSchema,
+                tool.outputSchema,
+                (args) => connection.callTool(tool.name, args),
+                isEmissionMcpTool(tool)
+              );
+            }
+          }
+          if (advertises("prompts")) {
+            for (const prompt of await connection.listPrompts()) {
+              const name = mcpToolName(server.name, `prompt__${prompt.name}`);
+              const schema = (prompt as { inputSchema?: unknown; argumentsSchema?: unknown }).inputSchema
+                ?? (prompt as { argumentsSchema?: unknown }).argumentsSchema;
+              promptNames.push(name);
+              declare(
+                name,
+                prompt.description ?? `MCP prompt ${prompt.name}`,
+                parametersFromInputSchema(schema),
+                schema,
+                undefined,
+                async (args) => projectMcpResult(
+                  promptResultToCallResult(await connection.getPrompt(prompt.name, args)),
+                  sinkOptions
+                ),
+                false
+              );
+            }
+          }
+          if (advertises("resources")) {
+            const resources = await connection.listResources();
+            for (const [index, resource] of resources.entries()) {
+              resourceUris.push(resource.uri);
+              declare(
+                mcpToolName(server.name, `resource__${index}`),
+                resource.description ?? `MCP resource ${resource.name ?? resource.uri}`,
+                [],
+                undefined,
+                undefined,
+                async () => projectMcpResult(
+                  resourceResultToCallResult(await connection.readResource(resource.uri)),
+                  sinkOptions
+                ),
+                false
+              );
+            }
+          }
+          // roots 是客户端能力：显式提供 roots 才在握手声明并注册 server→client 处理器。
+          if (options.roots !== undefined && options.roots.length > 0) {
+            const roots = options.roots;
+            disposers.push(connection.onRequest("roots/list", () => ({ roots })));
+            rootsRegistered += 1;
           }
         }
       } catch (error) {
@@ -218,7 +312,7 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
       }
 
       const runtime: Runtime = {
-        snapshot: { toolNames, emissionToolNames, connectionCount, sessions },
+        snapshot: { toolNames, emissionToolNames, connectionCount, sessions, promptNames, resourceUris, rootsRegistered },
         dispose: unwind,
       };
       currentRuntime = runtime;
@@ -246,7 +340,10 @@ export function installMcpPlugin(options: McpPluginOptions): McpPluginHandle {
     refresh: async () => {
       await notify([mcpServersKey]);
     },
-    snapshot: () => currentRuntime?.snapshot ?? { toolNames: [], emissionToolNames: [], connectionCount: 0, sessions: [] },
+    snapshot: () => currentRuntime?.snapshot ?? {
+      toolNames: [], emissionToolNames: [], connectionCount: 0, sessions: [],
+      promptNames: [], resourceUris: [], rootsRegistered: 0,
+    },
     async dispose() {
       const runtime = currentRuntime;
       currentRuntime = undefined;

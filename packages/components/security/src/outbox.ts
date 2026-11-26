@@ -2,7 +2,9 @@
  * 持久 outbox（IF-14）：领域事务内 enqueue，commit 后派发；每条意图都有稳定幂等键。
  * 先落「dispatching」再派发、先落回执再移除，覆盖 commit 前与 dispatch 后两个崩溃窗口。
  * dispatching 但无回执的意图在恢复时标记 unknown，停止自动重放，等待显式对账。
+ * unknown 词汇与 SessionStore 共用 durable-vocabulary，不虚构 exactly-once。
  */
+import { DURABLE_UNKNOWN_VOCABULARY } from "./durable-vocabulary";
 
 export type OutboxState = "queued" | "dispatching" | "unknown" | "settled" | "deferred";
 
@@ -205,15 +207,15 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
     );
     pending = snapshot.pending.map((entry) =>
       entry.state === "dispatching" && !settledKeys.has(entry.idempotencyKey)
-        ? { ...entry, state: "unknown" as const }
+        ? { ...entry, state: DURABLE_UNKNOWN_VOCABULARY.unknown }
         : { ...entry }
     );
-    if (pending.some((entry) => entry.state === "unknown")) persist();
+    if (pending.some((entry) => entry.state === DURABLE_UNKNOWN_VOCABULARY.unknown)) persist();
     return { restored: true, pending: pending.length, receipts: receipts.length, unknown: unknown().length };
   }
 
   function unknown(): readonly OutboxEntry[] {
-    return pending.filter((entry) => entry.state === "unknown").map((entry) => ({ ...entry }));
+    return pending.filter((entry) => entry.state === DURABLE_UNKNOWN_VOCABULARY.unknown).map((entry) => ({ ...entry }));
   }
 
   // 构造即恢复：调用方无需记得显式 recover。
@@ -284,7 +286,7 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
       return replace(current, { state: "deferred", deferUntil: now() + delayMs });
     },
     reconcile(key, ok, value) {
-      const entry = pending.find((item) => item.key === key && item.state === "unknown");
+      const entry = pending.find((item) => item.key === key && item.state === DURABLE_UNKNOWN_VOCABULARY.unknown);
       if (entry === undefined) throw new Error("UNKNOWN_OUTBOX_ENTRY");
       return finish(entry, ok, value);
     },

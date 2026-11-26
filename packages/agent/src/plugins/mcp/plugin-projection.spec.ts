@@ -6,7 +6,7 @@ import {
   type Capabilities,
   type ExecutionBackend,
 } from "@zeta-agent/security";
-import { createAgent, type AgentMessage, type AgentStreamChunk } from "../../facade";
+import { createAgent, type AgentMessage, type AgentStreamChunk, type AgentStreamRequest } from "../../facade";
 import { installMcpPlugin, parametersFromInputSchema } from "./index";
 import type { McpJsonRpcNotification, McpJsonRpcRequest, McpJsonRpcResponse, McpTransport } from "./client";
 import { MCP_PROTOCOL_VERSION } from "./protocol";
@@ -23,6 +23,7 @@ interface SetupOptions {
   readonly toolResult?: (name: string, args: Record<string, unknown>) => unknown;
   readonly inputSchema?: unknown;
   readonly outputSchema?: unknown;
+  readonly onRequest?: (request: AgentStreamRequest) => void;
 }
 
 function setup(options: SetupOptions = {}) {
@@ -95,7 +96,8 @@ function setup(options: SetupOptions = {}) {
     includeBuiltins: false,
     coreContext: ctx,
     egressPolicy: createEgressPolicy(),
-    streamFn: async function* (): AsyncIterable<AgentStreamChunk> {
+    streamFn: async function* (request: AgentStreamRequest): AsyncIterable<AgentStreamChunk> {
+      options.onRequest?.(request);
       turn += 1;
       if (turn === 1) {
         yield { type: "tool_call", id: "c1", name: "mcp__srv__find", arguments: JSON.stringify({ q: "x" }) };
@@ -164,5 +166,42 @@ describe("T-17 插件集成：schema 保真与双结果投影", () => {
     await handle.dispose();
     expect(agent.toolNames).not.toContain("mcp__srv__find");
     expect(agent.providerToolSchemas().some((item) => item.name === "mcp__srv__find")).toBe(false);
+  });
+
+  test("④ 生产 provider 请求保留完整嵌套 input/outputSchema（不平铺、不丢弃）", async () => {
+    const inputSchema = {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "query" },
+        nested: {
+          type: "object",
+          description: "nested options",
+          properties: {
+            tags: { type: "array", items: { type: "string" }, description: "tag list" },
+            depth: { type: "integer", description: "depth" },
+          },
+          required: ["tags"],
+        },
+      },
+      required: ["q", "nested"],
+    };
+    const outputSchema = { type: "object", properties: { rows: { type: "array", items: { type: "object" } } }, required: ["rows"] };
+    let requestTools: AgentStreamRequest["tools"];
+    const { agent, handle } = setup({
+      inputSchema,
+      outputSchema,
+      onRequest: (request) => {
+        requestTools = request.tools;
+      },
+    });
+    await handle.ready;
+    await agent.prompt("go");
+    const tool = requestTools?.find((item) => item.name === "mcp__srv__find");
+    expect(tool?.inputSchema).toEqual(inputSchema);
+    expect(tool?.outputSchema).toEqual(outputSchema);
+    // 嵌套项也进入扁平参数表，而不是被丢弃。
+    expect(tool?.parameters.map((item) => item.name)).toEqual(["q", "nested"]);
+    expect(tool?.parameters.find((item) => item.name === "nested")?.type).toBe("object");
+    await handle.dispose();
   });
 });

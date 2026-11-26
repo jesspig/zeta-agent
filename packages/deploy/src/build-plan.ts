@@ -33,7 +33,13 @@ function createPlan(target: TargetId): LocalBuildPlan {
     arch,
     libc,
     baseline,
-    assets: Object.freeze(["arch-marker.zetaasset", "resource-catalog.zetaasset"]),
+    assets: Object.freeze([
+      "arch-marker.zetaasset",
+      "resource-catalog.zetaasset",
+      "prompts/system.md",
+      "skills/builtins/SKILL.md",
+      "schema/config.zetaasset",
+    ]),
   });
 }
 

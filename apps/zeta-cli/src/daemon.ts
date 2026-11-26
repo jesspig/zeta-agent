@@ -1,6 +1,6 @@
-import type { RuntimeProtocol } from "@zeta-agent/agent";
+import type { RuntimeProtocol, SessionStore, WorkspaceStore } from "@zeta-agent/agent";
 import {
-  createMemorySessionControl,
+  createStoreSessionControl,
   createStdoutWriter,
   hostTarget,
   startDaemon,
@@ -12,7 +12,7 @@ import {
 } from "@zeta-agent/deploy";
 import type { CliArgs } from "./args";
 
-/** CLI 装配提供给控制面的最小 seam：T-10 protocol + T-20 探针。 */
+/** CLI 装配提供给控制面的最小 seam：T-10 protocol + 真实 SessionStore + T-20 探针。 */
 export interface CliDaemonBundle {
   readonly runtime: { readonly protocol: RuntimeProtocol };
   readonly probes: {
@@ -20,13 +20,21 @@ export interface CliDaemonBundle {
     liveness(): boolean;
     configDigest(): string;
   };
+  /** 真实持久会话；daemon 控制面必须注入，不允许内存 stub 冒充 RPC 能力。 */
+  readonly sessionStore?: SessionStore;
+  readonly workspaceStore?: WorkspaceStore;
 }
 
 export function createCliRpcRuntime(bundle: CliDaemonBundle): RpcRuntime {
+  const store = bundle.sessionStore ?? (bundle.runtime as { sessionStore?: SessionStore }).sessionStore;
+  if (store === undefined) throw new Error("SESSION_STORE_REQUIRED");
   return {
     protocol: bundle.runtime.protocol,
     probes: bundle.probes,
-    session: createMemorySessionControl(),
+    session: createStoreSessionControl({
+      store,
+      workspaceStore: bundle.workspaceStore ?? (bundle.runtime as { workspaceStore?: WorkspaceStore }).workspaceStore,
+    }),
   };
 }
 

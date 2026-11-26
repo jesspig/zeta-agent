@@ -6,11 +6,15 @@ import {
   assertSessionFrame,
   createFrameId,
   createHeader,
+  describeUnknownOutcome,
+  DURABLE_UNKNOWN_VOCABULARY,
+  leaseLockKey,
   projectSessionFrames,
   SESSION_STORE_VERSION,
   SessionStoreError,
   withPathLock,
   type AppendReceipt,
+  type CasSessionLease,
   type MigrationResult,
   type PendingIntent,
   type RecapOptions,
@@ -57,6 +61,10 @@ function setMeta(db: Database, key: string, value: string): void {
 }
 
 function readFrames(db: Database): { frames: SessionFrame[]; badLines: number } {
+  const exists = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'frames'")
+    .get();
+  if (exists === null || exists === undefined) return { frames: [], badLines: 0 };
   const rows = db.query("SELECT payload FROM frames ORDER BY seq").all() as Array<{ payload: string }>;
   const frames: SessionFrame[] = [];
   let badLines = 0;
@@ -105,6 +113,8 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = FULL");
   db.exec("PRAGMA busy_timeout = 2000");
+  // 未来版本保持只读：不为未知 schema 补表、不改写数据库。
+  if (currentVersion() <= SESSION_STORE_VERSION) ensureLeaseTable();
 
   const leaseOwner = options.leaseOwner ?? `${process.pid}:${createFrameId()}`;
   const leaseTtlMs = options.leaseTtlMs ?? 2_000;
@@ -113,7 +123,7 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
   const idFactory = options.idFactory ?? createFrameId;
   const createdAt = (): string => new Date(now()).toISOString();
   const defaultSessionId = options.sessionId ?? "zeta-session";
-  let currentLease: SessionLease | undefined;
+  let currentLease: CasSessionLease | undefined;
   let closed = false;
   let batch: QueuedAppend[] | undefined;
   let leafId: string | null = options.rootFrameId ?? null;
@@ -121,6 +131,14 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
   function hasTable(name: string): boolean {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
     return row !== null && row !== undefined;
+  }
+
+  /** leases 表是 CAS 租约权威状态；旧库缺表时补建，不改业务 frame。 */
+  function ensureLeaseTable(): void {
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS leases (" +
+        "generation INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL, token TEXT NOT NULL)"
+    );
   }
 
   function initialize(): void {
@@ -161,17 +179,22 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
   function state(): SessionStoreState {
     const version = currentVersion();
     if (version > SESSION_STORE_VERSION) return "readonly";
+    // 坏 payload / 未知 schemaVersion 不再被静默跳过：失败关闭为只读。
+    if (readFrames(db).badLines > 0) return "readonly";
     if (!hasTable("pending")) return "ready";
     const row = db.query("SELECT count(*) AS n FROM pending WHERE status = 'inflight'").get() as { n: number };
-    return row.n > 0 ? "unknown-outcome" : "ready";
+    return row.n > 0 ? DURABLE_UNKNOWN_VOCABULARY.sessionUnknown : "ready";
   }
 
   function assertWritable(): void {
     if (closed) throw new SessionStoreError("SESSION_CLOSED", "SessionStore 已关闭");
     const current = state();
     if (current === "readonly") throw new SessionStoreError("SESSION_READONLY", "存储版本不受支持，保持只读");
-    if (current === "unknown-outcome") {
-      throw new SessionStoreError("SESSION_STATE_UNKNOWN_OUTCOME", "未知写入结果，须先 recover()");
+    if (current === DURABLE_UNKNOWN_VOCABULARY.sessionUnknown) {
+      throw new SessionStoreError(
+        "SESSION_STATE_UNKNOWN_OUTCOME",
+        describeUnknownOutcome("未知写入结果，须先 recover() 并对账")
+      );
     }
   }
 
@@ -207,35 +230,80 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
   const versionAtOpen = currentVersion();
   initializeIfNeeded();
 
-  async function acquireLease(): Promise<SessionLease> {
-    const deadline = now() + retryMs;
+  function latestLease(): CasSessionLease | undefined {
+    const row = db
+      .query("SELECT generation, owner, expires_at, token FROM leases ORDER BY generation DESC LIMIT 1")
+      .get() as { generation: number; owner: string; expires_at: number; token: string } | undefined;
+    return row === null || row === undefined
+      ? undefined
+      : { generation: row.generation, owner: row.owner, expiresAt: row.expires_at, token: row.token };
+  }
+
+  async function acquireLease(): Promise<CasSessionLease> {
+    // 重试截止时间用真实时钟：now() 只决定租约过期语义，冻结时钟时也必须能结束 BUSY 等待。
+    const deadline = Date.now() + retryMs;
     for (;;) {
-      const existingOwner = metaValue(db, "lease_owner");
-      const expiresRaw = metaValue(db, "lease_expires_at");
-      const expiresAt = expiresRaw === undefined ? 0 : Number(expiresRaw);
-      if (existingOwner === undefined || now() > expiresAt) {
-        const lease: SessionLease = { owner: leaseOwner, expiresAt: now() + leaseTtlMs };
-        db.exec("BEGIN IMMEDIATE");
-        try {
-          setMeta(db, "lease_owner", lease.owner);
-          setMeta(db, "lease_expires_at", String(lease.expiresAt));
-          db.exec("COMMIT");
-        } catch (error) {
-          db.exec("ROLLBACK");
-          throw classify(error, "lease");
-        }
-        currentLease = lease;
-        return lease;
+      const latest = latestLease();
+      if (latest !== undefined && now() <= latest.expiresAt) {
+        if (Date.now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
+        await new Promise<void>((resolve) => setTimeout(resolve, 2));
+        continue;
       }
-      if (now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
-      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      const generation = (latest?.generation ?? 0) + 1;
+      const lease: CasSessionLease = {
+        owner: leaseOwner,
+        expiresAt: now() + leaseTtlMs,
+        generation,
+        token: createFrameId(),
+      };
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        // 条件插入即 CAS：只有 observed generation 仍为空闲时才能写入新代次。
+        const result = db
+          .query(
+            "INSERT INTO leases (generation, owner, expires_at, token) " +
+              "SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM leases WHERE generation = ?)"
+          )
+          .run(generation, lease.owner, lease.expiresAt, lease.token, generation);
+        db.exec("COMMIT");
+        if (result.changes === 0) {
+          if (Date.now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
+          await new Promise<void>((resolve) => setTimeout(resolve, 2));
+          continue;
+        }
+      } catch (error) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          // 事务已结束；保留原始错误。
+        }
+        throw classify(error, "lease");
+      }
+      if ((latestLease()?.generation ?? -1) > generation) {
+        if (Date.now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
+        continue;
+      }
+      currentLease = lease;
+      return lease;
     }
   }
 
-  function releaseLease(): void {
-    if (hasTable("meta")) {
-      db.query("DELETE FROM meta WHERE key IN ('lease_owner', 'lease_expires_at')").run();
+  async function acquireLeaseWithFault(): Promise<CasSessionLease> {
+    const lease = await acquireLease();
+    try {
+      await options.faults?.afterLeaseAcquire?.(lease);
+    } catch (error) {
+      releaseLease();
+      throw new SessionStoreError("SESSION_RETRYABLE", `租约切点失败：${String(error)}`);
     }
+    return lease;
+  }
+
+  function releaseLease(): void {
+    const held = currentLease;
+    if (held === undefined) return;
+    // 迟到的 release 只删自己的代次，不得删除已接管 writer 的租约。
+    db.query("DELETE FROM leases WHERE generation = ? AND token = ?").run(held.generation, held.token);
     currentLease = undefined;
   }
 
@@ -323,10 +391,11 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
     batch = undefined;
     if (entries.length === 0) return;
     let failure: unknown;
-    await withPathLock(path, async () => {
-      assertWritable();
-      await acquireLease();
+    await withPathLock(leaseLockKey(path, options.writerId), async () => {
       try {
+        // 租约竞争失败也必须走同一 failure 出口，否则 append Promise 永不 settle。
+        assertWritable();
+        await acquireLeaseWithFault();
         // seq 与 parentId 在锁内按入队顺序解析；marker 保留自己的父节点。
         let seq = nextSeq();
         let parent = rootId();
@@ -524,8 +593,8 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
     },
     async recover(): Promise<RecoveryResult> {
       if (closed) throw new SessionStoreError("SESSION_CLOSED", "SessionStore 已关闭");
-      return withPathLock(path, async () => {
-        await acquireLease();
+      return withPathLock(leaseLockKey(path, options.writerId), async () => {
+        await acquireLeaseWithFault();
         try {
           const pending = readPending(db);
           const ids = new Set(readFrames(db).frames.map((frame) => frame.id));
@@ -566,6 +635,7 @@ export function createSqliteSessionStore(options: SqliteSessionStoreOptions): Sq
   };
 
   function initializeOn(target: Database, sessionId: string, nowCreatedAt: string): void {
+    target.exec("CREATE TABLE IF NOT EXISTS leases (generation INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL, token TEXT NOT NULL)");
     target.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     target.exec(
       "CREATE TABLE IF NOT EXISTS frames (" +
