@@ -1,7 +1,10 @@
-import { testRender as openTuiTestRender } from "@opentui/solid";
+import { CliRenderer } from "@opentui/core";
+import { render as openTuiRender, testRender as openTuiTestRender } from "@opentui/solid";
 import { For } from "solid-js";
 import type { FrameState } from "./frame-state";
 import {
+  type AppRenderHandle,
+  type AppRenderOptions,
   type BackendEvent,
   type BackendKeyEvent,
   type BackendMountOptions,
@@ -116,6 +119,44 @@ export class OpenTuiBackend implements RendererBackend {
         if (destroyed) return;
         destroyed = true;
         setup.renderer.destroy();
+      },
+    };
+  }
+
+  async renderApp(app: () => unknown, options: AppRenderOptions): Promise<AppRenderHandle> {
+    this.assertAlive();
+    const renderer = new CliRenderer(
+      process.stdin,
+      process.stdout,
+      options.width,
+      options.height,
+      {
+        screenMode: options.screenMode ?? "alternate-screen",
+        exitOnCtrlC: false,
+        useMouse: true,
+        clearOnShutdown: false,
+        useKittyKeyboard: { disambiguate: true, alternateKeys: true },
+      },
+    );
+    await renderer.setupTerminal();
+    let resolveClosed: () => void = () => {};
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    void renderer.closed.then(resolveClosed, resolveClosed);
+    try {
+      await openTuiRender(() => app() as never, renderer);
+    } catch (error) {
+      renderer.destroy();
+      await renderer.closed.catch(() => {});
+      throw error;
+    }
+    return {
+      waitForExit: () => closed,
+      async destroy() {
+        renderer.destroy();
+        await closed;
+        await renderer.closed.catch(() => {});
       },
     };
   }

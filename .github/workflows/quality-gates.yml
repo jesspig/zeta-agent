@@ -30,7 +30,8 @@ jobs:
           name: quality-reports-${{ matrix.os }}
           path: reports/
 
-  release-matrix:
+  # 构建矩阵：三平台 × 12 target，只做 cross-build/static 产物校验，不代表 native 运行。
+  build-matrix:
     strategy:
       fail-fast: false
       matrix:
@@ -60,8 +61,44 @@ jobs:
         run: bun scripts/build-local.ts --target=${{ matrix.target }}
       - name: Verify artifacts and platform gates
         run: bun scripts/gate-platform.mjs
-      - name: Upload release artifact
+      - name: Upload static build artifact (cross-build/static, not a native run)
         uses: actions/upload-artifact@v4
         with:
-          name: zeta-${{ matrix.target }}
+          name: zeta-build-${{ matrix.os }}-${{ matrix.target }}
           path: dist/local/${{ matrix.target }}/
+
+  # 运行矩阵：仅在真实宿主 runner 上执行原生二进制；构建/运行分别报告，emulated 不冒充 native。
+  run-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            host_target: linux-x64
+          - os: macos-latest
+            host_target: darwin-arm64
+          - os: windows-latest
+            host_target: win32-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install (all optional platform packages)
+        run: bun install --frozen-lockfile --os=* --cpu=*
+      - name: Build native host target
+        run: bun scripts/build-local.ts --target=${{ matrix.host_target }}
+      - name: Native runtime evidence + high-fidelity emulation report
+        run: bun scripts/target-evidence.mjs
+      - name: Native install / staged upgrade / rollback smoke
+        run: bun scripts/smoke-local.ts
+      - name: Upload runtime evidence and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeta-run-${{ matrix.os }}
+          path: |
+            reports/target-evidence.json
+            reports/target-evidence.md
+            reports/gates-platform.json

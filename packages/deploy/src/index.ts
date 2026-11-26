@@ -4,6 +4,7 @@ export * from "./config-digest";
 export * from "./deployment";
 export * from "./artifact";
 export * from "./build-plan";
+export * from "./target-evidence";
 export * from "./runtime-probes";
 export * from "./lifecycle";
 export * from "./budget";

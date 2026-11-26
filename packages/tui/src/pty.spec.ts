@@ -11,41 +11,7 @@ import {
   type SupportedPlatform,
 } from "./pty";
 
-/** Bun 的类型定义尚未声明 pty 选项；运行时支持与否由探测结果决定。 */
-interface PtySpawnResult {
-  readonly stdout: Uint8Array;
-  readonly stderr: Uint8Array;
-  readonly exitCode: number;
-}
-const spawnPty = Bun.spawnSync as unknown as (options: {
-  readonly cmd: string[];
-  readonly stdout: "pipe";
-  readonly stderr: "pipe";
-  readonly pty: true;
-}) => PtySpawnResult;
-
-function probePty(): boolean {
-  try {
-    const result = spawnPty({
-      cmd: [process.execPath, "-e", 'process.stdout.write(process.stdout.isTTY ? "PTY" : "NOPTY")'],
-      stdout: "pipe",
-      stderr: "pipe",
-      pty: true,
-    });
-    return Buffer.from(result.stdout).toString() === "PTY";
-  } catch {
-    return false;
-  }
-}
-
-async function probeNative(): Promise<boolean> {
-  try {
-    const core = await import("@opentui/core");
-    return typeof core.CliRenderer === "function";
-  } catch {
-    return false;
-  }
-}
+import { checkPtyResult, runPtyScenario, type PtyScenarioResult } from "./pty-real";
 
 const platforms: readonly SupportedPlatform[] = ["win32", "darwin", "linux"];
 
@@ -143,29 +109,30 @@ describe("T-23 PTY control sequences and session lifecycle", () => {
   });
 });
 
-const nativeCapability = detectCapability({
-  platform: process.platform,
-  nativeAvailable: await probeNative(),
-  ptyAvailable: probePty(),
-});
+describe("T-23 真实 PTY 集成（本机必过，不 skip、不合成 escape 序列）", () => {
+  const expectRealPty = (result: PtyScenarioResult): void => {
+    const failures = checkPtyResult(result);
+    expect(failures).toEqual([]);
+  };
 
-describe("T-23 native PTY integration (conditional)", () => {
-  test.skipIf(nativeCapability.skipNativeTests)("enters and restores alternate screen under a real PTY", async () => {
-    const script = [
-      "process.stdout.write('\\x1b[?1049h')",
-      "process.stdout.write('\\x1b[8;24;80t')",
-      "process.stdout.write('\\x1b[?1049l')",
-    ].join(";");
-    const result = spawnPty({
-      cmd: [process.execPath, "-e", script],
-      stdout: "pipe",
-      stderr: "pipe",
-      pty: true,
-    });
-    expect(result.exitCode).toBe(0);
-    const output = Buffer.from(result.stdout).toString();
-    expect(output).toContain("\x1b[?1049h");
-    expect(output).toContain("\x1b[8;24;80t");
-    expect(output).toContain("\x1b[?1049l");
-  });
+  test("真实启动 TUI：退出码 0 + 备用屏 + raw 模式标记", async () => {
+    const result = await runPtyScenario("normal");
+    expectRealPty(result);
+    expect(result.enteredAlternate).toBe(true);
+    expect(result.restoredAlternate).toBe(true);
+    expect(result.rawModeMarkers).toBe(true);
+  }, 15_000);
+
+  test("真实 PTY resize：window-change 上报被真实子进程确认", async () => {
+    const result = await runPtyScenario("resize");
+    expectRealPty(result);
+    expect(result.resizeSequence).toBe(true);
+  }, 15_000);
+
+  test("真实 PTY 异常恢复：运行期异常后完整 App 仍复位终端", async () => {
+    const result = await runPtyScenario("abnormal");
+    expectRealPty(result);
+    expect(result.exitCode).toBe(1);
+    expect(result.restoredAlternate).toBe(true);
+  }, 15_000);
 });

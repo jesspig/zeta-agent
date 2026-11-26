@@ -9,16 +9,23 @@ import {
   fetchModelIds,
   MODES,
   parseCommand,
+  selectMode,
   type Agent,
   type AgentStreamFn,
   type DefaultRuntime,
+  type ModeName,
+  type ModePlugin,
 } from "@zeta-agent/agent";
 import {
   assertStartupArtifact,
+  createRpcDispatcher,
   createStdoutWriter,
+  decodeRpcRequest,
+  encodeRpcResponse,
   hostTarget,
   isCompiledExecutable,
   type DeployHandle,
+  type RpcDispatcher,
 } from "@zeta-agent/deploy";
 import type {
   RuntimeMessage,
@@ -35,6 +42,7 @@ import { createDeferredTelemetry, withFirstFrame } from "./deferred-telemetry";
 import { EMBEDDED_ASSETS, EMBEDDED_MANIFEST } from "./embedded-assets.generated";
 import { embeddedResources } from "./embedded-resources";
 import { createProbeHandle, handleProbeFrame } from "./probes";
+import { createCliRpcRuntime } from "./daemon";
 import { resolveDataDir } from "./runtime";
 import { buildTuiOptions } from "./tui-options";
 
@@ -208,6 +216,31 @@ export async function loadInteractiveTui() {
   return import("@zeta-agent/tui");
 }
 
+export interface CliModeSelection {
+  readonly name: ModeName;
+  readonly plugin: ModePlugin;
+}
+
+/**
+ * 单一 ModePlugin loader：CLI 形态只在这里映射到 agent 的四种模式插件。
+ * 交互式插件 requiresTTY；守卫在 loadInteractiveTui() 之前完成，
+ * 因此 headless/print/json/rpc 永远走不到 OpenTUI import。
+ */
+export function loadModePlugin(
+  args: CliArgs,
+  tty: boolean = process.stdin.isTTY === true,
+): CliModeSelection | undefined {
+  if (args.mode === "daemon" || args.mode === "remote") return undefined;
+  const name: ModeName =
+    args.mode === "tui" ? "interactive"
+      : args.mode === "headless" ? "print"
+        : args.mode === "json" ? "json"
+          : "rpc";
+  const plugin = selectMode(name);
+  if (plugin.requiresTTY && !tty) return undefined;
+  return { name, plugin };
+}
+
 export function createSteerLock(): { tryAcquire(): boolean; release(): void } {
   let active = false;
   return {
@@ -252,13 +285,13 @@ export function createSteerRunner(deps: {
 }
 
 async function runTui(args: CliArgs, bundle: AgentBundle): Promise<number> {
-  const { detectGitBranch, renderTui } = await loadInteractiveTui();
-  const agent = bundle.agent;
-
-  if (!process.stdin.isTTY) {
+  // TTY 守卫必须先于任何 TUI/OpenTUI import：非 TTY 时绝不加载原生渲染栈。
+  if (process.stdin.isTTY !== true) {
     process.stdout.write("(非 TTY：请用 zeta --headless \"提示词\"；交互式 TUI 需要 TTY)\n");
     return 0;
   }
+  const { detectGitBranch, renderTui } = await loadInteractiveTui();
+  const agent = bundle.agent;
 
   const registry = createCommandRegistry();
   let tui: RuntimeTuiHandle | undefined;
@@ -445,13 +478,58 @@ export function collectRpcLines(argvPrompt: string | undefined, stdinText: strin
   return argvPrompt !== undefined ? [argvPrompt] : [];
 }
 
-async function readStdinFrames(): Promise<string> {
+export async function readStdinFrames(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> {
+/** 管道输入修剪为单条提示词；空管道不产生提示词，不伪造用户输入。 */
+export function promptFromStdin(text: string): string | undefined {
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** CLI RPC 唯一生产路径：全量 method / 错误码 / 会话能力均来自 deploy 的 dispatcher。 */
+async function runCliRpc(
+  bundle: AgentBundle,
+  lines: readonly string[],
+  writer: ReturnType<typeof createStdoutWriter>,
+): Promise<number> {
+  let dispatcher: RpcDispatcher;
+  try {
+    dispatcher = createRpcDispatcher(createCliRpcRuntime(bundle));
+  } catch (error) {
+    writer.diagnostic(`zeta: RPC 控制面不可用：${(error as Error).message}`);
+    return 1;
+  }
+  let failed = false;
+  for (const line of lines) {
+    let request;
+    try {
+      request = decodeRpcRequest(line);
+    } catch (error) {
+      // 非法帧只写 stderr，stdout 保持纯净（协议通道只承载合法响应）。
+      writer.diagnostic(`zeta: RPC 帧解析失败：${(error as Error).message}`);
+      failed = true;
+      continue;
+    }
+    try {
+      const response = await dispatcher.handle(request);
+      writer.write(encodeRpcResponse(response) + "\n");
+    } catch (error) {
+      writer.diagnostic(`zeta: RPC 处理失败：${(error as Error).message}`);
+      failed = true;
+    }
+  }
+  return failed ? 1 : 0;
+}
+
+async function runHeadless(
+  args: CliArgs,
+  bundle: AgentBundle,
+  selection: CliModeSelection,
+): Promise<number> {
   const { agent, missing } = bundle;
   const writer = createStdoutWriter({
     write: (chunk) => process.stdout.write(chunk) !== false,
@@ -462,12 +540,17 @@ async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> 
   if (missing.length > 0) {
     writer.diagnostic(`zeta: 模型配置缺失：${missing.join(", ")}；使用 echo`);
   }
-  const mode = args.mode === "json" ? "json" : args.mode === "rpc" ? "rpc" : "print";
-  const stdinText = mode === "rpc" && args.prompt === undefined && !process.stdin.isTTY ? await readStdinFrames() : "";
-  const controlLines: string[] = [];
-  for (const line of mode === "rpc"
+  const mode = selection.name;
+  // print/json/rpc 都可从管道取输入；TTY 下绝不读取 stdin（会阻塞交互）。
+  const stdinText = args.prompt === undefined && process.stdin.isTTY !== true
+    ? await readStdinFrames()
+    : "";
+  const pipedPrompt = promptFromStdin(stdinText);
+  const inputs = mode === "rpc"
     ? collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
-    : args.prompt !== undefined ? [args.prompt] : []) {
+    : [args.prompt ?? pipedPrompt ?? ""];
+  const controlLines: string[] = [];
+  for (const line of inputs) {
     const probe = handleProbeFrame(bundle.probes, line);
     if (probe !== undefined) {
       writer.write(probe + "\n");
@@ -475,15 +558,14 @@ async function runHeadless(args: CliArgs, bundle: AgentBundle): Promise<number> 
       controlLines.push(line);
     }
   }
-  const opts = {
-    prompt: args.prompt,
-    protocol: bundle.runtime.protocol,
-    lines: mode === "rpc"
-      ? controlLines
-      : args.prompt !== undefined ? [args.prompt] : [],
-    output: (line: string) => writer.write(line + "\n"),
-  };
   try {
+    if (mode === "rpc") return await runCliRpc(bundle, controlLines, writer);
+    const opts = {
+      prompt: controlLines[0] ?? "",
+      protocol: bundle.runtime.protocol,
+      lines: controlLines,
+      output: (line: string) => writer.write(line + "\n"),
+    };
     return await MODES[mode].run(agent, opts);
   } catch (error) {
     writer.diagnostic(`zeta: ${(error as Error).message}`);
@@ -545,6 +627,12 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       );
       return 0;
     }
+    // 单一 loader 在（且只在）这里解析模式；交互式 TTY 守卫早于任何 TUI import。
+    const selection = loadModePlugin(args);
+    if (args.mode === "tui" && selection === undefined) {
+      process.stdout.write("(非 TTY：请用 zeta --headless \"提示词\"；交互式 TUI 需要 TTY)\n");
+      return 0;
+    }
     if (args.mode === "daemon") return runDaemonMode(args, bundle);
     if (args.mode === "remote") {
       const stdinText = args.prompt === undefined && process.stdin.isTTY === false ? await readStdinFrames() : "";
@@ -553,7 +641,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         collectRpcLines(args.prompt, stdinText, process.stdin.isTTY === true)
       );
     }
-    return args.mode === "tui" ? await runTui(args, bundle) : await runHeadless(args, bundle);
+    if (selection === undefined) throw new Error(`UNSUPPORTED_MODE: ${args.mode}`);
+    return selection.name === "interactive"
+      ? await runTui(args, bundle)
+      : await runHeadless(args, bundle, selection);
   } finally {
     await bundle.runtime.dispose();
     bundle.probes.stop();

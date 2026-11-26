@@ -179,3 +179,30 @@ export function createRuntimeKeymap(options: RuntimeKeymapOptions = {}): KeymapR
   }
   return keymap;
 }
+
+export interface ReactiveKeymap extends KeymapRegistry {
+  /** 热更新宿主自定义键位；默认 TUI/APP 层始终重建，冲突同样显式抛出。 */
+  setBindings(bindings: readonly KeyBinding[]): void;
+}
+
+/**
+ * 响应式键位表：native 与 custom backend 共用同一实例契约。
+ * setBindings 后 resolve/list 立即看到新绑定，无需重建 App 或重挂终端。
+ */
+export function createReactiveKeymap(options: RuntimeKeymapOptions = {}): ReactiveKeymap {
+  let registry = createRuntimeKeymap(options);
+  return {
+    register(binding) {
+      return registry.register(binding);
+    },
+    resolve(combo) {
+      return registry.resolve(combo);
+    },
+    list() {
+      return registry.list();
+    },
+    setBindings(bindings) {
+      registry = createRuntimeKeymap({ bindings });
+    },
+  };
+}
