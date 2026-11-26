@@ -123,10 +123,16 @@ describe("T-02 facade 审计传输接线", () => {
 
       const storage = createFileAuditStorage(harness.dir);
       let revision = 0;
-      for (let attempt = 0; attempt < 100 && revision === 0; attempt += 1) {
-        revision = storage.readLines().length;
-        if (revision === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+      let lastCount = -1;
+      let stableReads = 0;
+      for (let attempt = 0; attempt < 100 && stableReads < 3; attempt += 1) {
+        const count = storage.readLines().length;
+        if (count > 0 && count === lastCount) stableReads += 1;
+        else stableReads = 0;
+        lastCount = count;
+        await new Promise((resolve) => setTimeout(resolve, 20));
       }
+      revision = lastCount;
       expect(revision).toBeGreaterThan(0);
 
       expect(() => agent.finalizeAudit(revision)).toThrow("AUDIT_SOCKET_REQUIRES_ASYNC_FINALIZE");

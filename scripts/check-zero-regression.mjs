@@ -9,14 +9,14 @@ const BASELINE = {
   fail: 0,
   files: argFiles ? Number(argFiles.split("=")[1]) : 51,
 };
-const CORE_PACKAGES = [
-  "@zeta-agent/cordis",
-  "@zeta-agent/events",
-  "@zeta-agent/agent-framework",
-  "@zeta-agent/agent",
-  "@zeta-agent/security",
-  "@zeta-agent/observability",
-  "@zeta-agent/deploy",
+const CORE_PACKAGE_DIRS = [
+  "packages/components/cordis",
+  "packages/components/events",
+  "packages/agent-framework",
+  "packages/agent",
+  "packages/components/security",
+  "packages/components/observability",
+  "packages/deploy",
 ];
 
 function fail(msg) {
@@ -55,15 +55,11 @@ if (current.fail !== 0) fail(`存在失败测试: ${current.fail}`);
 if (current.pass < BASELINE.pass) fail(`通过数低于基线: ${current.pass} < ${BASELINE.pass}`);
 if (current.files < BASELINE.files) fail(`测试文件数低于基线: ${current.files} < ${BASELINE.files}`);
 
-const turboTest = run("bun", ["x", "turbo", "run", "test"]);
-if (turboTest.code !== 0) {
-  console.error(turboTest.out);
-  fail(`turbo run test 退出码非 0: ${turboTest.code}`);
-}
-for (const pkg of CORE_PACKAGES) {
-  if (!turboTest.out.includes(pkg)) {
-    console.error(turboTest.out);
-    fail(`turbo run test 输出缺少核心包: ${pkg}`);
+const normalizedOutput = bunTest.out.replaceAll("\\", "/");
+for (const directory of CORE_PACKAGE_DIRS) {
+  if (!normalizedOutput.includes(directory)) {
+    console.error(bunTest.out);
+    fail(`bun test 输出缺少核心包目录: ${directory}`);
   }
 }
 

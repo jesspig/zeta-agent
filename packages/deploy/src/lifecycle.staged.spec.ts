@@ -29,10 +29,12 @@ function manifest(target: ArtifactManifest["target"] = "linux-x64"): ArtifactMan
 class MemoryStore implements ReleaseStore {
   readonly files = new Map<string, string>();
   readonly renames: string[] = [];
+  failRename?: (from: string, to: string) => boolean;
   rename?: (from: string, to: string) => void;
   constructor(withRename = true) {
     if (withRename) {
       this.rename = (from, to) => {
+        if (this.failRename?.(from, to) === true) throw new Error("INJECTED_RENAME_FAILURE");
         const value = this.files.get(from);
         if (value === undefined) throw new Error(`ENOENT ${from}`);
         this.files.delete(from);
@@ -117,6 +119,18 @@ describe("T-24 staged release：原子切换、失败回滚与可复核日志", 
     expect(result.rolledBack).toBe(true);
     expect(currentRelease(root, store).version).toBe("1.0.0");
     expect(readReleaseLog(store, root).some((event) => event.action === "rollback")).toBe(true);
+  });
+
+  test("current 写成功后 history 写失败时恢复旧指针", async () => {
+    const store = new MemoryStore();
+    installRelease(root, "1.0.0", manifest(), store);
+    store.failRename = (from) => from.includes("history.json.tmp");
+
+    await expect(stageRelease(root, "2.0.0", manifest("linux-arm64"), store, { probe: always })).rejects.toThrow(
+      /STAGED_HISTORY_WRITE_FAILED/
+    );
+
+    expect(currentRelease(root, store).version).toBe("1.0.0");
   });
 
   test("无原子 rename 能力的 store 失败关闭，不伪造原子发布", async () => {

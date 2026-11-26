@@ -62,9 +62,9 @@ for (const [name, subpaths] of Object.entries(facades)) {
   ].join("\n");
   writeFileSync(probe, `${script}\n`);
   try {
-    const r = spawnSync(node, [probe], { cwd: pkgDir, encoding: "utf8" });
+    const r = spawnSync(node, [probe], { cwd: pkgDir, stdio: "inherit" });
     if (subpaths.length > 0) {
-      console.log(`\n--- exports resolve @ ${name} (exit=${r.status}) ---\n${(r.stdout + r.stderr).trim()}`);
+      console.log(`\n--- exports resolve @ ${name} (exit=${r.status}) ---`);
       check(r.status === 0, `${name}: 所有声明子路径可被 Node 解析`);
     }
   } finally {
@@ -120,10 +120,10 @@ for (const [consumerDir, specifiers, expectedExports] of importChecks) {
   try {
     const r = spawnSync(bun, [probe], {
       cwd: join(root, "packages", consumerDir),
-      encoding: "utf8",
+      stdio: "inherit",
       shell: process.platform === "win32",
     });
-    console.log(`\n--- import smoke @ packages/${consumerDir} (exit=${r.status}) ---\n${(r.stdout + r.stderr).trim()}`);
+    console.log(`\n--- import smoke @ packages/${consumerDir} (exit=${r.status}) ---`);
     check(r.status === 0, `packages/${consumerDir}: facade 子路径动态导入全部成功`);
   } finally {
     unlinkSync(probe);

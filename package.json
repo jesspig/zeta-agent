@@ -15,7 +15,7 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "check": "bun scripts/check-facade-exports.mjs && bun scripts/check-aggregate-exports.mjs && bun scripts/guard-architecture.mjs && bun scripts/check-invariant-points.mjs && bun scripts/check-core-dependencies.mjs && turbo run build typecheck test && bun scripts/check_docs_links.mjs && bun scripts/check-zero-regression.mjs && bun scripts/check-readme-closeout.mjs && bun run gates",
+    "check": "bun scripts/check-facade-exports.mjs && bun scripts/check-aggregate-exports.mjs && bun scripts/guard-architecture.mjs && bun scripts/check-invariant-points.mjs && bun scripts/check-core-dependencies.mjs && turbo run build typecheck && bun test && bun scripts/check_docs_links.mjs && bun scripts/check-zero-regression.mjs && bun scripts/check-readme-closeout.mjs && bun run gates",
     "gates:tests": "bun scripts/gate-tests.mjs",
     "gates:security": "bun scripts/gate-security.mjs",
     "gates:perf": "bun scripts/gate-performance.mjs",
@@ -26,7 +26,7 @@
     "gates": "bun scripts/quality-gates.mjs",
     "dev": "turbo run dev",
     "zeta": "bun apps/zeta-cli/src/index.ts",
-    "build:local": "bun scripts/build-local.ts --all",
+    "build:local": "bun install --frozen-lockfile --os='*' --cpu='*' --libc='*' && bun scripts/build-local.ts --all",
     "smoke:local": "bun scripts/smoke-local.ts"
   },
   "packageManager": "bun@1.4.2",

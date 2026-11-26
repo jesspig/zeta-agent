@@ -95,7 +95,10 @@ try {
   console.log("smoke-local: 安装 / staged 升级 / rollback 均通过真实单文件启动且日志可复核");
 
   // T-20 RC：空目录 + 断网（无连接配置，走 echo）+ 重启续聊，全部用真实二进制。
-  const offlineDir = mkdtempSync(join(tmpdir(), "zeta-rc-offline-"));
+  // Windows 受限子进程可能无法写系统 TEMP；工作区内临时目录保证真实会话持久化可执行。
+  const smokeTmpRoot = join(root, "reports", "tmp");
+  mkdirSync(smokeTmpRoot, { recursive: true });
+  const offlineDir = mkdtempSync(join(smokeTmpRoot, "zeta-rc-offline-"));
   const env = { ...process.env };
   for (const key of ["ZETA_BASE_URL", "ZETA_API_KEY", "ZETA_MODEL"]) delete env[key];
   env.ZETA_SESSION_PATH = join(offlineDir, "session.jsonl");

@@ -17,145 +17,97 @@ const REPORT_REL = "reports";
 const EVIDENCE_REL = "reports/evidence/acceptance";
 const BUN = process.execPath;
 const SCHEMA = "zeta-acceptance/2";
-export const GENERATOR_VERSION = "2.0.0";
-export const CRITERION_VERSION = "zeta-criteria/a1-a40/1";
+export const GENERATOR_VERSION = "2.1.0";
+export const CRITERION_VERSION = "zeta-criteria/ac01-ac25/1";
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
 const ITEMS = [
-  { id: "A1", title: "build/typecheck/test 全绿、lockfile、依赖图无环", commands: [
-    { args: ["run", "check"], expect: "45 successful" },
-    { args: ["x", "turbo", "run", "typecheck", "--force"], expect: "15 successful" },
-    { args: ["test"], expect: "0 fail" },
+  { id: "AC-01", title: "验收/发布报告绑定 commit、runId、日志哈希，fail 非零退出", commands: [
+    { args: ["test", "scripts/acceptance-report.spec.mjs", "scripts/ci-evidence.spec.mjs", "scripts/release-check.spec.mjs", "scripts/check-current-ci.spec.mjs"], expect: "0 fail" },
   ] },
-  { id: "A2", title: "事实登记 P1-P10 指向实现与测试", commands: [
-    { args: ["scripts/check-fact-registry.mjs"], expect: "P1-P10 均指向" },
-  ] },
-  { id: "A3", title: "同配置不同顺序观察等价（Thm 80）", commands: [
-    { args: ["test", "packages/testing/src/properties.spec.ts", "packages/components/loader/src/config.spec.ts", "packages/components/loader/src/reconcile.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A4", title: "随机装卸无残留、逆各一次（Cor 69）", commands: [
-    { args: ["test", "packages/testing/src/properties.spec.ts", "packages/components/cordis/src/fiber.spec.ts", "packages/components/cordis/src/effect.cleanup.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A5", title: "guard teardown 可读依赖、撤回延迟（Thm 70）", commands: [
-    { args: ["test", "packages/framework/src/context.lifecycle.spec.ts", "packages/testing/src/properties.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A6", title: "12 条不变量 legacy/plugin 双版 + 双门", commands: [
-    { args: ["test", "packages/agent-framework/src/runtime/invariants.spec.ts", "packages/agent-framework/src/runtime/invariants-naming.spec.ts", "packages/agent-framework/src/tools/invariants.spec.ts"], expect: "0 fail" },
-    { args: ["scripts/check-invariant-points.mjs"] },
-  ] },
-  { id: "A7", title: "工具热插拔声明同步；权限热更新不 reload", commands: [
-    { args: ["test", "packages/framework/src/loader/plugin-transaction.spec.ts", "packages/agent/src/facade.tool-boundary.spec.ts", "packages/agent/src/plugins/permissions/policy.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A8", title: "工具副作用分类审查与默认发射策略", commands: [
-    { args: ["test", "packages/agent/src/tools.spec.ts", "packages/components/security/src/emission.spec.ts", "packages/components/security/src/egress.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A9", title: "testRender 帧快照覆盖消息/工具/状态/overlay/槽位", commands: [
-    { args: ["test", "packages/tui/src/runtime.spec.tsx", "packages/tui/src/components/transcript.visual.spec.tsx", "packages/tui/src/approval-ui.spec.tsx", "packages/tui/src/slots.spec.ts", "packages/tui/src/create-tui.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A10", title: "--print/--json/--rpc 无 TTY 可用", commands: [
-    { args: ["test", "apps/zeta-cli/src/headless-isolation.spec.ts", "apps/zeta-cli/src/print-e2e.spec.ts", "packages/agent/src/cli/modes.spec.ts", "packages/agent/src/cli/modes.failure.spec.ts", "packages/deploy/src/rpc.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A11", title: "HMR 真实插件替换、失败保留旧 artifact/FAILED 重试", commands: [
-    { args: ["test", "packages/agent/src/plugins/hot-reload.e2e.spec.ts", "apps/zeta-cli/src/hot-reload.spec.ts", "packages/components/loader/src/hmr.spec.ts", "packages/agent/src/extensions/hot-reload.e2e.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A12", title: "自修改候选隔离构建/exports/依赖环/能力审查", commands: [
-    { args: ["test", "packages/agent/src/extensions/loader.generation.spec.ts", "packages/framework/src/loader/extension-policy.spec.ts", "packages/framework/src/loader/plugin-transaction.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A13", title: "五模式派发与单调 guard", commands: [
-    { args: ["test", "packages/components/events/src/events.spec.ts", "packages/agent-framework/src/runtime/agent.spec.ts", "packages/agent-framework/src/tools/pipeline.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A14", title: "配置顺序汇合与 patch 整块替换", commands: [
-    { args: ["test", "packages/components/loader/src/config.spec.ts", "packages/deploy/src/canonical.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A15", title: "durable 双崩溃窗口与幂等 adapter", commands: [
-    { args: ["test", "packages/agent/src/plugins/effects/durable.crash.spec.ts", "packages/components/security/src/outbox.spec.ts", "packages/components/security/src/emission.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A16", title: "晋升单调性：仅严格更优且资格合格替换", commands: [
-    { args: ["test", "packages/agent/src/research/promotion.spec.ts", "packages/agent/src/research/guardrails.spec.ts", "packages/agent/src/research/decision.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A17", title: "重放不变量 budget/order/legal/best", commands: [
-    { args: ["test", "packages/agent/src/research/frozen.spec.ts", "packages/agent/src/research/pipeline.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A18", title: "观察等价晋升：typed recap 六段与外置取回", commands: [
-    { args: ["test", "packages/agent-framework/src/session/surface.spec.ts", "packages/agent-framework/src/session/recap.spec.ts", "packages/agent/src/facade.compaction.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A19", title: "grader 信息不进改进上下文，tripwire 抛错", commands: [
-    { args: ["test", "packages/agent/src/facade.a21a22.spec.ts", "packages/tui/src/osc-security.spec.ts", "packages/components/observability/src/index.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A20", title: "自演化前后 24 条不变量全绿", commands: [
-    { args: ["test", "packages/agent/src/research/promotion.spec.ts", "packages/agent-framework/src/runtime/invariants.spec.ts", "packages/agent-framework/src/tools/invariants.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A21", title: "可观测性归因/脱敏/OTLP 降级/汇合不变", commands: [
-    { args: ["test", "packages/framework/src/context.tenant.spec.ts", "packages/agent/src/facade.tenant.spec.ts", "packages/agent/src/tenant/governance.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A22", title: "ExecutionBackend 强制、capability 降级 FAILED、凭证不入日志", commands: [
-    { args: ["test", "packages/agent/src/tools/backend.contract.spec.ts", "packages/components/security/src/backend.matrix.spec.ts", "packages/components/security/src/credentials.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A23", title: "egress 默认拒绝、进程外审计完整性标记", commands: [
-    { args: ["test", "packages/components/security/src/egress.dataplane.spec.ts", "packages/components/security/src/audit.integrity.spec.ts", "packages/components/security/src/audit.socket.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A24", title: "Cordis 官方源码对照（@mode/HMR/两层撤销）", commands: [
-    { args: ["test", "packages/components/cordis/src/reflect.spec.ts", "packages/components/cordis/src/fiber.spec.ts", "packages/components/loader/src/hmr.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A25", title: "Effect 4 形态/Impl/6 态/AgentPluginApi 可编译", commands: [
-    { args: ["x", "turbo", "run", "typecheck", "--force"], expect: "15 successful" },
-  ] },
-  { id: "A26", title: "typed recap、workspace:/// 取回、双阈值与 peak", commands: [
-    { args: ["test", "packages/agent-framework/src/session/offload.t12.spec.ts", "packages/agent/src/facade.compaction.spec.ts", "packages/agent/src/session/store.conformance.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A27", title: "经验检索与完整 evidence 落盘", commands: [
-    { args: ["test", "packages/agent/src/research/experience.spec.ts", "packages/agent/src/research/experience-library.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A28", title: "多租户 realm 隔离与配额 coeffect", commands: [
-    { args: ["test", "packages/agent/src/tenant/object-distribution.spec.ts", "packages/agent/src/tenant/object-host.spec.ts", "packages/components/capabilities/src/quota.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A29", title: "fitness seam、A/B、回归门禁与实验隔离", commands: [
-    { args: ["test", "packages/agent/src/research/fitness.spec.ts", "packages/deploy/src/fitness.spec.ts", "packages/deploy/src/fitness.budget-identity.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A30", title: "local/daemon/remote 真实拓扑、canonical digest、架构校验、gRPC", commands: [
-    { args: ["test", "packages/deploy/src/daemon.spec.ts", "packages/deploy/src/remote.spec.ts", "packages/deploy/src/rpc.spec.ts", "packages/deploy/src/runtime-probes.spec.ts", "packages/deploy/src/artifact.spec.ts", "packages/deploy/src/canonical.spec.ts", "packages/deploy/src/targets.spec.ts", "packages/deploy/src/grpc.spec.ts"], expect: "0 fail" },
-    { args: ["scripts/check-grpc-wire.mjs"] },
-  ], note: "wire-level gRPC 由 proto 桩的真实 unary 往返覆盖" },
-  { id: "A31", title: "package graph 无环且跨包相对 import 被拒", commands: [
-    { args: ["scripts/check-core-dependencies.mjs"] },
-    { args: ["scripts/guard-architecture.mjs"] },
-    { args: ["test", "scripts/guard-architecture.spec.mjs"], expect: "0 fail" },
-    { args: ["scripts/check-facade-exports.mjs"] },
-    { args: ["scripts/check-aggregate-exports.mjs"] },
-  ] },
-  { id: "A32", title: "公开 API 无未实现 stub / 静默 no-op", commands: [
-    { args: ["scripts/check-api-stubs.mjs"], expect: "无未实现标记" },
-    { args: ["scripts/check-facade-exports.mjs"] },
-    { args: ["test", "packages/agent/src/facade.security-backend.spec.ts", "packages/components/security/src/backend.unconnected.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A33", title: "持久化三类崩溃与未知结果可恢复", commands: [
-    { args: ["test", "packages/agent/src/session/jsonl.store.spec.ts", "packages/agent/src/session/sqlite.store.spec.ts", "packages/agent/src/plugins/effects/durable.crash.spec.ts", "packages/components/security/src/outbox.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A34", title: "run/tool/session 并发生命周期完备", commands: [
-    { args: ["test", "packages/agent-framework/src/runtime/core.lifecycle.spec.ts", "packages/agent-framework/src/runtime/loop.lifecycle.spec.ts", "packages/agent/src/facade.cancellation.spec.ts", "packages/agent/src/session/tree.atomic.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A35", title: "文件/进程/网络/凭证/审计由真实边界强制", commands: [
-    { args: ["test", "packages/agent/src/tools/backend.contract.spec.ts", "packages/components/security/src/egress.dataplane.spec.ts", "packages/components/security/src/vault.ownership.spec.ts", "packages/components/security/src/audit.integrity.spec.ts", "packages/components/security/src/emission.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A36", title: "local/daemon/remote 与三平台 12 target 矩阵", commands: [
-    { args: ["scripts/gate-platform.mjs"] },
-    { args: ["scripts/smoke-local.ts"], expect: "PASS rollback" },
-    { args: ["scripts/release-check.mjs"] },
-  ], note: "本机仅 win32-x64 可运行；11 个非宿主 target 为 skipped，不计 pass，待 CI 裁决" },
-  { id: "A37", title: "Provider/MCP/RPC/CLI conformance 全绿", commands: [
-    { args: ["test", "packages/agent/src/providers/conformance.spec.ts", "packages/agent/src/plugins/mcp/conformance.spec.ts", "packages/deploy/src/rpc.spec.ts", "apps/zeta-cli/src/print-e2e.spec.ts", "apps/zeta-cli/src/args.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A38", title: "性能预算与资源增长回归门", commands: [
-    { args: ["scripts/gate-performance.mjs"], expect: "PASS perf-budget" },
-    { args: ["test", "packages/deploy/src/budget.spec.ts", "packages/deploy/src/budget.fields.spec.ts"], expect: "0 fail" },
-  ] },
-  { id: "A39", title: "文档能力矩阵与代码装配自动一致", commands: [
-    { args: ["scripts/check-capability-matrix.mjs"], expect: "装配清单一致" },
+  { id: "AC-02", title: "RED 反例先失败，文档基线与研究映射无断链", commands: [
+    { args: ["scripts/red-gates.mjs"], expect: "0 RED" },
     { args: ["scripts/check_docs_links.mjs"], expect: "0 断链" },
   ] },
-  { id: "A40", title: "研究轨所有晋升路径强制经过四道护栏", commands: [
-    { args: ["test", "packages/agent/src/research/guardrails.spec.ts", "packages/agent/src/research/promotion.spec.ts", "packages/agent/src/research/decision.spec.ts", "packages/deploy/src/fitness.budget-identity.spec.ts"], expect: "0 fail" },
+  { id: "AC-03", title: "Fiber 父 update 旧子退役与有界状态机", commands: [
+    { args: ["test", "packages/components/cordis/src", "packages/framework/src/context.lifecycle.spec.ts"], expect: "0 fail" },
   ] },
+  { id: "AC-04", title: "Context/coeffect/events/exports 契约一致", commands: [
+    { args: ["test", "packages/components/cordis/src", "packages/components/events/src", "packages/components/loader/src"], expect: "0 fail" },
+  ] },
+  { id: "AC-05", title: "loader/HMR 连通提交、registry.replace 与故障回退", commands: [
+    { args: ["test", "packages/components/loader/src", "packages/framework/src/loader"], expect: "0 fail" },
+  ] },
+  { id: "AC-06", title: "loop decision/natural/all-terminate 队列语义", commands: [
+    { args: ["test", "packages/agent-framework/src/runtime"], expect: "0 fail" },
+  ] },
+  { id: "AC-07", title: "生产 hook 单一 manager 与 priority/order/no-throw", commands: [
+    { args: ["test", "packages/agent-framework/src/plugins", "packages/agent/src/facade.tool-boundary.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-08", title: "模型工具与 runTool 同管线、schema 与 idle settle", commands: [
+    { args: ["test", "packages/agent-framework/src/tools", "packages/agent/src/facade.pipeline.t08.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-09", title: "SessionStore 重开 transcript/system/tool 与 usage", commands: [
+    { args: ["test", "packages/agent/src/facade.session-restore.t09.spec.ts", "packages/agent/src/session"], expect: "0 fail" },
+  ] },
+  { id: "AC-10", title: "HMR 真实插件更新与 shutdown 无悬挂", commands: [
+    { args: ["test", "packages/agent/src/plugins", "packages/agent/src/extensions", "apps/zeta-cli/src/hot-reload.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-11", title: "每跳 egress/凭证重验与跨 origin 去凭证", commands: [
+    { args: ["test", "packages/components/security/src/egress.dataplane.spec.ts", "packages/components/security/src/credentials.spec.ts", "packages/agent/src/providers"], expect: "0 fail" },
+  ] },
+  { id: "AC-12", title: "文件原子写、结构化 shell、超时取消底层执行", commands: [
+    { args: ["test", "packages/agent/src/tools", "packages/components/security/src/backend.matrix.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-13", title: "不可信插件真实 VM/进程求值与逃逸测试", commands: [
+    { args: ["test", "packages/agent-framework/src/plugins/isolated-evaluator.spec.ts", "packages/agent/src/facade.isolated-plugin.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-14", title: "journal 原子、receipt、unknown 对账与 audit ack", commands: [
+    { args: ["test", "packages/agent/src/plugins/effects", "packages/components/security/src/audit.integrity.spec.ts", "packages/components/security/src/audit.socket.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-15", title: "双租户实例/事件/配额/effects 隔离与 origin 门禁", commands: [
+    { args: ["test", "packages/agent/src/tenant"], expect: "0 fail" },
+  ] },
+  { id: "AC-16", title: "daemon TTL/503/非 loopback 明文拒绝", commands: [
+    { args: ["test", "packages/deploy/src/daemon.spec.ts", "packages/deploy/src/remote.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-17", title: "JSONL/SQLite 重开续聊、fork 与三崩溃窗口", commands: [
+    { args: ["test", "packages/agent/src/session", "packages/agent/src/facade.session-restore.t17.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-18", title: "recap 请求投影、峰值下降与 RPC 持久控制", commands: [
+    { args: ["test", "packages/agent/src/facade.compaction.projection.spec.ts", "packages/agent/src/assembly/protocol.session-control.spec.ts", "packages/deploy/src/rpc.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-19", title: "MCP schema、三 transport 与 OAuth/unsupported", commands: [
+    { args: ["test", "packages/agent/src/plugins/mcp"], expect: "0 fail" },
+  ] },
+  { id: "AC-20", title: "六 profile 真实可运行与单文件断网内置资源", commands: [
+    { args: ["test", "packages/agent/src/assembly/profile-conformance.spec.ts", "packages/agent/src/resources"], expect: "0 fail" },
+    { args: ["scripts/build-local.ts"] },
+    { args: ["scripts/smoke-local.ts"], expect: "PASS" },
+  ] },
+  { id: "AC-21", title: "晋升授权不可转移、24 不变量与失败重放拒绝", commands: [
+    { args: ["test", "packages/agent/src/research/promotion.spec.ts", "packages/agent/src/research/pipeline.spec.ts", "packages/agent/src/research/guardrails.spec.ts"], expect: "0 fail" },
+  ] },
+  { id: "AC-22", title: "证据库不可变、effect span/OTLP 与两轮研究闭环", commands: [
+    { args: ["test", "packages/agent/src/research", "packages/components/observability/src"], expect: "0 fail" },
+  ] },
+  { id: "AC-23", title: "三平台真实 PTY 无 skip 与 CLI/RPC 全方法", commands: [
+    { args: ["scripts/gate-pty.mjs"], expect: "PASS pty:host" },
+    { args: ["test", "apps/zeta-cli/src", "packages/deploy/src/rpc.spec.ts"], expect: "0 fail" },
+    { args: ["scripts/check-current-ci.mjs"], expect: "PASS current-ci" },
+  ] },
+  { id: "AC-24", title: "12 target 运行证据、embedded bytes 与升级回滚", commands: [
+    { args: ["run", "build:local"] },
+    { args: ["scripts/guard-architecture.mjs"], expect: "架构守护通过" },
+    { args: ["scripts/target-evidence.mjs"], expect: "PASS" },
+    { args: ["scripts/smoke-local.ts"], expect: "PASS rollback" },
+    { args: ["test", "packages/deploy/src/lifecycle.staged.spec.ts", "packages/deploy/src/supervisor.spec.ts"], expect: "0 fail" },
+    { args: ["scripts/check-current-ci.mjs"], expect: "PASS current-ci" },
+  ] },
+  { id: "AC-25", title: "全量 check/gates/acceptance v2 与 RC 绑定最终 commit", commands: [
+    { args: ["run", "check"], expect: "PASS 核心语义零回归" },
+    { args: ["scripts/release-check.mjs"], expect: "fail=0" },
+  ], note: "acceptance v2 整体退出码由本报告证明；RC 必须绑定本次 baseline commit" },
 ];
 
 export const ACCEPTANCE_SCHEMA = SCHEMA;
@@ -281,6 +233,7 @@ export function executeCommand(spec, context = {}) {
   const rendered = sanitize(`${stdout}${stderr}${exitLine}`);
   const logPath = `${EVIDENCE_REL}/${runId}/${itemId}.${index}.log`;
   const bytes = Buffer.from(rendered, "utf8");
+  mkdirSync(dirname(join(root, logPath)), { recursive: true });
   writeBytes(join(root, logPath), bytes);
   const timedOut = result.error?.code === "ETIMEDOUT" || result.timedOut === true;
   return {

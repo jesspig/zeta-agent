@@ -22,3 +22,4 @@ export * from "./experience";
 export * from "./fitness";
 export * from "./pipeline";
 export * from "./orchestration";
+export * from "./seal-registry";

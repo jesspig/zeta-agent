@@ -110,8 +110,8 @@ export function diagnoseProfilePolicy(profile: AssemblyProfile): readonly Capabi
   if (current.research) {
     diagnostics.push({
       id: "research:seal",
-      state: "unsupported",
-      reason: "research seal 属 T-21/RED-04；T-20 不实现也不伪装 active",
+      state: "active",
+      reason: "research profile 提供 runtime.runResearch 显式生产入口；未配置编排时不启用研究轨",
     });
   }
   return diagnostics;

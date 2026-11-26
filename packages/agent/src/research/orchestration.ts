@@ -39,6 +39,10 @@ import {
 } from "./pipeline";
 import { sha256Hex, type Candidate } from "./promotion";
 import { issuePromotionSeal } from "./seal";
+import {
+  promotionSealKey,
+  type PromotionSealRegistry,
+} from "./seal-registry";
 
 // ── ResearchProfile：默认禁用，显式启用 ─────────────────────────────────────
 
@@ -155,6 +159,7 @@ export interface ResumeCheckpoint {
   readonly surface: EditableSurface;
   readonly incumbentId?: string;
   readonly incumbentFitness?: number;
+  readonly identityDigest?: string;
   readonly digest: string;
 }
 
@@ -164,6 +169,7 @@ function checkpointDigest(input: {
   readonly surface: EditableSurface;
   readonly incumbentId?: string;
   readonly incumbentFitness?: number;
+  readonly identityDigest?: string;
 }): string {
   return sha256Hex(stableEvidenceStringify(input));
 }
@@ -174,6 +180,7 @@ export function createResumeController(): {
     readonly completedRounds: number;
     readonly surface: EditableSurface;
     readonly incumbent?: Candidate;
+    readonly identityDigest?: string;
   }): ResumeCheckpoint;
   resume(checkpoint: ResumeCheckpoint): ResumeCheckpoint;
 } {
@@ -185,6 +192,7 @@ export function createResumeController(): {
         surface: input.surface,
         ...(input.incumbent === undefined ? {} : { incumbentId: input.incumbent.id }),
         ...(input.incumbent === undefined ? {} : { incumbentFitness: input.incumbent.fitness }),
+        ...(input.identityDigest === undefined ? {} : { identityDigest: input.identityDigest }),
       };
       return Object.freeze({ version: 1 as const, ...body, digest: checkpointDigest(body) });
     },
@@ -247,6 +255,8 @@ export interface ResearchLoopOptions {
   readonly evaluator?: FitnessEvaluator;
   /** RESUME：从已验证检查点的下一轮继续；已完成轮次不再执行。 */
   readonly resume?: ResumeCheckpoint;
+  /** 跨进程 RESUME 必须提供持久化 seal 注册表，防止模块内重新签发的假 seal。 */
+  readonly sealRegistry?: PromotionSealRegistry;
 }
 
 function roundEvents(identity: EpisodeIdentity): readonly EpisodeEvent[] {
@@ -281,9 +291,14 @@ function roundTrace(round: number): readonly FitnessTrace[] {
 
 function restoreIncumbent(
   checkpoint: ResumeCheckpoint,
-  identityDigestValue: string
+  identityDigestValue: string,
+  sealRegistry?: PromotionSealRegistry
 ): Candidate | undefined {
   if (checkpoint.incumbentId === undefined || checkpoint.incumbentFitness === undefined) return undefined;
+  if (sealRegistry !== undefined) {
+    const key = promotionSealKey(identityDigestValue, checkpoint.incumbentId, checkpoint.incumbentFitness);
+    if (!sealRegistry.has(key)) throw new Error("RESUME_SEAL_NOT_REGISTERED");
+  }
   const body = {
     id: checkpoint.incumbentId,
     fitness: checkpoint.incumbentFitness,
@@ -335,13 +350,21 @@ export function runResearchLoop(options: ResearchLoopOptions): ResearchRun {
   );
   const resumeController = createResumeController();
   const checkpoint = options.resume === undefined ? undefined : resumeController.resume(options.resume);
+  const identityDigestValue = identityDigest(resolvedIdentity);
+  if (checkpoint !== undefined) {
+    if (checkpoint.runId !== options.runId) throw new Error("RESUME_RUN_MISMATCH");
+    if (checkpoint.identityDigest !== undefined && checkpoint.identityDigest !== identityDigestValue) {
+      throw new Error("RESUME_IDENTITY_MISMATCH");
+    }
+  }
   const startRound = (checkpoint?.completedRounds ?? 0) + 1;
   if (options.rounds < startRound) throw new Error("RESUME_ROUNDS_BEHIND_CHECKPOINT");
 
   let surface = checkpoint?.surface ?? options.surface;
   let incumbent = restoreIncumbent(
     checkpoint ?? { version: 1, runId: options.runId, completedRounds: 0, surface, digest: "" },
-    identityDigest(resolvedIdentity)
+    identityDigestValue,
+    options.sealRegistry
   );
   const results: ResearchRoundResult[] = [];
 
@@ -403,7 +426,12 @@ export function runResearchLoop(options: ResearchLoopOptions): ResearchRun {
         from: "@VERSION@",
         to: `@VERSION@ ${candidate.id}`,
       });
-      incumbent = outcome.state.incumbent;
+      const promotedIncumbent = outcome.state.incumbent;
+      if (promotedIncumbent === undefined) throw new Error("PROMOTION_INCUMBENT_MISSING");
+      incumbent = promotedIncumbent;
+      options.sealRegistry?.record(
+        promotionSealKey(identityDigestValue, promotedIncumbent.id, promotedIncumbent.fitness)
+      );
     }
 
     const traces = [candidate.artifact, JSON.stringify(events.map((event) => event.outcomes))];
@@ -450,6 +478,7 @@ export function runResearchLoop(options: ResearchLoopOptions): ResearchRun {
     completedRounds: results.length === 0 ? (checkpoint?.completedRounds ?? 0) : options.rounds,
     surface,
     ...(incumbent === undefined ? {} : { incumbent }),
+    identityDigest: identityDigestValue,
   });
   return Object.freeze({
     runId: options.runId,

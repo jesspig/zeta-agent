@@ -45,6 +45,11 @@ import {
   type TenantScope,
 } from "../tenant/governance";
 import { createExperienceStore } from "../research/experience";
+import {
+  runResearchLoop,
+  type ResearchLoopOptions,
+  type ResearchRun,
+} from "../research/orchestration";
 import { resolveAssemblyProfile, type AssemblyProfile } from "./builtins";
 import {
   createAssemblyManifest,
@@ -84,6 +89,11 @@ export interface DefaultRuntimeOptions {
   readonly permissionGate?: AgentOptions["permissionGate"];
   readonly approvalChannel?: AgentOptions["approvalChannel"];
   readonly egressPolicy?: AgentOptions["egressPolicy"];
+  readonly durableEffects?: AgentOptions["durableEffects"];
+  readonly auditSink?: AgentOptions["auditSink"];
+  readonly auditTransport?: AgentOptions["auditTransport"];
+  readonly auditEndpoint?: AgentOptions["auditEndpoint"];
+  readonly auditToken?: AgentOptions["auditToken"];
   /** principal resolver 的输入；提供后按 spaceId 解析独立 realm 作用域。 */
   readonly principalInput?: PrincipalInput;
   /** 外部持有的治理器；不传但提供 principalInput 时按 tokensPerTenant 内部创建。 */
@@ -106,6 +116,8 @@ export interface DefaultRuntimeOptions {
   readonly model?: string;
   /** 单文件嵌入资源（prompts/skills/schema）；与磁盘资源合并进同一注册表。 */
   readonly embeddedResources?: readonly ResourceEntry[];
+  /** research profile 的显式编排配置；产品 profile 不默认启用研究轨。 */
+  readonly research?: Omit<ResearchLoopOptions, "profile" | "enableResearch">;
 }
 
 export interface DefaultRuntime {
@@ -126,6 +138,7 @@ export interface DefaultRuntime {
   readonly backend: StructuredExecutionBackend;
   /** 按 profile 安装的真实资源 coeffect + watcher；local-safe 不安装。 */
   readonly resourceWatcher: ResourcePluginHandle | undefined;
+  runResearch(): ResearchRun;
   dispose(): Promise<void>;
 }
 
@@ -246,6 +259,11 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     permissionGate: options.permissionGate,
     approvalChannel: options.approvalChannel,
     egressPolicy: options.egressPolicy,
+    durableEffects: options.durableEffects,
+    auditSink: options.auditSink,
+    auditTransport: options.auditTransport,
+    auditEndpoint: options.auditEndpoint,
+    auditToken: options.auditToken,
     sessionStore,
   });
 
@@ -337,6 +355,11 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
 
   let disposal: Promise<void> | undefined;
 
+  function runResearch(): ResearchRun {
+    if (options.research === undefined) throw new Error("RESEARCH_CONFIG_REQUIRED");
+    return runResearchLoop({ ...options.research, profile, enableResearch: true });
+  }
+
   return {
     agent,
     manifest,
@@ -353,6 +376,7 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     providerBroker,
     backend: securityBackend,
     resourceWatcher,
+    runResearch,
     dispose() {
       if (disposal !== undefined) return disposal;
       // 所有权顺序：停止新准入与 watcher → agent 排空 run/tool/listener/插件/审计

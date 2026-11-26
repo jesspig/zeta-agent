@@ -287,9 +287,29 @@ export async function stageRelease(
   }
   emit("probe", version, digest, "启动与 readiness 预检通过", configDigest);
 
-  // 原子提交：current 与 history 各经同目录 tmp → rename，不出现半写状态。
+  // 原子提交：current 与 history 各经同目录 tmp → rename；history 失败时恢复旧指针。
   atomicWrite(store, pointerPath(root), JSON.stringify({ version, digest }));
-  atomicWrite(store, historyPath(root), JSON.stringify([...previousHistory, version]));
+  try {
+    atomicWrite(store, historyPath(root), JSON.stringify([...previousHistory, version]));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    try {
+      if (previousRaw === undefined) {
+        if (store.remove === undefined) throw new Error("REMOVE_UNAVAILABLE");
+        store.remove(pointerPath(root));
+      } else {
+        atomicWrite(store, pointerPath(root), previousRaw);
+      }
+    } catch (rollbackError) {
+      const rollbackDetail = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      const failure = `STAGED_HISTORY_WRITE_FAILED: ${detail}; POINTER_ROLLBACK_FAILED: ${rollbackDetail}`;
+      emit("fail", version, digest, failure, configDigest);
+      throw new Error(failure);
+    }
+    const failure = `STAGED_HISTORY_WRITE_FAILED: ${detail}`;
+    emit("fail", version, digest, failure, configDigest);
+    throw new Error(failure);
+  }
   emit("switch", version, digest, `current 原子切换到 ${version}`, configDigest);
 
   const committed: Release = { version, manifest, digest };
