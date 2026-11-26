@@ -42,6 +42,7 @@ import { createDeferredTelemetry, withFirstFrame } from "./deferred-telemetry";
 import { EMBEDDED_ASSETS, EMBEDDED_MANIFEST } from "./embedded-assets.generated";
 import { embeddedResources } from "./embedded-resources";
 import { createProbeHandle, handleProbeFrame } from "./probes";
+import { runCompactCommand } from "./session-commands";
 import { createCliRpcRuntime } from "./daemon";
 import { resolveDataDir } from "./runtime";
 import { buildTuiOptions } from "./tui-options";
@@ -321,8 +322,8 @@ async function runTui(args: CliArgs, bundle: AgentBundle): Promise<number> {
     name: "compact",
     description: "压缩会话上下文",
     category: "session",
-    handler: () => {
-      notice("compact: 当前为内存态会话，上下文压缩暂未接入");
+    handler: async () => {
+      await runCompactCommand(bundle.runtime.protocol, notice);
     },
   });
   registry.register({
