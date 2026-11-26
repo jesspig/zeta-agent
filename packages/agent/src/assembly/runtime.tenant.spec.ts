@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentStreamChunk, AgentStreamFn } from "../facade";
+import { createExperienceStore } from "../research/experience";
 import { createTenantGovernance } from "../tenant/governance";
 import { createDefaultRuntime } from "./runtime";
+
+const freshResearch = () => createExperienceStore();
 
 function stubStream(): AgentStreamFn {
   return async function* (): AsyncIterable<AgentStreamChunk> {
@@ -11,7 +14,7 @@ function stubStream(): AgentStreamFn {
 
 describe("T-13 统一装配注入 principal 与 realm 作用域", () => {
   test("principalInput 解析租户作用域并注入 agent/session", async () => {
-    const governance = createTenantGovernance({ tokensPerTenant: 2 });
+    const governance = createTenantGovernance({ tokensPerTenant: 2, createExperienceStore: freshResearch });
     const runtime = await createDefaultRuntime({
       includeBuiltins: false,
       streamFn: stubStream(),
@@ -34,6 +37,7 @@ describe("T-13 统一装配注入 principal 与 realm 作用域", () => {
     const streams: string[] = [];
     const governance = createTenantGovernance({
       tokensPerTenant: 3,
+      createExperienceStore: freshResearch,
       createStreamFn: (principal) => async function* (): AsyncIterable<AgentStreamChunk> {
         streams.push(principal.spaceId);
         yield `${principal.spaceId}-ok`;

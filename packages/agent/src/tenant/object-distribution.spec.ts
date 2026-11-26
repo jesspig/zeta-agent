@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createJobRunner, createRollout, openStore, type JobRunner, type RolloutController, type Store } from "@zeta-agent/framework";
+import { createExperienceStore } from "../research/experience";
 import { createTenantGovernance } from "./governance";
 
 describe("T-19 租户对象数据面接线", () => {
@@ -11,6 +12,7 @@ describe("T-19 租户对象数据面接线", () => {
     let closedJobs = 0;
 
     const governance = createTenantGovernance({
+      createExperienceStore: () => createExperienceStore(),
       createObjectStore: (principal) => {
         const store = openStore();
         stores[principal.spaceId] = store;

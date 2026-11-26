@@ -14,9 +14,22 @@ export interface PrincipalInput {
 
 export type PrincipalResolver = (input?: PrincipalInput) => Principal;
 
+/** 缺 origin/spaceId 的显式失败关闭错误码（不作为默认租户回退）。 */
+export const TENANT_ORIGIN_REQUIRED = "TENANT_ORIGIN_REQUIRED";
+
+/** origin 必须是非空字符串；空白串等同缺失。 */
+export function hasOrigin(input: PrincipalInput | undefined): input is PrincipalInput & { spaceId: string } {
+  return typeof input?.spaceId === "string" && input.spaceId.trim().length > 0;
+}
+
 export interface PrincipalResolverOptions {
   readonly defaultSpaceId?: string;
   readonly defaultUserId?: string;
+  /**
+   * 是否强制 origin。默认 true：缺 spaceId 显式抛 TENANT_ORIGIN_REQUIRED。
+   * 只有显式声明的单租户路径才允许关闭（并提供 defaultSpaceId/defaultUserId）。
+   */
+  readonly requireOrigin?: boolean;
 }
 
 const realmCache = new Map<string, symbol>();
@@ -31,10 +44,13 @@ export function realmForSpace(spaceId: string): symbol {
 }
 
 export function createPrincipalResolver(options: PrincipalResolverOptions = {}): PrincipalResolver {
+  const requireOrigin = options.requireOrigin ?? true;
   const defaultSpaceId = options.defaultSpaceId ?? "default";
   const defaultUserId = options.defaultUserId ?? "system";
   return (input = {}) => {
-    const spaceId = input.spaceId ?? defaultSpaceId;
+    // 默认多租户语义：缺 origin 不回退 default，直接失败关闭。
+    if (requireOrigin && !hasOrigin(input)) throw new Error(TENANT_ORIGIN_REQUIRED);
+    const spaceId = hasOrigin(input) ? input.spaceId : defaultSpaceId;
     const userId = input.userId ?? defaultUserId;
     return Object.freeze({ userId, spaceId, realm: realmForSpace(spaceId) });
   };

@@ -3,7 +3,11 @@ import { defineComponent, defineKey } from "@zeta-agent/framework";
 import type { SessionStore } from "../session/store";
 import type { DurableEffects } from "../plugins/effects/durable";
 import type { AgentStreamFn } from "../facade";
+import { createExperienceStore } from "../research/experience";
 import { createTenantGovernance } from "./governance";
+
+/** multi-tenant 模式必须显式注入 per-realm research 工厂（无共享回退）。 */
+const freshResearch = () => createExperienceStore();
 
 function stubSession(sessionId: string): SessionStore {
   return { sessionId, close: () => {} } as unknown as SessionStore;
@@ -15,7 +19,7 @@ function stubEffects(tag: string): DurableEffects {
 
 describe("T-13 租户治理 realm 作用域", () => {
   test("同一 space 解析到同一 scope；不同 space 的 realm 与 scope 均隔离", () => {
-    const governance = createTenantGovernance();
+    const governance = createTenantGovernance({ createExperienceStore: freshResearch });
     const a1 = governance.resolve({ spaceId: "space-a", userId: "u-a" });
     const a2 = governance.resolve({ spaceId: "space-a", userId: "u-a" });
     const b = governance.resolve({ spaceId: "space-b", userId: "u-b" });
@@ -35,6 +39,7 @@ describe("T-13 租户治理 realm 作用域", () => {
     const effects = new Map<string, DurableEffects>();
     const streams = new Map<string, AgentStreamFn>();
     const governance = createTenantGovernance({
+      createExperienceStore: freshResearch,
       createSessionStore: (principal) => {
         const store = stubSession(principal.spaceId);
         sessions.set(principal.spaceId, store);
@@ -79,7 +84,7 @@ describe("T-13 租户治理 realm 作用域", () => {
   });
 
   test("子 realm dispose 不影响兄弟 realm", async () => {
-    const governance = createTenantGovernance();
+    const governance = createTenantGovernance({ createExperienceStore: freshResearch });
     const a = governance.resolve({ spaceId: "dispose-a" });
     const b = governance.resolve({ spaceId: "dispose-b" });
     const key = defineKey<string>("@zeta-agent/t13-agent", "dispose-resource");
@@ -97,7 +102,7 @@ describe("T-13 租户治理 realm 作用域", () => {
 
   test("notify 不跨租户：只刷新目标 realm 的 fiber", async () => {
     const key = defineKey<string>("@zeta-agent/t13-agent", "notify-resource");
-    const governance = createTenantGovernance();
+    const governance = createTenantGovernance({ createExperienceStore: freshResearch });
     const a = governance.resolve({ spaceId: "notify-a" });
     const b = governance.resolve({ spaceId: "notify-b" });
     const seenA: string[] = [];
@@ -129,7 +134,7 @@ describe("T-13 租户治理 realm 作用域", () => {
   });
 
   test("配额按 realm 独立且并发 reserve 不超额", async () => {
-    const governance = createTenantGovernance({ tokensPerTenant: 3 });
+    const governance = createTenantGovernance({ tokensPerTenant: 3, createExperienceStore: freshResearch });
     const a = governance.resolve({ spaceId: "quota-a" });
     const b = governance.resolve({ spaceId: "quota-b" });
     const results = await Promise.all(Array.from({ length: 5 }, () => Promise.resolve(a.quota.reserve(1))));
@@ -141,7 +146,7 @@ describe("T-13 租户治理 realm 作用域", () => {
   });
 
   test("realm churn：反复解析/回收不残留 scope，兄弟 realm 始终可用", async () => {
-    const governance = createTenantGovernance();
+    const governance = createTenantGovernance({ createExperienceStore: freshResearch });
     const stable = governance.resolve({ spaceId: "stable" });
     const key = defineKey<string>("@zeta-agent/t13-agent", "churn-resource");
     stable.set(key, "stable-value");
