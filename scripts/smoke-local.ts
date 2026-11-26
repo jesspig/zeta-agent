@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,9 +8,10 @@ import {
   currentRelease,
   hostTarget,
   installRelease,
+  readReleaseLog,
   rollbackRelease,
   sha256Hex,
-  upgradeRelease,
+  stageRelease,
   verifyArtifactManifest,
   type ArtifactManifest,
   type ReleaseStore,
@@ -41,6 +42,7 @@ const store: ReleaseStore = {
     writeFileSync(path, data, "utf8");
   },
   exists: (path) => existsSync(path),
+  rename: (from, to) => renameSync(from, to),
 };
 
 function placeBinary(version: string): string {
@@ -62,16 +64,35 @@ try {
   startOnce(placeBinary(installed.version));
   console.log(`PASS install ${installed.version} digest=${installed.digest.slice(0, 12)} start=ok`);
 
-  const upgraded = upgradeRelease(installRoot, "1.1.0", manifest, store);
+  // T-24：升级走 staged release，先做 digest/config/启动/readiness 校验再原子切换 current。
+  const stagedBinary = placeBinary("1.1.0");
+  const stagedLogs: unknown[] = [];
+  const upgraded = await stageRelease(installRoot, "1.1.0", manifest, store, {
+    probe: {
+      startup: () => {
+        startOnce(stagedBinary);
+        return true;
+      },
+      readiness: () => true,
+    },
+    log: (event) => stagedLogs.push(event),
+  });
+  if (upgraded.rolledBack) throw new Error(`STAGED_UPGRADE_ROLLED_BACK: ${upgraded.error ?? ""}`);
   startOnce(placeBinary(upgraded.to));
-  console.log(`PASS upgrade ${upgraded.from} -> ${upgraded.to} digest=${upgraded.digest.slice(0, 12)} start=ok`);
+  if (!readReleaseLog(store, installRoot).some((event) => event.action === "switch")) {
+    throw new Error("STAGED_SWITCH_LOG_MISSING");
+  }
+  console.log(`PASS staged-upgrade ${upgraded.from} -> ${upgraded.to} digest=${upgraded.digest.slice(0, 12)} start=ok log=${stagedLogs.length}`);
 
   const rolled = rollbackRelease(installRoot, store);
   startOnce(placeBinary(rolled.to));
   const current = currentRelease(installRoot, store);
   if (current.version !== "1.0.0") throw new Error(`ROLLBACK_VERSION_MISMATCH: ${current.version}`);
+  if (!readReleaseLog(store, installRoot).some((event) => event.action === "rollback")) {
+    throw new Error("ROLLBACK_LOG_MISSING");
+  }
   console.log(`PASS rollback ${rolled.from} -> ${rolled.to} digest=${current.digest.slice(0, 12)} start=ok`);
-  console.log("smoke-local: 安装/升级/rollback 均通过真实单文件启动");
+  console.log("smoke-local: 安装 / staged 升级 / rollback 均通过真实单文件启动且日志可复核");
 
   // T-20 RC：空目录 + 断网（无连接配置，走 echo）+ 重启续聊，全部用真实二进制。
   const offlineDir = mkdtempSync(join(tmpdir(), "zeta-rc-offline-"));

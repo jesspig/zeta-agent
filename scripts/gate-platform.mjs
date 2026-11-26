@@ -73,7 +73,14 @@ for (const target of config.supplyChain.targets) {
     verifyArtifactManifest(manifest);
     if (manifest.target !== target) throw new Error(`MANIFEST_TARGET_MISMATCH: ${manifest.target}`);
     const bytes = new Uint8Array(readFileSync(binaryPath));
-    verifyArtifactBytes(manifest, { binary: bytes });
+    const embedded = {};
+    for (const resource of manifest.embedded) {
+      const local = join(dir, resource.path);
+      const asset = existsSync(local) ? local : join(root, "apps/zeta-cli/assets", resource.path);
+      if (!existsSync(asset)) throw new Error(`EMBEDDED_ASSET_MISSING: ${resource.path}`);
+      embedded[resource.id] = new Uint8Array(readFileSync(asset));
+    }
+    verifyArtifactBytes(manifest, { binary: bytes, ...embedded });
     const detected = detectBinaryArch(bytes.subarray(0, 128));
     const isHost = host === target;
     let execution = "本机未执行（非宿主 target）";
@@ -136,6 +143,57 @@ if (host !== undefined && existsSync(join(root, "dist/local", host, "manifest.js
       detail: "宿主 target 产物缺失，未在本机运行；CI 矩阵覆盖",
     })
   );
+}
+
+// T-24：构建矩阵与运行矩阵分列；emulated/skipped 不计为 pass。
+const evidencePath = join(root, "reports/target-evidence.json");
+if (!existsSync(evidencePath)) {
+  gates.push(
+    makeGate({
+      id: "platform:evidence-matrix",
+      category: "platform",
+      name: "12 target 构建/运行矩阵分列报告",
+      status: "skipped",
+      scope: "cross-platform",
+      detail: "reports/target-evidence.json 缺失；请先运行 bun scripts/target-evidence.mjs",
+      evidence: [{ kind: "file", ref: "reports/target-evidence.json" }],
+    })
+  );
+} else {
+  let matrix;
+  try {
+    matrix = JSON.parse(readFileSync(evidencePath, "utf8"));
+    const buildOk =
+      matrix.build?.length === 12 &&
+      matrix.run?.length === 12 &&
+      matrix.build.every((item) => item.kind === "cross-build/static" && item.native === false) &&
+      matrix.summary?.build?.fail === 0 &&
+      matrix.run.every((item) => {
+        if (item.mode === "native") return item.native === true && item.status === "pass";
+        if (item.mode === "emulated") return item.native === false && item.emulated === true && item.status !== "pass";
+        return item.native === false && item.status !== "pass";
+      });
+    gates.push(
+      makeGate({
+        id: "platform:evidence-matrix",
+        category: "platform",
+        name: "12 target 构建/运行矩阵分列报告",
+        status: buildOk ? "pass" : "fail",
+        detail: `build pass=${matrix.summary.build.pass}/skipped=${matrix.summary.build.skipped}/fail=${matrix.summary.build.fail}；run native=${matrix.summary.run.native}/emulated=${matrix.summary.run.emulated}/skipped=${matrix.summary.run.skipped}/fail=${matrix.summary.run.fail}；emulated 与 skipped 均不计 pass`,
+        evidence: [{ kind: "file", ref: "reports/target-evidence.json" }],
+      })
+    );
+  } catch (error) {
+    gates.push(
+      makeGate({
+        id: "platform:evidence-matrix",
+        category: "platform",
+        name: "12 target 构建/运行矩阵分列报告",
+        status: "fail",
+        detail: `矩阵报告不可解析：${error.message}`,
+      })
+    );
+  }
 }
 
 writeGates("platform", gates);

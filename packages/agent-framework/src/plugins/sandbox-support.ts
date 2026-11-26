@@ -24,7 +24,7 @@ export function pluginSystemSandbox(platform: NodeJS.Platform = process.platform
       platformLimited: true,
       mechanism: null,
       reason:
-        "PLATFORM_LIMITED: Windows 无 seccomp/jail；不可信插件在普通子进程 vm 内求值，宿主 install/hook/工具链仅 trusted 可达，失败关闭",
+        "PLATFORM_LIMITED: Windows 无 seccomp/jail；无进程内系统沙箱 API/native addon，Job Object 仅能经 PowerShell 进程外 P/Invoke 且不完整限制 fs/network，AppContainer 需打包身份；不可信插件在普通子进程 vm 内求值，失败关闭，禁止声明 active（权威证据：reports/sandbox-feasibility.md）",
     };
   }
   return {
@@ -33,6 +33,6 @@ export function pluginSystemSandbox(platform: NodeJS.Platform = process.platform
     platformLimited: false,
     mechanism: null,
     reason:
-      "NO_REAL_SYSTEM_SANDBOX: 未接入 bwrap/seccomp/microvm；不可信插件在普通子进程 vm 内求值，失败关闭",
+      "NO_REAL_SYSTEM_SANDBOX: 未接入 bwrap/seccomp/microvm；不可信插件在普通子进程 vm 内求值，失败关闭（权威证据：reports/sandbox-feasibility.md）",
   };
 }

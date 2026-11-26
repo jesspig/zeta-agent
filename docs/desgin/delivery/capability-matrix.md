@@ -183,7 +183,7 @@
 | 缺口 | 现状（2026-11-26） | 处理 |
 | --- | --- | --- |
 | 完整 gRPC 控制面/remote 拓扑 | `packages/deploy/src/grpc.ts` 已有真实 wire-level server/client 组件；默认 remote 仍 HTTP JSON-RPC，完整拓扑未接线 | A30 不写 pass；组件存在 ≠ 默认启用 ≠ 验收通过；由 T-24 及后续任务补齐 |
-| 非宿主 target 运行态 | 本机仅 win32-x64 跑生命周期；CI `release-matrix` 36 job（3 OS × 12 target）只 build + `gate-platform` 静态校验，无运行证据 | A36 不写 pass；12 target 运行证据由 T-24 补齐 |
+| 非宿主 target 运行态 | T-24 已把构建矩阵与运行矩阵分开：本机 12 target cross-build/static 逐项校验通过，运行证据为 1 native（win32-x64 真实启动/探针）+ 11 emulated（基于真实 embedded bytes 重放启动门禁，非 native）；CI 拆为 build-matrix 与 run-matrix | A36 不写 pass；emulated/skipped 均不冒充 native pass，非宿主 native 运行仍由 CI 宿主 job 覆盖 |
 | release-age | 3 个直接依赖发布不足 7 天（historical，2026-11-25 裁决） | 如实记录为已知风险，未改阈值；本轮任务列表止于 T-25，无 T-26，后续窗口待评估 |
-| 系统级 sandbox backend | local-full 的 shell.start 由真实进程执行器支撑并声明 active；isolation/seccomp 仍 unsupported（Windows 明确平台受限），插件隔离子进程无系统级 seccomp/jail | 保持系统沙箱失败关闭，不写 active/pass；F-T12-01 已由 local-full 真实 shell 关闭，F-T13-01 如实标注平台限制 |
+| 系统级 sandbox backend | local-full 的 shell.start 由真实进程执行器支撑并声明 active；isolation/seccomp 仍 unsupported（Windows 平台受限），插件隔离子进程无系统级 seccomp/jail。T-24 权威探针：无进程内沙箱 API、0 个 native addon、Job Object 仅能经 PowerShell 进程外 P/Invoke 且不限制 fs/network、无 AppContainer 打包身份；WSL 发行版存在但不属于当前宿主生产路径 | 保持系统沙箱失败关闭，不写 active/pass；F-T12-01 已由 local-full 真实 shell 关闭；F-T13-01 维持未关闭（closure=unmet），证据见 reports/sandbox-feasibility.md，交 T-25 如实列出 |
 | 证据 v2 当前可复现性 | v2 契约冻结（T-01），当前基线尚未重跑全量 acceptance | 不宣称当前 40/40；须绑定 `develop@af37607` 与三平台 39/39 证据后重跑 |

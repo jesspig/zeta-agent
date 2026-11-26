@@ -441,7 +441,7 @@ export function systemSandboxSupport(
       platformLimited: true,
       mechanism: null,
       reason:
-        "PLATFORM_LIMITED: Windows 无 seccomp/jail 系统级沙箱；插件在普通子进程 vm 内求值，失败关闭，不声明 active",
+        "PLATFORM_LIMITED: Windows 无 seccomp/jail 系统级沙箱；无进程内 API/native addon，Job Object 仅能经 PowerShell 进程外 P/Invoke 且不完整限制 fs/network，AppContainer 需打包身份；插件在普通子进程 vm 内求值，失败关闭，不声明 active（权威证据：reports/sandbox-feasibility.md）",
     };
   }
   return {
@@ -450,7 +450,7 @@ export function systemSandboxSupport(
     platformLimited: false,
     mechanism: null,
     reason:
-      "NO_REAL_SYSTEM_SANDBOX: 未接入 bwrap/seccomp/microvm；插件在普通子进程 vm 内求值，失败关闭，不声明 active",
+      "NO_REAL_SYSTEM_SANDBOX: 未接入 bwrap/seccomp/microvm；插件在普通子进程 vm 内求值，失败关闭，不声明 active（权威证据：reports/sandbox-feasibility.md）",
   };
 }
 

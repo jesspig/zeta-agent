@@ -26,6 +26,7 @@ const CASES = [
   "./red-cases/t20-profile-conformance.case.mjs",
   "./red-cases/t22-evidence-observability-orchestration.case.mjs",
   "./red-cases/t23-tui-cli-pty.case.mjs",
+  "./red-cases/t24-target-runtime-staged-release.case.mjs",
 ];
 
 const { TIMEOUT_MS } = await import("./red-cases/common.mjs");

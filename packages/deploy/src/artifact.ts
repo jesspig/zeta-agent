@@ -97,22 +97,49 @@ export function verifyArtifactManifest(manifest: ArtifactManifest): void {
   }
 }
 
+export interface VerifyArtifactBytesOptions {
+  /** 要求主二进制字节也一并传入；缺省仅在提供时校验，嵌入资源始终强制完整。 */
+  readonly requireBinary?: boolean;
+}
+
+/**
+ * 逐项校验真实字节：任何声明的嵌入资源缺失、字节数不符或摘要不符都失败关闭。
+ * 不接受未声明的 id（例如合成 marker 冒充真实资源），不跳过任何一项。
+ */
 export function verifyArtifactBytes(
   manifest: ArtifactManifest,
-  bytes: Readonly<Record<string, Uint8Array>>
+  bytes: Readonly<Record<string, Uint8Array>>,
+  options: VerifyArtifactBytesOptions = {}
 ): void {
+  const declared = new Set(manifest.embedded.map((resource) => resource.id));
+  for (const id of Object.keys(bytes)) {
+    if (id !== "binary" && !declared.has(id)) {
+      throw new Error(`UNDECLARED_EMBEDDED_BYTES: ${id}`);
+    }
+  }
   const binary = bytes.binary;
   if (binary !== undefined) {
     if (manifest.binary.sha256 === undefined) throw new Error("ARTIFACT_SHA256_MISSING: binary");
+    if (binary.byteLength !== manifest.binary.bytes) {
+      throw new Error(`BINARY_BYTES_LENGTH_MISMATCH: expected ${manifest.binary.bytes}, got ${binary.byteLength}`);
+    }
     if (sha256Hex(binary) !== manifest.binary.sha256) throw new Error("ARTIFACT_SHA256_MISMATCH: binary");
     const detected = detectBinaryArch(binary);
     if (detected !== undefined && detected !== manifest.binary.arch) {
       throw new Error(`BINARY_ARCH_MISMATCH: expected ${manifest.binary.arch}, got ${detected}`);
     }
+  } else if (options.requireBinary === true) {
+    throw new Error("BINARY_BYTES_MISSING: binary");
   }
   for (const resource of manifest.embedded) {
     const content = bytes[resource.id];
-    if (content === undefined) continue;
+    if (content === undefined) throw new Error(`EMBEDDED_BYTES_MISSING: ${resource.id}`);
+    if (!(content instanceof Uint8Array)) throw new Error(`EMBEDDED_BYTES_INVALID: ${resource.id}`);
+    if (content.byteLength !== resource.bytes) {
+      throw new Error(
+        `EMBEDDED_BYTES_LENGTH_MISMATCH: ${resource.id} expected ${resource.bytes}, got ${content.byteLength}`
+      );
+    }
     if (sha256Hex(content) !== resource.sha256) throw new Error(`ARTIFACT_SHA256_MISMATCH: ${resource.id}`);
     if (resource.kind === "native") {
       const detected = detectBinaryArch(content);

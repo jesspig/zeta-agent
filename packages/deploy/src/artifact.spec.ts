@@ -82,7 +82,8 @@ describe("T-20 单文件产物架构校验", () => {
 
   test("verifyArtifactBytes 校验实际字节的摘要与架构", () => {
     const good = elf("x64");
-    const bytes = { binary: good, "arch-marker": good };
+    const catalog = new TextEncoder().encode("catalog");
+    const bytes = { binary: good, "arch-marker": good, "resource-catalog": catalog };
     expect(() => verifyArtifactBytes(manifest(), bytes)).not.toThrow();
     const arm64 = elf("arm64");
     const base = manifest();
@@ -93,7 +94,27 @@ describe("T-20 单文件产物架构校验", () => {
       ],
     });
     expect(() => verifyArtifactBytes(wrongArch, { ...bytes, "arch-marker": arm64 })).toThrow(/EMBEDDED_ARCH_MISMATCH/);
-    expect(() => verifyArtifactBytes(manifest(), { ...bytes, "arch-marker": new Uint8Array([1]) })).toThrow(/SHA256|sha256/i);
+    const tampered = new Uint8Array(good);
+    tampered[10] = 0x99;
+    expect(() => verifyArtifactBytes(manifest(), { ...bytes, "arch-marker": tampered })).toThrow(/SHA256|sha256/i);
+  });
+
+  test("verifyArtifactBytes 要求完整嵌入 bytes，拒绝缺失、字节数不符与未声明 marker", () => {
+    const good = elf("x64");
+    const catalog = new TextEncoder().encode("catalog");
+    const base = manifest();
+    const complete = { binary: good, "arch-marker": good, "resource-catalog": catalog };
+    expect(() => verifyArtifactBytes(base, { binary: good, "arch-marker": good })).toThrow(/EMBEDDED_BYTES_MISSING/);
+    expect(() => verifyArtifactBytes(base, { ...complete, "resource-catalog": new Uint8Array([1]) })).toThrow(
+      /EMBEDDED_BYTES_LENGTH_MISMATCH|SHA256/i
+    );
+    expect(() => verifyArtifactBytes(base, { ...complete, "synthetic-marker": good })).toThrow(
+      /UNDECLARED_EMBEDDED_BYTES/
+    );
+    expect(() => verifyArtifactBytes(base, complete, { requireBinary: true })).not.toThrow();
+    expect(() => verifyArtifactBytes(base, { "arch-marker": good, "resource-catalog": catalog }, { requireBinary: true })).toThrow(
+      /BINARY_BYTES_MISSING/
+    );
   });
 
   test("assertStartupArtifact 在架构错配时拒绝启动，匹配时放行", () => {
