@@ -209,3 +209,91 @@ export function createControlFence(options: ControlFenceOptions = {}): ControlFe
     },
   };
 }
+
+/** 租约状态机：ACTIVE --续租失败--> EXPIRED --重新获取--> ACTIVE；RELEASED 为终态。 */
+export type LeasePhase = "active" | "expired" | "released";
+
+export interface LeaseRenewerOptions {
+  readonly lease: ControlLease;
+  readonly ttlMs: number;
+  readonly now?: () => number;
+  /** 过期后重新获取租约；返回 undefined 表示已被其它 holder 接管，保持 fail-closed。 */
+  readonly reacquire?: () => ControlLease | undefined;
+  readonly onPhaseChange?: (phase: LeasePhase, reason: string) => void;
+}
+
+export interface LeaseRenewer {
+  readonly phase: LeasePhase;
+  /** phase 为 active 且底层租约未越过 TTL 时才为 true。 */
+  readonly active: boolean;
+  readonly lease: ControlLease;
+  readonly renewals: number;
+  readonly failures: number;
+  tick(at?: number): boolean;
+  reset(lease: ControlLease): void;
+  release(): void;
+}
+
+/**
+ * 显式租约状态机 + 可注入时钟的续租器。daemon 用定时器驱动 tick，
+ * 测试可用假时钟直接 tick 而不依赖真实时间。
+ */
+export function createLeaseRenewer(options: LeaseRenewerOptions): LeaseRenewer {
+  if (!Number.isFinite(options.ttlMs) || options.ttlMs <= 0) throw new Error("CONTROL_LEASE_TTL_INVALID");
+  const now = options.now ?? (() => Date.now());
+  let current = options.lease;
+  let phase: LeasePhase = "active";
+  let renewals = 0;
+  let failures = 0;
+
+  function change(next: LeasePhase, reason: string): void {
+    if (phase === next) return;
+    phase = next;
+    options.onPhaseChange?.(next, reason);
+  }
+
+  return {
+    get phase() {
+      return phase;
+    },
+    get active() {
+      return phase === "active" && current.active;
+    },
+    get lease() {
+      return current;
+    },
+    get renewals() {
+      return renewals;
+    },
+    get failures() {
+      return failures;
+    },
+    tick(at = now()) {
+      if (phase === "released") return false;
+      if (phase === "expired") {
+        const recovered = options.reacquire?.();
+        if (recovered === undefined || !recovered.active) return false;
+        current = recovered;
+        change("active", "RECOVERED");
+        renewals += 1;
+        return true;
+      }
+      if (current.renew(at)) {
+        renewals += 1;
+        return true;
+      }
+      failures += 1;
+      change("expired", "RENEW_FAILED");
+      return false;
+    },
+    reset(lease) {
+      current = lease;
+      change("active", "RESET");
+    },
+    release() {
+      if (phase === "released") return;
+      current.release();
+      change("released", "RELEASED");
+    },
+  };
+}

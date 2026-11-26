@@ -1,5 +1,6 @@
 export * from "./targets";
 export * from "./canonical";
+export * from "./config-digest";
 export * from "./deployment";
 export * from "./artifact";
 export * from "./build-plan";
@@ -13,5 +14,7 @@ export * from "./stdout";
 export * from "./daemon";
 export * from "./remote";
 export * from "./outbound-connection";
+export * from "./token";
+export * from "./transport";
 export * from "./grpc";
 export * from "./supervisor";

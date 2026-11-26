@@ -20,6 +20,7 @@ const CASES = [
   "./red-cases/plugin-host-escape.case.mjs",
   "./red-cases/durable-idempotent-settle.case.mjs",
   "./red-cases/tenant-realm-breach.case.mjs",
+  "./red-cases/daemon-lease-probe-tls.case.mjs",
 ];
 
 const { TIMEOUT_MS } = await import("./red-cases/common.mjs");

@@ -47,6 +47,7 @@ function options(partial: Partial<DaemonOptions> = {}): DaemonOptions {
     config: { target: "linux-x64" },
     runtime: makeRuntime(),
     port: 0,
+    allowPlainLoopback: true,
     ...partial,
   };
 }

@@ -34,18 +34,21 @@ describe("T-20 运行探针接入真实 AgentRuntime", () => {
     expect(failed.readiness()).toBe(false);
   });
 
-  test("configDigest 包含真实 profile / manifest / session 身份", () => {
+  test("configDigest 包含稳定 profile / manifest / target，排除 session/PID 等非稳定字段", () => {
     const base = createRuntimeProbeSource(fakeRuntime("ACTIVE")).configDigest();
     expect(base).toMatch(/^[0-9a-f]{64}$/);
     expect(createRuntimeProbeSource(fakeRuntime("ACTIVE", { profile: "local-full" })).configDigest()).not.toBe(base);
     expect(
       createRuntimeProbeSource(fakeRuntime("ACTIVE", { manifest: { profile: "local-safe", tools: ["read", "bash"] } })).configDigest()
     ).not.toBe(base);
+    expect(createRuntimeProbeSource(fakeRuntime("ACTIVE", { target: "darwin-arm64" })).configDigest()).not.toBe(base);
+    // T-16：相同配置的摘要必须跨 session / PID 变化保持稳定。
     expect(
       createRuntimeProbeSource(
         fakeRuntime("ACTIVE", { protocol: { session: { id: "another-session" } } })
       ).configDigest()
-    ).not.toBe(base);
+    ).toBe(base);
+    expect(createRuntimeProbeSource(fakeRuntime("ACTIVE")).configDigest()).toBe(base);
   });
 
   test("start 接受 runtime 源并拒绝 target 不一致", () => {

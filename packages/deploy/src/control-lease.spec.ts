@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AdmissionError, grantFor, type ObjectPrincipal } from "@zeta-agent/framework";
-import { acquireControlLease, createControlFence } from "./control-lease";
+import { acquireControlLease, createControlFence, createLeaseRenewer } from "./control-lease";
 
 const principal: ObjectPrincipal = { userId: "u1", spaceId: "s1", realm: Symbol("control-realm") };
 
@@ -64,5 +64,73 @@ describe("T-21 control lease 与替换代次栅栏", () => {
     expect(fence.tryAcquire("admitted")?.active).toBe(true);
     expect(lease.active).toBe(true);
     expect(lease.decision.kind).toBe("allow");
+  });
+});
+
+describe("T-16 租约续期状态机", () => {
+  test("假时钟跨多个 TTL 周期持续续租，租约始终 active", () => {
+    let now = 1000;
+    const fence = createControlFence({ now: () => now, ttlMs: 100 });
+    const lease = fence.tryAcquire("daemon")!;
+    const phases: string[] = [];
+    const renewer = createLeaseRenewer({
+      lease,
+      ttlMs: 100,
+      now: () => now,
+      onPhaseChange: (phase) => phases.push(phase),
+    });
+    for (let cycle = 1; cycle <= 6; cycle += 1) {
+      now = 1000 + cycle * 30;
+      expect(renewer.tick()).toBe(true);
+      expect(renewer.active).toBe(true);
+      expect(renewer.lease.expiresAt).toBe(now + 100);
+      expect(fence.holder).toBe("daemon");
+    }
+    expect(renewer.renewals).toBe(6);
+    expect(renewer.failures).toBe(0);
+    expect(phases).toEqual([]);
+    renewer.release();
+  });
+
+  test("续租失败立即 EXPIRED，active=false，随后可重新获取恢复", () => {
+    let now = 1000;
+    const fence = createControlFence({ now: () => now, ttlMs: 100 });
+    const lease = fence.tryAcquire("daemon")!;
+    const phases: string[] = [];
+    const renewer = createLeaseRenewer({
+      lease,
+      ttlMs: 100,
+      now: () => now,
+      reacquire: () => fence.tryAcquire("daemon") ?? undefined,
+      onPhaseChange: (phase, reason) => phases.push(`${phase}:${reason}`),
+    });
+
+    // 跳过整个 TTL 才 tick：续租必然失败，租约立刻失效。
+    now = 1200;
+    expect(renewer.tick()).toBe(false);
+    expect(renewer.phase).toBe("expired");
+    expect(renewer.active).toBe(false);
+    expect(renewer.failures).toBe(1);
+
+    // 下一个周期重新获取：代次提升，迟到消息被栅栏隔离。
+    const staleGeneration = renewer.lease.generation;
+    expect(renewer.tick()).toBe(true);
+    expect(renewer.phase).toBe("active");
+    expect(renewer.active).toBe(true);
+    expect(renewer.lease.generation).toBeGreaterThan(staleGeneration);
+    expect(fence.isCurrent(staleGeneration)).toBe(false);
+    expect(phases).toEqual(["expired:RENEW_FAILED", "active:RECOVERED"]);
+    renewer.release();
+  });
+
+  test("无重新获取路径时保持过期，不会自行恢复", () => {
+    let now = 1000;
+    const lease = acquireControlLease({ owner: "solo", now: () => now, ttlMs: 100 });
+    const renewer = createLeaseRenewer({ lease, ttlMs: 100, now: () => now });
+    now = 1100;
+    expect(renewer.tick()).toBe(false);
+    expect(renewer.tick()).toBe(false);
+    expect(renewer.active).toBe(false);
+    expect(renewer.phase).toBe("expired");
   });
 });
