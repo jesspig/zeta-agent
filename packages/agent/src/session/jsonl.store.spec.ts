@@ -34,35 +34,65 @@ function create(options?: ConformanceFactoryOptions) {
     path: options?.destination ?? primaryPath,
     sessionId: options?.sessionId,
     faults: options?.faults,
+    writerId: options?.writerId,
+    leaseOwner: options?.leaseOwner,
+    leaseTtlMs: options?.leaseTtlMs,
+    retryMs: options?.retryMs,
+    now: options?.now,
   });
 }
 const factory = Object.assign(create, {
   destination: () => join(primaryPath ?? tempPath(), "..", "clone.jsonl"),
+  seedBadFrame: () => {
+    const path = primaryPath ?? tempPath();
+    appendFileSync(path, '{"type":"frame","frame":{"id":"torn"\n');
+    appendFileSync(path, "not-json\n");
+  },
 });
 
 runSessionStoreConformance("JSONL", factory);
 
 describe("T-11 JSONL SessionStore 专项", () => {
-  test("坏行与截断行被跳过，recover 重写干净文件后可重开", async () => {
+  test("坏行/截断行/未知 schemaVersion 强制 readonly，不被静默跳过或重写", async () => {
     const path = tempPath();
     const store = createJsonlSessionStore({ path, sessionId: "bad-lines" });
     await store.append({ role: "user", content: "good" } satisfies AgentMessage);
     appendFileSync(path, '{"type":"frame","frame":{"id":"torn"\n');
     appendFileSync(path, "this-is-not-json\n");
-    appendFileSync(path, "");
+    appendFileSync(
+      path,
+      JSON.stringify({
+        type: "frame",
+        frame: {
+          id: "future",
+          seq: 2,
+          parentId: null,
+          createdAt: "future",
+          schemaVersion: SESSION_STORE_VERSION + 1,
+          kind: "message",
+          message: { role: "user", content: "future" },
+        },
+      }) + "\n"
+    );
+    const raw = readFileSync(path, "utf8");
 
     const reopened = createJsonlSessionStore({ path });
-    expect(reopened.projection().badLines).toBe(2);
+    expect(reopened.state).toBe("readonly");
+    expect(reopened.projection().badLines).toBe(3);
     expect(reopened.projection().messages.map((item) => item.content)).toEqual(["good"]);
-    const recovery = await reopened.recover();
-    expect(recovery.badLines).toBe(2);
+    await expect(reopened.append({ role: "user", content: "blocked" })).rejects.toMatchObject({
+      code: "SESSION_READONLY",
+    });
+    expect(() => reopened.migrate()).toThrow("坏 frame");
 
-    const clean = createJsonlSessionStore({ path });
-    expect(clean.projection().badLines).toBe(0);
-    expect(clean.projection().messages.map((item) => item.content)).toEqual(["good"]);
+    const recovery = await reopened.recover();
+    expect(recovery.badLines).toBe(3);
+    expect(recovery.state).toBe("readonly");
+    // recover 不得静默丢弃坏 frame：原始字节保持完整，unknown 只对 pending 生效。
+    expect(readFileSync(path, "utf8")).toBe(raw);
+
     store.close();
     reopened.close();
-    clean.close();
   });
 
   test("v0 旧格式自动迁移到 v1，追加与重开均可用", async () => {

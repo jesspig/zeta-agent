@@ -9,3 +9,4 @@ export * from "./audit.socket";
 export * from "./emission";
 export * from "./outbox";
 export * from "./atomic-file";
+export * from "./durable-vocabulary";

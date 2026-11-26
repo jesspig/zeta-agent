@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage, SemanticRecap } from "@zeta-agent/agent-framework";
 import {
+  DURABLE_UNKNOWN_VOCABULARY,
   SESSION_STORE_VERSION,
   type SessionStore,
   type SessionStoreFaults,
@@ -11,12 +12,20 @@ export interface ConformanceFactoryOptions {
   readonly faults?: SessionStoreFaults;
   /** 独立目的地；后端据此创建另一个存储文件。 */
   readonly destination?: string;
+  /** 跨 writer 竞争用例：分区进程内锁，仅靠文件/库租约裁决唯一写入者。 */
+  readonly writerId?: string;
+  readonly leaseOwner?: string;
+  readonly leaseTtlMs?: number;
+  readonly retryMs?: number;
+  readonly now?: () => number;
 }
 
 export interface ConformanceFactory {
   (options?: ConformanceFactoryOptions): SessionStore;
   /** 当前用例的独立 clone 目的地。 */
   destination(): string;
+  /** 按后端写入一个坏 frame（坏行/坏 payload），验证失败关闭语义。 */
+  seedBadFrame(): void;
 }
 
 function message(content: string): AgentMessage {
@@ -224,6 +233,117 @@ export function runSessionStoreConformance(name: string, factory: ConformanceFac
       );
       store.close();
       reopened.close();
+    });
+
+    test("提交中崩溃窗口：unknown-outcome 停止写入，重开 recover 可对账", async () => {
+      const store = factory({
+        faults: {
+          duringCommit: failOnNth(() => {
+            throw new Error("crash-during-commit");
+          }),
+        },
+      });
+      await expect(store.append(message("uncertain"))).rejects.toMatchObject({
+        code: "SESSION_UNKNOWN_OUTCOME",
+      });
+      expect(store.state).toBe(DURABLE_UNKNOWN_VOCABULARY.sessionUnknown);
+      expect(store.projection().messages).toEqual([]);
+      expect(store.pendingIntents()).toHaveLength(1);
+      await expect(store.append(message("blocked"))).rejects.toMatchObject({
+        code: "SESSION_STATE_UNKNOWN_OUTCOME",
+      });
+
+      const reopened = factory();
+      expect(reopened.state).toBe(DURABLE_UNKNOWN_VOCABULARY.sessionUnknown);
+      const recovery = await reopened.recover();
+      expect(recovery.committed).toHaveLength(0);
+      expect(recovery.retryable).toHaveLength(1);
+      expect(reopened.state).toBe("ready");
+      const after = await reopened.append(message("after"));
+      expect(after.outcome).toBe("committed");
+      expect(reopened.projection().messages.map((item) => item.content)).toEqual(["after"]);
+      store.close();
+      reopened.close();
+    });
+
+    test("坏 frame 强制 readonly，不静默跳过也不由 recover 抹除", async () => {
+      const store = factory();
+      await store.append(message("before"));
+      factory.seedBadFrame();
+      expect(store.state).toBe("readonly");
+      expect(store.projection().badLines).toBeGreaterThan(0);
+      await expect(store.append(message("blocked"))).rejects.toMatchObject({ code: "SESSION_READONLY" });
+      const recovery = await store.recover();
+      expect(recovery.state).toBe("readonly");
+      expect(recovery.badLines).toBeGreaterThan(0);
+      expect(store.projection().messages.map((item) => item.content)).toEqual(["before"]);
+      store.close();
+    });
+
+    test("CAS 租约跨 writer 唯一：过期接管后旧 writer 迟到 release 不删新租约", async () => {
+      const clock = { now: 1_000_000 };
+      const shared = { now: () => clock.now, leaseTtlMs: 100, retryMs: 30 };
+      let releaseA!: () => void;
+      let releaseB!: () => void;
+      const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+      const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+      let aReady!: () => void;
+      let bReady!: () => void;
+      const readyA = new Promise<void>((resolve) => { aReady = resolve; });
+      const readyB = new Promise<void>((resolve) => { bReady = resolve; });
+      const a = factory({ ...shared, sessionId: "cas-a", leaseOwner: "writer-A", writerId: "A", faults: { afterLeaseAcquire: async () => { aReady(); await gateA; } } });
+      const b = factory({ ...shared, sessionId: "cas-b", leaseOwner: "writer-B", writerId: "B", faults: { afterLeaseAcquire: async () => { bReady(); await gateB; } } });
+      const c = factory({ ...shared, sessionId: "cas-c", leaseOwner: "writer-C", writerId: "C" });
+
+      const aAppend = a.append(message("A"));
+      await readyA;
+      expect(a.lease()?.owner).toBe("writer-A");
+      clock.now += 101;
+      const bAppend = b.append(message("B"));
+      await readyB;
+      expect(b.lease()?.owner).toBe("writer-B");
+
+      releaseA();
+      await aAppend;
+      expect(b.lease()?.owner).toBe("writer-B");
+      await expect(c.append(message("C"))).rejects.toMatchObject({ code: "SESSION_LEASE_BUSY" });
+      releaseB();
+      await bAppend;
+      expect(new Set([...a.projection().messages, ...b.projection().messages].map((item) => item.content))).toEqual(
+        new Set(["A", "B"])
+      );
+      a.close();
+      b.close();
+      c.close();
+    });
+
+    test("unknown 词汇与 T-14 durable journal 一致，且禁止 exactly-once 措辞", async () => {
+      const store = factory({
+        faults: {
+          afterCommit: failOnNth(() => {
+            throw new Error("crash-after-commit");
+          }, 2),
+        },
+      });
+      await store.append(message("first"));
+      await expect(store.append(message("uncertain"))).rejects.toMatchObject({
+        code: "SESSION_UNKNOWN_OUTCOME",
+      });
+      let messageText = "";
+      try {
+        await store.append(message("blocked"));
+      } catch (error) {
+        messageText = error instanceof Error ? error.message : String(error);
+      }
+      expect(DURABLE_UNKNOWN_VOCABULARY.unknown).toBe("unknown");
+      expect(DURABLE_UNKNOWN_VOCABULARY.sessionUnknown).toContain(DURABLE_UNKNOWN_VOCABULARY.unknown);
+      expect(messageText).toContain(DURABLE_UNKNOWN_VOCABULARY.unknown);
+      expect(messageText).toContain(DURABLE_UNKNOWN_VOCABULARY.delivery);
+      expect(messageText).toContain(DURABLE_UNKNOWN_VOCABULARY.reconciliation);
+      expect(messageText).toContain(DURABLE_UNKNOWN_VOCABULARY.forbiddenClaim);
+      const recovery = await store.recover();
+      expect(recovery.state).toBe("ready");
+      store.close();
     });
   });
 }

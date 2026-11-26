@@ -5,22 +5,28 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { CompactionLineage, SemanticRecap } from "@zeta-agent/agent-framework";
 import {
   assertSessionFrame,
   createFrameId,
   createHeader,
+  describeUnknownOutcome,
+  DURABLE_UNKNOWN_VOCABULARY,
   isSessionFrame,
+  isSupportedSchemaVersion,
+  leaseLockKey,
   projectSessionFrames,
   SESSION_STORE_VERSION,
   SessionStoreError,
   withPathLock,
   type AppendReceipt,
+  type CasSessionLease,
   type MigrationResult,
   type PendingIntent,
   type RecapOptions,
@@ -60,6 +66,7 @@ function isLegacyFrame(value: Record<string, unknown>): boolean {
     typeof value.id === "string" &&
     (value.parentId === null || typeof value.parentId === "string") &&
     (value.kind === "message" || value.kind === "recap" || value.kind === "fork" || value.kind === "truncate") &&
+    isSupportedSchemaVersion(value.schemaVersion) &&
     typeof value.seq !== "number"
   );
 }
@@ -82,7 +89,12 @@ function parseJsonl(text: string): JsonlSnapshot {
     const record = value as Record<string, unknown>;
     if (record.type === "header") {
       const header = record.header as SessionHeader | undefined;
-      if (header === undefined || typeof header.version !== "number" || typeof header.sessionId !== "string") {
+      if (
+        header === undefined ||
+        typeof header.version !== "number" ||
+        typeof header.sessionId !== "string" ||
+        !isSupportedSchemaVersion((header as unknown as Record<string, unknown>).schemaVersion)
+      ) {
         snapshot.badLines += 1;
         continue;
       }
@@ -202,7 +214,7 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
   const idFactory = options.idFactory ?? createFrameId;
   const createdAt = (): string => new Date(now()).toISOString();
   const defaultSessionId = options.sessionId ?? "zeta-session";
-  let currentLease: SessionLease | undefined;
+  let currentLease: CasSessionLease | undefined;
   let closed = false;
   let leafId: string | null = options.rootFrameId ?? null;
 
@@ -213,10 +225,16 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
   function classify(snapshot: JsonlSnapshot, fallbackHeader: SessionHeader): LoadedJsonl {
     const header = snapshot.header ?? fallbackHeader;
     if (header.version > SESSION_STORE_VERSION) return { header, snapshot, state: "readonly" };
+    // 坏行/截断行/未知 schemaVersion 不再静默跳过：失败关闭为只读，等待显式迁移或对账。
+    if (snapshot.badLines > 0) return { header, snapshot, state: "readonly" };
     const unresolved = snapshot.pending.some(
       (intent) => !snapshot.acks.has(intent.id) && !snapshot.cancelled.has(intent.id)
     );
-    return { header, snapshot, state: unresolved ? "unknown-outcome" : "ready" };
+    return {
+      header,
+      snapshot,
+      state: unresolved ? DURABLE_UNKNOWN_VOCABULARY.sessionUnknown : "ready",
+    };
   }
 
   function writeMigrated(sessionId: string): SessionHeader {
@@ -242,6 +260,8 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
     if (snapshot.header !== undefined && snapshot.header.version > SESSION_STORE_VERSION) {
       return { header: snapshot.header, snapshot, state: "readonly" };
     }
+    // 有坏 frame 时禁止自动迁移静默丢弃数据；保持只读并由调用方显式处理。
+    if (snapshot.badLines > 0) return classify(snapshot, fallback);
     if (snapshot.header === undefined || snapshot.header.version < SESSION_STORE_VERSION || snapshot.legacy) {
       return classify(readSnapshot(), writeMigrated(defaultSessionId));
     }
@@ -268,48 +288,107 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
       throw new SessionStoreError("SESSION_READONLY", "存储版本不受支持，保持只读");
     }
     if (current === "unknown-outcome") {
-      throw new SessionStoreError("SESSION_STATE_UNKNOWN_OUTCOME", "未知写入结果，须先 recover()");
+      throw new SessionStoreError(
+        "SESSION_STATE_UNKNOWN_OUTCOME",
+        describeUnknownOutcome("未知写入结果，须先 recover() 并对账")
+      );
     }
   }
 
-  async function acquireLease(): Promise<SessionLease> {
-    const deadline = now() + retryMs;
+  const leaseClaimPrefix = `${basename(leasePath)}.`;
+
+  function leaseClaimPath(generation: number): string {
+    return `${leasePath}.${generation}`;
+  }
+
+  function readLeaseFile(file: string): CasSessionLease | undefined {
+    try {
+      const value = JSON.parse(readFileSync(file, "utf8")) as CasSessionLease;
+      return typeof value?.owner === "string" && typeof value.expiresAt === "number" ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 代次文件是 CAS 的权威状态；稳定指针文件只是当前代次的快照。 */
+  function currentClaim(): CasSessionLease | undefined {
+    let latest: CasSessionLease | undefined;
+    for (const name of readdirSync(dirname(leasePath))) {
+      if (!name.startsWith(leaseClaimPrefix)) continue;
+      const generation = Number(name.slice(leaseClaimPrefix.length));
+      if (!Number.isInteger(generation)) continue;
+      const claim = readLeaseFile(join(dirname(leasePath), name));
+      if (claim === undefined || claim.generation !== generation) continue;
+      if (latest === undefined || generation > latest.generation!) latest = claim;
+    }
+    return latest;
+  }
+
+  async function acquireLease(): Promise<CasSessionLease> {
+    // 重试截止时间用真实时钟：now() 只决定租约过期语义，冻结时钟时也必须能结束 BUSY 等待。
+    const deadline = Date.now() + retryMs;
     for (;;) {
+      const latest = currentClaim() ?? readLeaseFile(leasePath);
+      if (latest !== undefined && now() <= latest.expiresAt) {
+        if (Date.now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
+        await new Promise<void>((resolve) => setTimeout(resolve, 2));
+        continue;
+      }
+      const generation = (latest?.generation ?? 0) + 1;
+      const lease: CasSessionLease = {
+        owner: leaseOwner,
+        expiresAt: now() + leaseTtlMs,
+        generation,
+        token: createFrameId(),
+      };
       try {
-        const fd = openSync(leasePath, "wx");
-        const lease: SessionLease = { owner: leaseOwner, expiresAt: now() + leaseTtlMs };
+        // wx 是文件系统级 CAS：同一代次只能有一个 writer 成功创建。
+        const fd = openSync(leaseClaimPath(generation), "wx");
         try {
           writeSync(fd, JSON.stringify(lease));
           fsyncSync(fd);
         } finally {
           closeSync(fd);
         }
-        currentLease = lease;
-        return lease;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          throw new SessionStoreError("SESSION_RETRYABLE", `租约获取失败：${String(error)}`);
-        }
-        let existing: SessionLease | undefined;
-        try {
-          existing = JSON.parse(readFileSync(leasePath, "utf8")) as SessionLease;
-        } catch {
-          existing = undefined;
-        }
-        if (existing !== undefined && typeof existing.expiresAt === "number" && now() > existing.expiresAt) {
-          rmSync(leasePath, { force: true });
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          if (Date.now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
+          await new Promise<void>((resolve) => setTimeout(resolve, 2));
           continue;
         }
-        if (now() > deadline) {
-          throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 2));
+        throw new SessionStoreError("SESSION_RETRYABLE", `租约获取失败：${String(error)}`);
       }
+      if ((currentClaim()?.generation ?? -1) > generation) {
+        // 更高代次已接管：本 writer 的 CAS 失败，不得继续写入。
+        if (Date.now() > deadline) throw new SessionStoreError("SESSION_LEASE_BUSY", "租约被其他写入者持有");
+        continue;
+      }
+      atomicWrite(leasePath, JSON.stringify(lease));
+      currentLease = lease;
+      return lease;
     }
   }
 
+  async function acquireLeaseWithFault(): Promise<CasSessionLease> {
+    const lease = await acquireLease();
+    try {
+      await options.faults?.afterLeaseAcquire?.(lease);
+    } catch (error) {
+      releaseLease();
+      throw new SessionStoreError("SESSION_RETRYABLE", `租约切点失败：${String(error)}`);
+    }
+    return lease;
+  }
+
   function releaseLease(): void {
-    rmSync(leasePath, { force: true });
+    const held = currentLease;
+    if (held === undefined) return;
+    // 只有 token 与代次都仍属于本 writer 才释放；迟到的 release 不得删掉接管者的租约。
+    const claim = readLeaseFile(leaseClaimPath(held.generation));
+    if (claim?.token === held.token && claim.owner === held.owner) {
+      rmSync(leaseClaimPath(held.generation), { force: true });
+    }
+    if (readLeaseFile(leasePath)?.token === held.token) rmSync(leasePath, { force: true });
     currentLease = undefined;
   }
 
@@ -354,9 +433,9 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
 
   async function appendFrame(frame: SessionFrame, advanceLeaf = true): Promise<AppendReceipt> {
     let committedFrame = frame;
-    await withPathLock(path, async () => {
+    await withPathLock(leaseLockKey(path, options.writerId), async () => {
       assertWritable();
-      await acquireLease();
+      await acquireLeaseWithFault();
       try {
         refresh();
         // seq 与 parentId 必须在锁内解析，否则并发 append 会共用同一序号或父节点。
@@ -477,8 +556,8 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
     },
     async recover(): Promise<RecoveryResult> {
       if (closed) throw new SessionStoreError("SESSION_CLOSED", "SessionStore 已关闭");
-      return withPathLock(path, async () => {
-        await acquireLease();
+      return withPathLock(leaseLockKey(path, options.writerId), async () => {
+        await acquireLeaseWithFault();
         try {
           const snapshot = readSnapshot();
           const committed: string[] = [];
@@ -493,19 +572,8 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
             else retryable.push(intent.frame.id);
             appendRecord(path, { type: "ack", id: intent.id });
           }
-          if (snapshot.badLines > 0 || snapshot.legacy) {
-            const migrated = migrateSessionJsonl(readFileSync(path, "utf8"), loaded.header.sessionId);
-            atomicWrite(
-              path,
-              serializeRecords([
-                { type: "header", header: migrated.header },
-                ...migrated.frames.map((frame) => ({ type: "frame" as const, frame })),
-                ...snapshot.pending.map((intent) => ({ type: "pending" as const, id: intent.id, frame: intent.frame })),
-                ...[...snapshot.acks].map((id) => ({ type: "ack" as const, id })),
-                ...[...snapshot.cancelled].map((id) => ({ type: "cancel" as const, id })),
-              ])
-            );
-          }
+          // 坏 frame 不能被 recover 静默重写掉：保留原始字节，状态保持 readonly，
+          // 交给显式 migrate()/人工对账处理；recover 只解析 pending 的 unknown 结果。
           refresh();
           return { state: loaded.state, committed, retryable, badLines: snapshot.badLines };
         } finally {
@@ -527,6 +595,9 @@ export function createJsonlSessionStore(options: JsonlSessionStoreOptions): Sess
     },
     migrate(): MigrationResult {
       const from = versionAtOpen;
+      if (readSnapshot().badLines > 0) {
+        throw new SessionStoreError("SESSION_INVALID_FRAME", "存在坏 frame，拒绝隐式迁移丢弃数据，须先显式对账");
+      }
       if (from > SESSION_STORE_VERSION) return { from, to: from, migrated: false };
       if (from === SESSION_STORE_VERSION && !loaded.snapshot.legacy) {
         return { from, to: from, migrated: false };

@@ -1,4 +1,8 @@
 import type { AgentMessage, CompactionLineage, SemanticRecap } from "@zeta-agent/agent-framework";
+import { DURABLE_UNKNOWN_VOCABULARY, describeUnknownOutcome } from "@zeta-agent/security";
+
+/** 与 T-14 durable journal 共用同一套 unknown 词汇；不虚构 exactly-once。 */
+export { DURABLE_UNKNOWN_VOCABULARY, describeUnknownOutcome } from "@zeta-agent/security";
 
 export const SESSION_STORE_FORMAT = "zeta-session-store" as const;
 export const SESSION_STORE_VERSION = 1 as const;
@@ -33,6 +37,15 @@ export interface SessionHeader {
 export interface SessionLease {
   readonly owner: string;
   readonly expiresAt: number;
+  /** CAS 代次：只有代次与 token 都匹配的持有者才能释放租约。 */
+  readonly generation?: number;
+  readonly token?: string;
+}
+
+/** 内部 CAS 租约：generation/token 必填，对外仍兼容只读取 owner/expiresAt 的调用方。 */
+export interface CasSessionLease extends SessionLease {
+  readonly generation: number;
+  readonly token: string;
 }
 
 export type SessionStoreState = "ready" | "unknown-outcome" | "readonly";
@@ -71,6 +84,8 @@ export interface SessionProjection {
 
 /** 崩溃窗口故障注入：pending 落盘前、frame 提交前、frame 提交后各一个切点。 */
 export interface SessionStoreFaults {
+  /** 租约 CAS 成功后、任何 pending/frame 写入前的可复现切点（跨 writer 交错注入）。 */
+  afterLeaseAcquire?: (lease: SessionLease) => void | Promise<void>;
   beforeCommit?: (batch: readonly SessionFrame[]) => void | Promise<void>;
   duringCommit?: (batch: readonly SessionFrame[]) => void | Promise<void>;
   afterCommit?: (batch: readonly SessionFrame[]) => void | Promise<void>;
@@ -110,6 +125,11 @@ export interface SessionStoreOptions {
   readonly now?: () => number;
   readonly idFactory?: () => string;
   readonly faults?: SessionStoreFaults;
+  /**
+   * 进程内串行化锁的分区键；不同进程/写入者必须使用不同值。
+   * 真正的唯一 writer 由文件/数据库租约裁决，进程内锁只保护同一 writer 的 append 顺序。
+   */
+  readonly writerId?: string;
 }
 
 export interface MigrationResult {
@@ -155,6 +175,19 @@ export function createHeader(sessionId: string, createdAt: string, version = SES
   return { format: SESSION_STORE_FORMAT, version, sessionId, createdAt };
 }
 
+/**
+ * 未知 schemaVersion 与未来版本一样失败关闭：只接受 1..SESSION_STORE_VERSION。
+ * 不把未知 frame 当噪声跳过，也不假设高版本可安全读取。
+ */
+export function isSupportedSchemaVersion(value: unknown): boolean {
+  return value === undefined || (Number.isInteger(value) && (value as number) >= 1 && (value as number) <= SESSION_STORE_VERSION);
+}
+
+/** 进程内锁按 writer 分区；跨进程 writer 不共享这段锁，依赖 CAS 租约保证唯一写入。 */
+export function leaseLockKey(path: string, writerId?: string): string {
+  return `${path}#${writerId ?? ""}`;
+}
+
 export function isSessionFrame(value: unknown): value is SessionFrame {
   if (typeof value !== "object" || value === null) return false;
   const frame = value as Record<string, unknown>;
@@ -163,6 +196,7 @@ export function isSessionFrame(value: unknown): value is SessionFrame {
     typeof frame.seq === "number" &&
     (frame.parentId === null || typeof frame.parentId === "string") &&
     typeof frame.createdAt === "string" &&
+    isSupportedSchemaVersion(frame.schemaVersion) &&
     (frame.kind === "message" || frame.kind === "recap" || frame.kind === "fork" || frame.kind === "truncate")
   );
 }
