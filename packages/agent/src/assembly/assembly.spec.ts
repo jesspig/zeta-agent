@@ -13,7 +13,7 @@ import {
   resolveAssemblyProfile,
 } from "./builtins";
 import { createAssemblyManifest } from "./manifest";
-import { diagnoseCapabilities, executableToolNames } from "./profile";
+import { diagnoseCapabilities, executableToolNames, operationForTool } from "./profile";
 
 const LOCAL_SAFE_CAPABILITIES: Capabilities = {
   isolation: "unsupported",
@@ -123,6 +123,24 @@ describe("T-10 profile 能力诊断与 active registry schema", () => {
     expect(byId.get("capability:isolation")?.state).toBe("unsupported");
     expect(byId.get("capability:fsConfinement")?.state).toBe("active");
     expect(diagnostics.every((item) => item.reason.length > 0)).toBe(true);
+  });
+
+  test("能力诊断映射与真实执行路径一致：grep 走 file.read，find 走 file.list", () => {
+    expect(operationForTool("grep")).toBe("file.read");
+    expect(operationForTool("find")).toBe("file.list");
+    expect(operationForTool("read")).toBe("file.read");
+    expect(operationForTool("ls")).toBe("file.list");
+
+    // grep 的可见性必须跟随 file.read，而不是 file.list。
+    const readDisabled: OperationCapabilityReport = {
+      operations: { ...LOCAL_SAFE_OPERATIONS.operations, "file.read": "unsupported" },
+    };
+    const diagnostics = diagnoseCapabilities("local-safe", LOCAL_SAFE_CAPABILITIES, readDisabled);
+    const byId = new Map(diagnostics.map((item) => [item.id, item]));
+    expect(byId.get("operation:file.read")?.state).toBe("unsupported");
+    expect(byId.get("operation:file.list")?.state).toBe("active");
+    expect(byId.get("tool:grep")?.state).toBe("unsupported");
+    expect(byId.get("tool:find")?.state).toBe("active");
   });
 
   test("local-full 不把未实现的 shell 伪装成 active", () => {

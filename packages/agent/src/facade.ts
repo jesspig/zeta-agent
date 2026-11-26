@@ -106,7 +106,7 @@ import {
   type DurableIntent,
   type Receipt,
 } from "./plugins/effects/durable";
-import { builtinToolDefinitions, type ToolDefinition } from "./tools/builtins";
+import { builtinToolDefinitions, type ToolDefinition, type ToolResourceLimits } from "./tools/builtins";
 import {
   createEffectBridge,
   createLogger,
@@ -196,8 +196,24 @@ function builtinTools(options: {
   readonly securityBackend: ExecutionBackend;
   readonly allowedDirectories: readonly string[];
   readonly structuredBackend?: StructuredExecutionBackend;
+  readonly toolLimits?: ToolResourceLimits;
+  readonly egressPolicy?: EgressPolicy;
+  readonly egressTarget?: EgressTarget;
+  readonly shellLimits?: AgentOptions["shellLimits"];
 }): ToolDefinition[] {
-  return [...builtinToolDefinitions(options)];
+  return [
+    ...builtinToolDefinitions({
+      securityBackend: options.securityBackend,
+      allowedDirectories: options.allowedDirectories,
+      ...(options.structuredBackend === undefined ? {} : { structuredBackend: options.structuredBackend }),
+      ...(options.toolLimits === undefined ? {} : { limits: options.toolLimits }),
+      ...(options.egressPolicy === undefined ? {} : { egress: options.egressPolicy }),
+      ...(options.egressTarget === undefined ? {} : { egressTarget: options.egressTarget }),
+      ...(options.shellLimits?.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.shellLimits.maxOutputBytes }),
+      ...(options.shellLimits?.maxCpuMs === undefined ? {} : { maxCpuMs: options.shellLimits.maxCpuMs }),
+      ...(options.shellLimits?.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.shellLimits.maxRuntimeMs }),
+    }),
+  ];
 }
 
 export interface WrapRegistrationOptions extends PluginMetadata {
@@ -518,6 +534,16 @@ export interface AgentOptions {
    * 对所有工具调用生效，非发射工具的外联目标同样受控。
    */
   readonly egressPolicy?: EgressPolicy;
+  /** shell 命令的显式出站目标；未提供时结构化 shell 不声明网络目标（默认拒绝）。 */
+  readonly egressTarget?: EgressTarget;
+  /** read/grep/find 的字节、条目、深度与运行时间上限；超限显式截断或失败。 */
+  readonly toolLimits?: ToolResourceLimits;
+  /** shell 输出/CPU/时间上限；经 ShellRequest 透传给结构化后端。 */
+  readonly shellLimits?: {
+    readonly maxOutputBytes?: number;
+    readonly maxCpuMs?: number;
+    readonly maxRuntimeMs?: number;
+  };
   /** 视作发射工具的工具名集合；缺省时由 emissionPolicy 决定（withhold 用默认清单，direct 为空）。 */
   readonly emissionTools?: readonly string[];
   /** 可选凭据保管库，需与 secretBroker 成对注入才启用占位符路径。 */
@@ -1002,7 +1028,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   const toolDefinitions = includeBuiltins
-    ? builtinTools({ securityBackend, allowedDirectories, structuredBackend })
+    ? builtinTools({
+        securityBackend,
+        allowedDirectories,
+        structuredBackend,
+        toolLimits: options.toolLimits,
+        // 默认拒绝的出站策略也必须随 ShellRequest 下发，避免 shell 绕开数据面。
+        egressPolicy: options.egressPolicy ?? createEgressPolicy(),
+        egressTarget: options.egressTarget,
+        shellLimits: options.shellLimits,
+      })
     : [];
   // 只有 builtin 工具走静态 contributions；插件与服务都经真实注册入口（安装事务 + registry）。
   const contributions: PluginContribution[] = includeBuiltins

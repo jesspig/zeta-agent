@@ -13,7 +13,8 @@ import type { CapabilityDiagnostic, CapabilityState } from "./manifest";
 const TOOL_OPERATION: Readonly<Record<string, OperationName>> = Object.freeze({
   read: "file.read",
   ls: "file.list",
-  grep: "file.list",
+  // grep 实际走 structured.file.read；能力诊断必须与真实执行路径一致。
+  grep: "file.read",
   find: "file.list",
   write: "file.write",
   edit: "file.applyPatch",

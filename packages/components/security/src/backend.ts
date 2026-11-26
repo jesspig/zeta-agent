@@ -170,10 +170,19 @@ export interface ShellRequest {
   readonly denyEnv?: readonly string[];
   readonly fakeCredentials?: Readonly<Record<string, string>>;
   readonly maxOutputBytes?: number;
+  /** CPU 时间上限（毫秒）；平台无法强制时必须如实降级，不能声明 active。 */
+  readonly maxCpuMs?: number;
+  /** 墙钟运行时间上限（毫秒）；超时走独立 AbortController 并取消整个进程树。 */
+  readonly maxRuntimeMs?: number;
+  /** 取消后等待进程树退出确认的宽限期；超时仍未确认返回 unknown/reconciliation。 */
+  readonly terminationGraceMs?: number;
   /** 数据面 egress 绑定：无 allow 规则即默认拒绝。 */
   readonly egress?: { readonly policy: EgressPolicy; readonly target?: EgressTarget };
   readonly signal?: AbortSignal;
 }
+
+/** 进程树终止确认状态：unknown 必须交给上层对账，禁止当作普通失败重试。 */
+export type TerminationState = "confirmed" | "unknown";
 
 export interface ShellResult {
   readonly exitCode: number;
@@ -181,6 +190,10 @@ export interface ShellResult {
   readonly stderr: string;
   readonly terminated: boolean;
   readonly truncated: boolean;
+  /** 默认 confirmed（自然退出）；取消/超时后未能确认则为 unknown。 */
+  readonly termination?: TerminationState;
+  /** 仅 termination=unknown 时出现，提示上层进入对账而不是重试。 */
+  readonly reconciliation?: string;
 }
 
 export interface ProcessHandle {
