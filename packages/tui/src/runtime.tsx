@@ -35,6 +35,7 @@ import type { SlashCommand } from "./slash";
 import type { TuiThemeName } from "./runtime-types";
 import { createMetricsSampler, renderDebugHud } from "./debug-hud";
 import { contextBudget } from "./hud";
+import { resizeSequence } from "./pty";
 
 export type { RuntimeMessage, RuntimeTuiHandle, RuntimeTuiOptions, RuntimeResources, RuntimeModelOption } from "./runtime-types";
 
@@ -868,6 +869,15 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   let push: (message: RuntimeMessage) => void = () => {};
   let editorHandle: EditorHandle | undefined;
   let destroyed = false;
+  // 原生终端尺寸变化时上报 xterm window-change；真实 resize 由宿主/PTY 触发，非测试合成标记。
+  const reportResize = (): void => {
+    if (destroyed) return;
+    process.stdout.write(resizeSequence({
+      width: process.stdout.columns || 80,
+      height: process.stdout.rows || 24,
+    }));
+  };
+  process.on("SIGWINCH", reportResize);
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
@@ -913,6 +923,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const cleanup = (): void => {
     if (destroyed) return;
     destroyed = true;
+    process.off("SIGWINCH", reportResize);
     releaseUsage?.();
     releaseOsc?.();
     signals?.dispose();
