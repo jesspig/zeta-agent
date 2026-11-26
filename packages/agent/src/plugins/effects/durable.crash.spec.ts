@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -156,6 +156,63 @@ describe("T-14 durable effects 两崩溃窗口 / 并发 / 对账", () => {
     failing.resetHealth();
     expect(failing.health().ok).toBe(true);
   });
+});
+
+describe("T-14 真实 kill-during-write 崩溃注入", () => {
+  test("子进程在 temp-writing 阶段被真实 kill：目标快照完整，恢复后只派发未 settle 的意图", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "zeta-durable-kill-"));
+    const file = join(dir, "outbox.json");
+    const child = join(import.meta.dir, "fixtures/journal-crash.child.mjs");
+    const proc = Bun.spawn([process.execPath, child, file], { stdout: "pipe", stderr: "pipe" });
+    try {
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sawReady = false;
+      let sawTempWriting = false;
+      while (!sawTempWriting) {
+        const read = await reader.read();
+        if (read.done === true) break;
+        buffer += decoder.decode(read.value, { stream: true });
+        let index = buffer.indexOf("\n");
+        while (index >= 0) {
+          const line = buffer.slice(0, index);
+          buffer = buffer.slice(index + 1);
+          index = buffer.indexOf("\n");
+          if (line === "READY") sawReady = true;
+          if (line === "STAGE:temp-writing") sawTempWriting = true;
+        }
+      }
+      expect(sawReady).toBe(true);
+      expect(sawTempWriting).toBe(true);
+
+      proc.kill();
+      await proc.exited;
+
+      // 不是重建对象读已保存快照：子进程真的死在写入阶段，这里校验落盘文件是否完整。
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as OutboxSnapshot;
+      expect(parsed.seq).toBe(0);
+      const dispatched: string[] = [];
+      const effects = createDurableEffects(
+        async (intent) => {
+          dispatched.push(intent.key);
+          return "ok";
+        },
+        { journal: createFileDurableJournal(file) }
+      );
+      expect(effects.recover()).toMatchObject({ restored: true, pending: 1, receipts: 1 });
+      expect(await effects.commit()).toHaveLength(1);
+      expect(dispatched).toEqual(["pending-0"]);
+    } finally {
+      try {
+        proc.kill();
+        await proc.exited.catch(() => {});
+      } catch {
+        // 子进程可能已退出。
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 describe("T-14 未知结果不盲目重放", () => {

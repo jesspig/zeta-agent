@@ -29,7 +29,14 @@ describe("T-14 持久 outbox 状态机", () => {
     expect(started.state).toBe("dispatching");
     expect(started.generation).toBe(1);
     const receipt = store.settle(started, true, "ok");
-    expect(receipt).toEqual({ kind: "message", key: "m1", ok: true, value: "ok" });
+    expect(receipt).toEqual({
+      kind: "message",
+      key: "m1",
+      ok: true,
+      value: "ok",
+      idempotencyKey: "message\u0000m1",
+      generation: 1,
+    });
     expect(store.entries()).toEqual([]);
     expect(store.receipts()).toEqual([receipt]);
   });
@@ -59,7 +66,14 @@ describe("T-14 持久 outbox 状态机", () => {
     expect(restarted.entries()[0]!.state).toBe("unknown");
     expect(restarted.dispatchable()).toEqual([]);
     const receipt = restarted.reconcile("m1", true, "manual-ok");
-    expect(receipt).toEqual({ kind: "message", key: "m1", ok: true, value: "manual-ok" });
+    expect(receipt).toEqual({
+      kind: "message",
+      key: "m1",
+      ok: true,
+      value: "manual-ok",
+      idempotencyKey: "message\u0000m1",
+      generation: 1,
+    });
     expect(restarted.dispatchable()).toEqual([]);
     expect(restarted.receipts()).toEqual([receipt]);
   });
@@ -76,7 +90,15 @@ describe("T-14 持久 outbox 状态机", () => {
     entry = store.beginDispatch(store.entries()[0]!);
     const terminal = store.fail(entry);
     expect(terminal.retry).toBe(false);
-    if (!terminal.retry) expect(terminal.receipt).toEqual({ kind: "message", key: "m1", ok: false });
+    if (!terminal.retry) {
+      expect(terminal.receipt).toEqual({
+        kind: "message",
+        key: "m1",
+        ok: false,
+        idempotencyKey: "message\u0000m1",
+        generation: 3,
+      });
+    }
     expect(store.health()).toMatchObject({ ok: true, consecutiveFailures: 1 });
 
     const second = store.beginDispatch(store.enqueue("message", "m2", "x"));

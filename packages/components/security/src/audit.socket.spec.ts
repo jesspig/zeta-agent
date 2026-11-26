@@ -87,6 +87,9 @@ describe("T-02 A23 进程外审计 daemon", () => {
     try {
       harness.sink.append(record({ toolName: "tool-a" }));
       harness.sink.append(record({ toolName: "tool-b" }));
+      // fire-and-forget append 尚未收到 daemon ack，封存状态必须是不完整。
+      expect(harness.sink.finalized(2)).toBe("incomplete");
+      await harness.sink.flush();
       expect(harness.sink.finalized(2)).toBe("complete");
 
       const finalized = await harness.sink.finalizeRemote(2, "complete");
@@ -169,15 +172,17 @@ describe("T-02 A23 进程外审计 daemon", () => {
     }
   });
 
-  test("append 入有界队列不阻塞工具路径；满队列计 drop", () => {
+  test("append 入有界队列不阻塞工具路径；满队列计 drop", async () => {
     const sink = createSocketAuditSink({ endpoint: "tcp:127.0.0.1:1", queueLimit: 2, token: "test-only-client-token" });
     void sink.ready().catch(() => {});
     const start = Date.now();
     for (let index = 0; index < 5; index += 1) sink.append(record({ toolName: `t${index}` }));
     expect(Date.now() - start).toBeLessThan(200);
     expect(sink.entries).toHaveLength(5);
+    // 仍有排队未确认的请求：封存不完整；close 后这些请求必须显式计 drop。
+    expect(sink.finalized(5)).toBe("incomplete");
+    await sink.close();
     expect(sink.finalized(5)).toBe("complete-with-drops");
-    void sink.close();
   });
 
   test("端点解析只接受显式 unix:/tcp: 形式", () => {

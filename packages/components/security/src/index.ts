@@ -8,3 +8,4 @@ export * from "./audit";
 export * from "./audit.socket";
 export * from "./emission";
 export * from "./outbox";
+export * from "./atomic-file";

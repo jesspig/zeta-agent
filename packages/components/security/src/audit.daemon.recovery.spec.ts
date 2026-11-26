@@ -8,6 +8,7 @@ import {
   createFileAuditStorage,
   createHmacAuditSigner,
   defaultHash,
+  recoverAuditChain,
   verifyAuditIntegrity,
   type AuditRecord,
 } from "./audit";
@@ -216,6 +217,53 @@ describe("T-14 IF-13 审计 daemon 认证 / ack / 重启恢复", () => {
       await b.close();
     } finally {
       await daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("daemon 真实死亡：已 ack 记录完整落盘，未确认 append 标记 incomplete，重启后链可恢复", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "zeta-audit-death-"));
+    const secret = randomBytes(24).toString("hex");
+    const token = randomBytes(16).toString("hex");
+    const daemon = await startDaemon(dir, secret, token);
+    try {
+      const sink = await client(daemon.endpoint, token);
+      const first = await sink.appendAck(record({ toolName: "acked-a" }));
+      const second = await sink.appendAck(record({ toolName: "acked-b" }));
+      expect([first.seq, second.seq]).toEqual([0, 1]);
+      sink.append(record({ toolName: "unacked-a" }));
+      sink.append(record({ toolName: "unacked-b" }));
+      // 同步检查：此刻两条 fire-and-forget append 尚未收到 ack。
+      expect(sink.finalized(4)).toBe("incomplete");
+
+      // 真实杀死 daemon 进程，不是重建内存对象。
+      daemon.proc.kill();
+      await daemon.proc.exited;
+      expect(sink.finalized(4)).toBe("incomplete");
+
+      const storage = createFileAuditStorage(dir);
+      const lines = storage.readLines();
+      expect(lines.length).toBeGreaterThanOrEqual(2);
+      expect(lines.length).toBeLessThanOrEqual(4);
+      // 每条落盘行都完整可验：不存在半写行或断链。
+      const sign = createHmacAuditSigner(secret);
+      expect(recoverAuditChain({ lines, hash: defaultHash, sign }).seq).toBe(lines.length);
+
+      const restarted = await startDaemon(dir, secret, token);
+      try {
+        const probe = await client(restarted.endpoint, token);
+        expect((await probe.finalizeRemote(lines.length, "complete-with-drops")).ok).toBe(true);
+        expect(await probe.verifyRemote(lines.length)).toMatchObject({
+          ok: true,
+          entries: lines.length,
+          finalized: "complete-with-drops",
+        });
+        await probe.close();
+      } finally {
+        await restarted.stop();
+      }
+    } finally {
+      await daemon.stop().catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }
   });

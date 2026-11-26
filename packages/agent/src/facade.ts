@@ -1718,7 +1718,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (committed === undefined) {
       if (commitPromise === undefined) commitPromise = durableEffects.commit();
       const receipts = await commitPromise;
-      committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
+      // 回填必须查全部历史回执：重复 enqueue 命中已 settle 的幂等键时本次 commit 为空，
+      // 但调用方仍应拿回第一次执行的真实结果，而不是停在 withheld 占位值。
+      committed = new Map(durableEffects.receipts().map((receipt) => [receipt.key, receipt]));
       for (const receipt of receipts) {
         if (!receipt.ok) tenantScope?.quota.release(1);
         recordAudit(

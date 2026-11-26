@@ -88,11 +88,14 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
 
   const queue: WireRequest[] = [];
   const pending = new Map<string, Pending>();
+  /** 已发往 daemon 但尚未收到 ack 的 append id；id 从表中删除即表示结果已归档。 */
+  const unacked = new Map<string, true>();
   const entries: AuditEntry[] = [];
   let writer: Writer | undefined;
   let nextId = 0;
   let lastAckedSeq = -1;
   let drops = 0;
+  let uncertain = false;
   let closed = false;
   let decoderBuffer = "";
   const decoder = new TextDecoder();
@@ -155,6 +158,16 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
     },
     close() {
       writer = undefined;
+      // 非主动关闭时，排队中与未确认的 append 一律计 drop 并标记不确定，绝不静默丢失。
+      if (!closed) {
+        const queuedAppends = queue.filter((request) => request.kind === "append").length;
+        const sentAppends = unacked.size;
+        drops += queuedAppends + sentAppends;
+        queue.length = 0;
+        unacked.clear();
+        if (queuedAppends + sentAppends > 0) uncertain = true;
+        rejectPending(new Error("AUDIT_DAEMON_DISCONNECTED"));
+      }
     },
   };
 
@@ -166,7 +179,9 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
   function drain(): void {
     if (writer === undefined) return;
     while (queue.length > 0) {
-      wireWrite(writer, queue.shift()!);
+      const request = queue.shift()!;
+      if (request.kind === "append" && request.id !== undefined) unacked.set(request.id, true);
+      wireWrite(writer, request);
     }
   }
 
@@ -174,11 +189,14 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
     targetWriter.write(`${JSON.stringify(request)}\n`);
   }
 
-  function enqueue(request: WireRequest, expectReply: boolean): Promise<Record<string, unknown>> | undefined {
+  function enqueue(
+    request: WireRequest,
+    expectReply: boolean
+  ): { readonly id: string | undefined; readonly reply: Promise<Record<string, unknown>> | undefined } {
     if (closed) throw new Error("AUDIT_SINK_CLOSED");
     if (queue.length >= queueLimit) {
       drops += 1;
-      return expectReply ? Promise.reject(new Error("AUDIT_QUEUE_FULL")) : undefined;
+      return { id: undefined, reply: expectReply ? Promise.reject(new Error("AUDIT_QUEUE_FULL")) : undefined };
     }
     let id: string | undefined;
     let reply: Promise<Record<string, unknown>> | undefined;
@@ -191,13 +209,35 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
     const wire: WireRequest = { ...request, token, ...(id === undefined ? {} : { id }) };
     queue.push(wire);
     drain();
-    return reply;
+    return { id, reply };
   }
 
   async function request(payload: WireRequest): Promise<Record<string, unknown>> {
-    const reply = enqueue(payload, true);
+    const { reply } = enqueue(payload, true);
     if (reply === undefined) throw new Error("AUDIT_QUEUE_FULL");
     return reply;
+  }
+
+  /** 所有 append 都走这里：发出前登记 id，ack/失败时精确归档，避免未确认记录被误判 complete。 */
+  function enqueueAppend(record: AuditRecord): { readonly reply: Promise<Record<string, unknown>> | undefined } {
+    const { id, reply } = enqueue({ kind: "append", record }, true);
+    if (id !== undefined && reply !== undefined) {
+      void reply.then(
+        (response) => {
+          if (!unacked.delete(id)) return;
+          const seq = Number(response.seq);
+          if (response.ok === true && Number.isInteger(seq) && seq >= 0) lastAckedSeq = seq;
+        },
+        () => {
+          if (!unacked.delete(id)) return;
+          drops += 1;
+          uncertain = true;
+        }
+      );
+    } else if (reply !== undefined) {
+      void reply.catch(() => {});
+    }
+    return { reply };
   }
 
   if (target.type === "unix") {
@@ -226,7 +266,9 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
     appendAck: async (record: AuditRecord): Promise<AuditEntry> => {
       await readyPromise;
       const snapshot: AuditRecord = { ...record };
-      const response = await request({ kind: "append", record: snapshot });
+      const { reply } = enqueueAppend(snapshot);
+      if (reply === undefined) throw new Error("AUDIT_QUEUE_FULL");
+      const response = await reply;
       const seq = Number(response.seq);
       if (response.ok !== true || !Number.isInteger(seq) || seq < 0) throw new Error("AUDIT_INVALID_ACK");
       lastAckedSeq = seq;
@@ -257,7 +299,7 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
         hash: hash(fingerprint(seq, prevHash, snapshot)),
       };
       entries.push(entry);
-      enqueue({ kind: "append", record: snapshot }, false);
+      enqueueAppend(snapshot);
       return { ...entry, record: { ...snapshot } };
     },
     noteDrop(): void {
@@ -266,6 +308,14 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
     finalized(revision: number): FinalizedState {
       if (!Number.isInteger(revision) || revision < 0) throw new Error("INVALID_REVISION");
       if (revision > entries.length) return "incomplete";
+      // 排队中、已发出未 ack、或连接不确定都不算完整；已显式计 drop 的记录不算静默丢失。
+      if (
+        uncertain ||
+        unacked.size > 0 ||
+        queue.some((request) => request.kind === "append")
+      ) {
+        return "incomplete";
+      }
       return drops > 0 ? "complete-with-drops" : "complete";
     },
     async finalizeRemote(revision: number, finalized: FinalizedState): Promise<SocketFinalizeResult> {
@@ -294,12 +344,27 @@ export function createSocketAuditSink(options: SocketAuditSinkOptions): SocketAu
       if (closed) return;
       const active = writer;
       if (active !== undefined) {
-        while (queue.length > 0) wireWrite(active, queue.shift()!);
+        // 先排空队列，再用 ping 作为屏障等待此前 append 的 ack；超时则计 drop，不静默丢失。
+        drain();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("AUDIT_CLOSE_TIMEOUT")), 1500);
+        });
+        await Promise.race([request({ kind: "ping" }), timeout]).catch(() => {});
+        if (timer !== undefined) clearTimeout(timer);
+        for (const id of unacked.keys()) {
+          if (unacked.delete(id)) drops += 1;
+        }
+        closed = true;
         active.end();
+      } else {
+        drops += queue.filter((request) => request.kind === "append").length;
+        queue.length = 0;
+        closed = true;
       }
-      closed = true;
       writer = undefined;
       rejectPending(new Error("AUDIT_SINK_CLOSED"));
+      uncertain = false;
     },
   };
 }
