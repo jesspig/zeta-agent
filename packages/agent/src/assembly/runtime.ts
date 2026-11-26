@@ -84,6 +84,11 @@ export interface DefaultRuntimeOptions {
   readonly permissionGate?: AgentOptions["permissionGate"];
   readonly approvalChannel?: AgentOptions["approvalChannel"];
   readonly egressPolicy?: AgentOptions["egressPolicy"];
+  readonly durableEffects?: AgentOptions["durableEffects"];
+  readonly auditSink?: AgentOptions["auditSink"];
+  readonly auditTransport?: AgentOptions["auditTransport"];
+  readonly auditEndpoint?: AgentOptions["auditEndpoint"];
+  readonly auditToken?: AgentOptions["auditToken"];
   /** principal resolver 的输入；提供后按 spaceId 解析独立 realm 作用域。 */
   readonly principalInput?: PrincipalInput;
   /** 外部持有的治理器；不传但提供 principalInput 时按 tokensPerTenant 内部创建。 */
@@ -246,6 +251,11 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     permissionGate: options.permissionGate,
     approvalChannel: options.approvalChannel,
     egressPolicy: options.egressPolicy,
+    durableEffects: options.durableEffects,
+    auditSink: options.auditSink,
+    auditTransport: options.auditTransport,
+    auditEndpoint: options.auditEndpoint,
+    auditToken: options.auditToken,
     sessionStore,
   });
 
