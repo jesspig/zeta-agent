@@ -56,6 +56,8 @@ import {
   type PluginMetadata,
   type ContributionContext,
   type ContributionExecutors,
+  type InvocationGate,
+  type IsolatedPlugin,
   type PluginTool,
   type PrepareNextTurn,
   type PrepareRequest,
@@ -118,6 +120,7 @@ import {
   type SinkResolution,
 } from "@zeta-agent/observability";
 import {
+  confinedPath,
   createEgressPolicy,
   createOutboundClient,
   createLocalSafeBackend,
@@ -440,6 +443,38 @@ function checkEgress(args: Readonly<Record<string, unknown>>, policy: EgressPoli
   const target = deriveEgressTarget(args);
   if (target === undefined || !isEgressAllowed(policy, target)) return { status: "denied" };
   return { status: "allowed", target };
+}
+
+/** 运行时识别隔离插件：品牌字段与隔离求值器一一对应，不能靠字符串猜测。 */
+function isIsolatedPlugin(value: AgentPlugin): value is AgentPlugin & IsolatedPlugin {
+  return (value as { isolated?: unknown }).isolated === true;
+}
+
+/**
+ * 隔离插件 IPC 调用的宿主门禁：直接复用 T-11 出站策略/T-12 文件边界，
+ * 不另起炉灶。任何携带网络目标或文件路径的参数都先过这两条既有边界。
+ */
+function createPluginInvocationGate(
+  egressPolicy: EgressPolicy,
+  allowedDirectories: readonly string[]
+): InvocationGate {
+  return {
+    check(request) {
+      const event: unknown = request.event;
+      if (event === null || typeof event !== "object") return;
+      const args = event as Readonly<Record<string, unknown>>;
+      if (checkEgress(args, egressPolicy).status === "denied") throw new Error("EGRESS_DENIED");
+      for (const key of ["path", "file", "filename", "cwd"] as const) {
+        const value = args[key];
+        if (typeof value !== "string" || value.length === 0) continue;
+        try {
+          confinedPath(value, allowedDirectories);
+        } catch {
+          throw new Error("FILE_CONFINEMENT_DENIED");
+        }
+      }
+    },
+  };
 }
 
 /** createProviderStreamFn 的 facade 投影；凭据由 Agent 注入，调用方无需重复传递。 */
@@ -1419,6 +1454,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
     const review = reviewExtension(source, pluginPolicy);
     pluginReviews.push({ plugin, review });
     if (review.decision === "denied") continue;
+    // T-13：隔离插件的可执行项只能经 IPC 调用；把 T-11/T-12 边界注入到调用门禁。
+    if (isIsolatedPlugin(plugin)) {
+      plugin.setInvocationGate(createPluginInvocationGate(egressPolicy, allowedDirectories));
+    }
     stagedInputs.push({
       item: plugin,
       meta: {
@@ -1442,7 +1481,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const installResult = stage.commit({
     install: (entry) => {
       pluginGeneration += 1;
-      const dispose = entry.item.install();
+      // T-13 信任收口：宿主只对可信插件调用 install()；不可信插件的 install 永不进入宿主。
+      const dispose = entry.trusted ? entry.item.install() : (): void => undefined;
       // 保留 install() 原样 disposer；管理器只登记状态/顺序，不重复调用 install。
       pluginTracking.set(entry.item, addDisposer(pluginManager.trackInstall(entry.item)));
       return dispose;
@@ -1463,8 +1503,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
       installationContributionDisposers.set(installation, contributionDisposers);
       addDisposer(record.dispose);
       for (const item of entry.item.contributions) {
-        // 沙箱扩展只保留提示词/事件观察能力；工具、任务、服务与 wrap 一概不授予。
-        if (!entry.trusted && item.kind !== "section" && item.kind !== "hook") continue;
+        // T-13 信任收口：宿主只对可信插件注册可执行项；不可信插件只保留数据型 section。
+        // hook 曾在宿主链上执行不可信函数，这条路径必须关闭；不可信工具/服务/wrap/task 同理。
+        if (!entry.trusted && item.kind !== "section") continue;
         const stop = contributionHost.apply(item, {
           realm: item.realm ?? entry.realm ?? defaultRealm,
           order: item.order ?? entry.order,

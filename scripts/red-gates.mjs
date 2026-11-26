@@ -6,6 +6,7 @@
  * 当前生产代码下每个 case 必须为 RED，命令整体退出码为 1；
  * 后续 P0 实现完成后对应 case 应转 GREEN，全部 GREEN 时退出 0。
  */
+import { execFileSync } from "node:child_process";
 
 const CASES = [
   "./red-cases/loop-decision-end-followup.case.mjs",
@@ -16,6 +17,7 @@ const CASES = [
   "./red-cases/compaction-second-request.case.mjs",
   "./red-cases/tenant-origin-missing.case.mjs",
   "./red-cases/egress-redirect-hop.case.mjs",
+  "./red-cases/plugin-host-escape.case.mjs",
 ];
 
 const { TIMEOUT_MS } = await import("./red-cases/common.mjs");
@@ -88,7 +90,13 @@ for (const path of CASES) {
 }
 
 console.log("=== RED 反例门（bun scripts/red-gates.mjs） ===");
-console.log("当前基线：develop@af37607；目标：每个 case 当前 RED，实现完成后转 GREEN");
+let baseline = "unknown";
+try {
+  baseline = execFileSync("git", ["rev-parse", "--short", "develop"], { encoding: "utf8" }).trim();
+} catch {
+  // 非 git 环境下保留 unknown，不影响门判定。
+}
+console.log(`当前基线：develop@${baseline}；目标：每个 case 当前 RED，实现完成后转 GREEN`);
 for (const result of results) {
   console.log("");
   console.log(`[${result.status}] ${result.id} (${result.elapsedMs}ms)`);
