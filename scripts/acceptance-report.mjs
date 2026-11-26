@@ -97,7 +97,7 @@ const ITEMS = [
     { args: ["scripts/check-current-ci.mjs"], expect: "PASS current-ci" },
   ] },
   { id: "AC-24", title: "12 target 运行证据、embedded bytes 与升级回滚", commands: [
-    { args: ["scripts/build-local.ts", "--all"] },
+    { args: ["run", "build:local"] },
     { args: ["scripts/guard-architecture.mjs"], expect: "架构守护通过" },
     { args: ["scripts/target-evidence.mjs"], expect: "PASS" },
     { args: ["scripts/smoke-local.ts"], expect: "PASS rollback" },
