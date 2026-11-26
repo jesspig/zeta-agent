@@ -1,8 +1,8 @@
 import {
   createCredentialBroker,
-  createEgressGateway,
   createEgressPolicy,
-  withCredentialFetch,
+  createOutboundClient,
+  resolveOutboundFetch,
   type Capabilities,
   type Command,
   type CredentialBinding,
@@ -10,8 +10,10 @@ import {
   type DnsGate,
   type EgressEnforcer,
   type EgressGateway,
+  type EgressPolicy,
   type EgressPolicyOptions,
   type ExecutionBackend,
+  type OutboundClient,
   type RunOptions,
   type RunResult,
 } from "@zeta-agent/components";
@@ -66,6 +68,10 @@ export interface RemoteClientOptions {
   /** 客户端代次；与 daemon 代次不符时请求被栅栏拒绝。 */
   readonly generation?: number;
   readonly fetch?: typeof fetch;
+  /** 统一出站客户端：remote 调用与 provider/discovery/MCP 共用同一受策略约束的 fetch 入口。 */
+  readonly outbound?: OutboundClient;
+  /** 未提供 outbound 时用于包装注入 fetch 的显式策略；缺省空 allow，一律失败关闭。 */
+  readonly egress?: EgressPolicy | EgressPolicyOptions;
 }
 
 export interface RemoteInvokeResult {
@@ -99,7 +105,11 @@ export function createRemoteClient(options: RemoteClientOptions): RemoteClient {
   if (typeof options.url !== "string" || options.url.length === 0) throw new Error("REMOTE_URL_REQUIRED");
   if (typeof options.token !== "string" || options.token.length === 0) throw new Error("REMOTE_TOKEN_REQUIRED");
   const url = options.url.replace(/\/+$/, "");
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = resolveOutboundFetch({
+    ...(options.outbound === undefined ? {} : { outbound: options.outbound }),
+    ...(options.egress === undefined ? {} : { egress: options.egress }),
+    fetch: options.fetch ?? globalThis.fetch,
+  });
   let seq = 0;
 
   async function invoke(method: string, params?: Record<string, unknown>): Promise<RemoteInvokeResult> {
@@ -222,17 +232,19 @@ export function createRemoteSidecar(options: RemoteSidecarOptions): RemoteSideca
     secret: options.secret.secret,
   });
   const credential: CredentialBoundaryRef = { broker, handle };
-  const gateway = createEgressGateway({
-    policy: createEgressPolicy(options.egress),
+  const outbound = createOutboundClient({
+    egress: createEgressPolicy(options.egress),
     fetch: options.fetch ?? globalThis.fetch,
     ...(options.dns === undefined ? {} : { dns: options.dns }),
     ...(options.enforcers === undefined ? {} : { enforcers: options.enforcers }),
+    credential,
   });
+  const gateway = outbound.gateway;
   const client = createRemoteClient({
     url: options.url,
     token: options.token,
     ...(options.generation === undefined ? {} : { generation: options.generation }),
-    fetch: withCredentialFetch(broker, handle, gateway.fetch as typeof fetch),
+    outbound,
   });
   return {
     credential,

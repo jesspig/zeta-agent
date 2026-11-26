@@ -18,3 +18,10 @@
 
 每条 case 的完整期望/实际/失败原因/证据路径由 `bun scripts/red-gates.mjs` 运行时打印，此处只做索引。
 `needs-fixture.md` 列出不能用当前 API 表达的候选，不计入 RED。
+
+## T-11 / RED-08（NF-02 升级）
+
+- 夹具：`scripts/red-cases/egress-redirect-hop.case.mjs`，loopback HTTP 服务器返回 30x 指向未放行的 `localhost`，不访问外网。
+- 实现前实测：`status:200`、第二跳 `/denied` 被触达且 `x-api-key=probe-key` 跨 origin 泄漏 → `[RED] RED-08-egress-redirect-hop`（汇总 8 cases / 4 RED / 4 GREEN，退出码 1）。
+- 实现后实测：`error:"EGRESS_DENIED"`、仅 `/start` 被触达 → `[GREEN] RED-08-egress-redirect-hop`（汇总 8 cases / 3 RED / 5 GREEN，退出码 1；RED-04/06/07 仍 RED 属其他任务）。
+- RED-01/02/03/05 全程 GREEN，未被本任务改动。

@@ -119,6 +119,7 @@ import {
 } from "@zeta-agent/observability";
 import {
   createEgressPolicy,
+  createOutboundClient,
   createLocalSafeBackend,
   createProfileBackend,
   createSocketAuditSink,
@@ -136,6 +137,7 @@ import {
   type EgressTarget,
   type ExecutionBackend,
   type FinalizedState,
+  type OutboundClient,
   type SecretBroker,
   type StructuredExecutionBackend,
 } from "@zeta-agent/security";
@@ -430,6 +432,7 @@ export interface AgentProviderConfig {
   readonly model: string;
   readonly apiKey?: string;
   readonly baseUrl?: string;
+  readonly outbound?: OutboundClient;
 }
 
 export interface AuditFinalization {
@@ -2603,9 +2606,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     closeAudit: () => closeAuditSink(),
     createProviderStreamFn(config, fetchImpl) {
+      // 注入 fetch 只能作为底层 transport；无论是否注入，都强制构造受策略约束的 OutboundClient。
+      const outbound = config.outbound
+        ?? createOutboundClient({ egress: egressPolicy, fetch: fetchImpl ?? globalThis.fetch });
       return createProviderStreamFn(
         {
           ...config,
+          outbound,
           ...(credentialVault !== undefined ? { credentialVault } : {}),
           ...(secretBroker !== undefined ? { secretBroker } : {}),
           ...(credentialBoundary !== undefined ? { credentialBoundary } : {}),

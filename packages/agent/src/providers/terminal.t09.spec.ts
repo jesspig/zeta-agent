@@ -21,7 +21,12 @@ async function collect(iterable: AsyncIterable<AgentStreamChunk>): Promise<Agent
 }
 
 function provider(config: Parameters<typeof createProviderStreamFn>[0], frames: readonly string[]): AgentStreamFnForTest {
-  return async (request) => collect(createProviderStreamFn(config, (async () => sse(frames)) as unknown as typeof fetch)(request));
+  const host = new URL(config.baseUrl ?? "https://eof.test/v1").hostname;
+  const gated = {
+    ...config,
+    egress: { allow: [{ host, port: 443 }] },
+  };
+  return async (request) => collect(createProviderStreamFn(gated, (async () => sse(frames)) as unknown as typeof fetch)(request));
 }
 
 type AgentStreamFnForTest = (request: AgentStreamRequest) => Promise<AgentStreamChunk[]>;
@@ -109,7 +114,7 @@ describe("T-09 Google function-calling 多轮", () => {
       ],
     };
     const chunks = await collect(createProviderStreamFn(
-      { provider: "google", model: "flash", apiKey: "k", baseUrl: "https://google.test/v1beta" },
+      { provider: "google", model: "flash", apiKey: "k", baseUrl: "https://google.test/v1beta", egress: { allow: [{ host: "google.test", port: 443 }] } },
       fakeFetch,
     )(multiTurn));
 

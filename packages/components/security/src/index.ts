@@ -3,6 +3,7 @@ export * from "./backend.local-safe";
 export * from "./vault";
 export * from "./credentials";
 export * from "./egress";
+export * from "./outbound";
 export * from "./audit";
 export * from "./audit.socket";
 export * from "./emission";

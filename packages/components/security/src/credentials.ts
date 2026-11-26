@@ -116,12 +116,15 @@ export function createCredentialBroker(options: CredentialBrokerOptions = {}): C
   let revision = 0;
 
   function statusOf(handle: CredentialHandle, at: number): CredentialStatus {
+    if (!isRecord(handle) || typeof handle.token !== "string") return "unknown";
     const stored = secrets.get(handle.token);
-    if (stored === undefined || stored.handle !== handle) return "unknown";
-    const revocationRevision = revoked.get(handle.name);
-    if (revocationRevision !== undefined && handle.revision <= revocationRevision) return "revoked";
-    if (handle.revision !== revision) return "stale";
-    if (handle.expiresAt !== undefined && at >= handle.expiresAt) return "expired";
+    if (stored === undefined) return "unknown";
+    // 只信 broker 闭包里的权威 handle：外部副本的 revision/expiresAt 篡改不能改变状态判定。
+    const authoritative = stored.handle;
+    const revocationRevision = revoked.get(authoritative.name);
+    if (revocationRevision !== undefined && authoritative.revision <= revocationRevision) return "revoked";
+    if (authoritative.revision !== revision) return "stale";
+    if (authoritative.expiresAt !== undefined && at >= authoritative.expiresAt) return "expired";
     return "active";
   }
 
@@ -137,13 +140,13 @@ export function createCredentialBroker(options: CredentialBrokerOptions = {}): C
       throw new Error("INVALID_CREDENTIAL_TTL");
     }
     const issuedAt = now();
-    const handle: CredentialHandle = {
+    const handle: CredentialHandle = Object.freeze({
       name: input.name,
       token: `__zeta_cred_${instanceId}_${handles.length}__`,
       revision,
       issuedAt,
       ...(input.ttlMs === undefined ? {} : { expiresAt: issuedAt + input.ttlMs }),
-    };
+    });
     handles.push(handle);
     secrets.set(handle.token, { input, handle });
     return handle;
@@ -154,13 +157,13 @@ export function createCredentialBroker(options: CredentialBrokerOptions = {}): C
       return revision;
     },
     get handles(): readonly CredentialHandle[] {
-      return handles.map((handle) => ({ ...handle }));
+      return handles.map((handle) => Object.freeze({ ...handle }));
     },
     issue,
     resolve(handle: CredentialHandle, request: CredentialRequest): Record<string, string> {
       if (!isRecord(handle) || typeof handle.token !== "string") throw new Error("INVALID_CREDENTIAL_HANDLE");
       const stored = secrets.get(handle.token);
-      if (stored === undefined || stored.handle !== handle) throw new Error("UNKNOWN_CREDENTIAL");
+      if (stored === undefined) throw new Error("UNKNOWN_CREDENTIAL");
       if (!isRecord(request)) throw new Error("INVALID_CREDENTIAL_REQUEST");
       if (!bindingMatches(stored.input.binding, request)) throw new Error("CREDENTIAL_BINDING_MISMATCH");
       const at = typeof request.now === "number" ? request.now : now();
@@ -200,25 +203,39 @@ export function withCredentialFetch(
   fetchImpl: typeof fetch
 ): typeof fetch {
   if (typeof fetchImpl !== "function") throw new Error("INVALID_FETCH_IMPL");
+  // 不转发底层 fetch 的 preconnect：它会绕过策略边界提前建连。
   const boundary = ((input, init) => {
+    const request = input instanceof Request ? input : undefined;
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = init?.method ?? "GET";
+    const method = init?.method ?? request?.method ?? "GET";
     const secrets = broker.resolve(handle, { url, method });
-    const headers = new Headers(init?.headers);
-    let nextInput: typeof input = input;
+    const headers = new Headers(request?.headers);
+    if (init?.headers !== undefined) {
+      for (const [name, value] of new Headers(init.headers)) headers.set(name, value);
+    }
+    const querySecret = Object.entries(secrets).find(([name]) => {
+      const lower = name.toLowerCase();
+      return lower === "key" || lower === "x-goog-api-key";
+    });
     for (const [name, value] of Object.entries(secrets)) {
       const lower = name.toLowerCase();
-      if (lower === "key" || lower === "x-goog-api-key") {
-        const parsed = new URL(url);
-        parsed.searchParams.set("key", value);
-        nextInput = parsed.toString();
-      } else {
-        headers.set(name, value);
-      }
+      if (lower !== "key" && lower !== "x-goog-api-key") headers.set(name, value);
     }
-    return fetchImpl(nextInput, { ...init, headers });
+    let nextUrl = url;
+    if (querySecret !== undefined) {
+      const parsed = new URL(url);
+      parsed.searchParams.set("key", querySecret[1]);
+      nextUrl = parsed.toString();
+    }
+    if (request === undefined) return fetchImpl(nextUrl, { ...init, headers });
+
+    // Request 输入重建为 Request：保留 method/body/signal，同时把合并后的头注入权威副本。
+    let nextRequest = new Request(nextUrl, request);
+    for (const [name, value] of headers) nextRequest.headers.set(name, value);
+    if (init !== undefined && Object.keys(init).length > 0) {
+      nextRequest = new Request(nextRequest, { ...init, headers });
+    }
+    return fetchImpl(nextRequest, undefined);
   }) as typeof fetch;
-  const preconnect = (fetchImpl as { preconnect?: unknown }).preconnect;
-  if (typeof preconnect === "function") (boundary as { preconnect?: unknown }).preconnect = preconnect;
   return boundary;
 }

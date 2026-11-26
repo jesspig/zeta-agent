@@ -15,6 +15,7 @@ const CASES = [
   "./red-cases/session-agent-restore.case.mjs",
   "./red-cases/compaction-second-request.case.mjs",
   "./red-cases/tenant-origin-missing.case.mjs",
+  "./red-cases/egress-redirect-hop.case.mjs",
 ];
 
 const { TIMEOUT_MS } = await import("./red-cases/common.mjs");

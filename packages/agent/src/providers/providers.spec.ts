@@ -48,7 +48,7 @@ describe("多 provider 流式接口（T-12）", () => {
       }) as unknown as typeof fetch;
       const out = await collect(
         createProviderStreamFn(
-          { provider, model: models[provider]!, apiKey: "dummy", baseUrl: `https://${provider}.test/v1` },
+          { provider, model: models[provider]!, apiKey: "dummy", baseUrl: `https://${provider}.test/v1`, egress: { allow: [{ host: `${provider}.test`, port: 443 }] } },
           fakeFetch
         )(request)
       );
@@ -69,7 +69,7 @@ describe("多 provider 流式接口（T-12）", () => {
     }) as unknown as typeof fetch;
     const out = await collect(
       createProviderStreamFn(
-        { provider: "openai-responses", model: "responses", apiKey: "dummy", baseUrl: "https://responses.test/v1" },
+        { provider: "openai-responses", model: "responses", apiKey: "dummy", baseUrl: "https://responses.test/v1", egress: { allow: [{ host: "responses.test", port: 443 }] } },
         fakeFetch
       )(request)
     );
@@ -92,7 +92,7 @@ describe("多 provider 流式接口（T-12）", () => {
     }) as unknown as typeof fetch;
     const out = await collect(
       createProviderStreamFn(
-        { provider: "anthropic", model: "sonnet", apiKey: "dummy", baseUrl: "https://anthropic.test/v1" },
+        { provider: "anthropic", model: "sonnet", apiKey: "dummy", baseUrl: "https://anthropic.test/v1", egress: { allow: [{ host: "anthropic.test", port: 443 }] } },
         fakeFetch
       )(request)
     );
@@ -119,7 +119,7 @@ describe("多 provider 流式接口（T-12）", () => {
     }) as unknown as typeof fetch;
     const out = await collect(
       createProviderStreamFn(
-        { provider: "google", model: "flash", apiKey: "dummy", baseUrl: "https://google.test/v1beta" },
+        { provider: "google", model: "flash", apiKey: "dummy", baseUrl: "https://google.test/v1beta", egress: { allow: [{ host: "google.test", port: 443 }] } },
         fakeFetch
       )(request)
     );
@@ -140,7 +140,7 @@ describe("多 provider 流式接口（T-12）", () => {
     }) as unknown as typeof fetch;
     const out = await collect(
       createProviderStreamFn(
-        { provider: "bedrock", model: "nova", apiKey: "dummy", baseUrl: "https://bedrock-gw.test/v1" },
+        { provider: "bedrock", model: "nova", apiKey: "dummy", baseUrl: "https://bedrock-gw.test/v1", egress: { allow: [{ host: "bedrock-gw.test", port: 443 }] } },
         fakeFetch
       )(request)
     );
@@ -178,7 +178,7 @@ describe("多 provider 流式接口（T-12）", () => {
   test("非 2xx 响应产出带状态码的 error chunk 且不泄露凭据", async () => {
     const fakeFetch = (async () => new Response("denied", { status: 401 })) as unknown as typeof fetch;
     const chunks = await Array.fromAsync(createProviderStreamFn(
-      { provider: "groq", model: "llama", apiKey: "super-secret" },
+      { provider: "groq", model: "llama", apiKey: "super-secret", egress: { allow: [{ host: "api.groq.com", port: 443 }] } },
       fakeFetch
     )(request));
     expect(lastErrorMessage(chunks)).toContain("HTTP_401");

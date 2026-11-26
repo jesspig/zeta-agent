@@ -1,4 +1,11 @@
-import { withCredentialFetch, type CredentialBoundaryRef } from "@zeta-agent/security";
+import {
+  resolveOutboundFetch,
+  withCredentialFetch,
+  type CredentialBoundaryRef,
+  type EgressPolicy,
+  type EgressPolicyOptions,
+  type OutboundClient,
+} from "@zeta-agent/security";
 
 export interface ModelDiscoveryConfig {
   readonly baseUrl: string;
@@ -6,6 +13,10 @@ export interface ModelDiscoveryConfig {
   readonly apiKey?: string;
   /** 统一 credential boundary：明文只在 broker 中，config 序列化不泄露。 */
   readonly credentialBoundary?: CredentialBoundaryRef;
+  /** 统一出站客户端：模型发现与 provider 共用同一受策略约束的 fetch 入口。 */
+  readonly outbound?: OutboundClient;
+  /** 未提供 outbound 时用于包装注入 fetch 的显式策略；缺省空 allow，一律失败关闭。 */
+  readonly egress?: EgressPolicy | EgressPolicyOptions;
 }
 
 interface ModelsResponse {
@@ -22,9 +33,14 @@ export async function fetchModelIds(
   }
   const url = `${config.baseUrl.replace(/\/+$/, "")}/models`;
   const boundary = config.credentialBoundary;
+  const outboundFetch = resolveOutboundFetch({
+    ...(config.outbound === undefined ? {} : { outbound: config.outbound }),
+    ...(config.egress === undefined ? {} : { egress: config.egress }),
+    fetch: fetchImpl,
+  });
   const gated = boundary === undefined
-    ? fetchImpl
-    : withCredentialFetch(boundary.broker, boundary.handle, fetchImpl);
+    ? outboundFetch
+    : withCredentialFetch(boundary.broker, boundary.handle, outboundFetch);
   const response = await gated(url, {
     method: "GET",
     ...(boundary === undefined ? { headers: { Authorization: `Bearer ${config.apiKey}` } } : {}),

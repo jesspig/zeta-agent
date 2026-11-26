@@ -3,6 +3,7 @@ import { startDaemon, type DaemonOptions } from "./daemon";
 import { createMemorySessionControl, type RpcRuntime } from "./rpc";
 import { createRemoteBackend, createRemoteClient, createRemoteSidecar, GRPC_STATUS, toGrpcStatus } from "./remote";
 import type { RuntimeProtocol } from "@zeta-agent/agent";
+import { egressRuleFromUrl } from "@zeta-agent/components";
 
 function makeRuntime(): RpcRuntime {
   const protocol: RuntimeProtocol = {
@@ -39,7 +40,11 @@ function options(partial: Partial<DaemonOptions> = {}): DaemonOptions {
 describe("T-21 remote SDK / gRPC 语义", () => {
   test("真实 daemon HTTP 上全套远程方法可用", async () => {
     const daemon = startDaemon(options());
-    const client = createRemoteClient({ url: daemon.url, token: "test-token" });
+    const client = createRemoteClient({
+      url: daemon.url,
+      token: "test-token",
+      egress: { allow: [egressRuleFromUrl(daemon.url)] },
+    });
     expect((await client.readiness()).result).toBe(true);
     expect((await client.liveness()).result).toBe(true);
     expect((await client.configDigest()).result).toBe("digest-1");
@@ -63,7 +68,12 @@ describe("T-21 remote SDK / gRPC 语义", () => {
     expect(toGrpcStatus({ jsonrpc: "2.0", id: 1, error: { code: -32003, message: "x" } })).toBe(GRPC_STATUS.PERMISSION_DENIED);
 
     const daemon = startDaemon(options());
-    const stale = createRemoteClient({ url: daemon.url, token: "test-token", generation: daemon.generation - 1 });
+    const stale = createRemoteClient({
+      url: daemon.url,
+      token: "test-token",
+      generation: daemon.generation - 1,
+      egress: { allow: [egressRuleFromUrl(daemon.url)] },
+    });
     await expect(stale.readiness()).rejects.toThrow(/STALE_GENERATION/);
     await daemon.stop();
   });
@@ -110,9 +120,97 @@ describe("T-21 remote SDK / gRPC 语义", () => {
     expect(calls).toHaveLength(1);
   });
 
+  test("remote 默认无 allow 规则配置错误；显式 allow 才走统一出站入口", async () => {
+    const { createOutboundClient } = await import("@zeta-agent/components");
+    const calls: string[] = [];
+    const fakeFetch = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const denied = createOutboundClient({ egress: { allow: [] }, fetch: fakeFetch });
+    await expect(createRemoteClient({
+      url: "http://127.0.0.1:4200",
+      token: "test-token",
+      outbound: denied,
+    }).readiness()).rejects.toThrow("EGRESS_ALLOW_REQUIRED");
+    expect(calls).toEqual([]);
+
+    const allowed = createOutboundClient({
+      egress: { allow: [{ host: "127.0.0.1", port: 4200 }] },
+      fetch: fakeFetch,
+    });
+    expect((await createRemoteClient({
+      url: "http://127.0.0.1:4200",
+      token: "test-token",
+      outbound: allowed,
+    }).readiness()).result).toBe(true);
+    expect(calls).toEqual(["http://127.0.0.1:4200/rpc"]);
+
+    const redirectFetch = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      return new Response(null, { status: 302, headers: { location: "http://evil.test/rpc" } });
+    }) as typeof fetch;
+    const redirectOutbound = createOutboundClient({
+      egress: { allow: [{ host: "127.0.0.1", port: 4200 }] },
+      fetch: redirectFetch,
+    });
+    await expect(createRemoteClient({
+      url: "http://127.0.0.1:4200",
+      token: "test-token",
+      outbound: redirectOutbound,
+    }).readiness()).rejects.toThrow("EGRESS_DENIED");
+    expect(calls).toHaveLength(2);
+  });
+
+  test("remote 注入裸 fetchImpl 无 allow 时拒绝；配置 allow 后走该 transport 且逐跳受控", async () => {
+    const calls: string[] = [];
+    const bareFetch = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: true }), { status: 200 });
+    }) as typeof fetch;
+
+    await expect(createRemoteClient({
+      url: "http://127.0.0.1:4300",
+      token: "test-token",
+      fetch: bareFetch,
+    }).readiness()).rejects.toThrow(/EGRESS_ALLOW_REQUIRED|EGRESS_DENIED/);
+    expect(calls).toEqual([]);
+
+    let first = true;
+    const redirectFetch = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      if (first) {
+        first = false;
+        return new Response(null, { status: 302, headers: { location: "http://evil.test/rpc" } });
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: true }), { status: 200 });
+    }) as typeof fetch;
+    const allow = { allow: [{ host: "127.0.0.1", port: 4300 }] };
+    await expect(createRemoteClient({
+      url: "http://127.0.0.1:4300",
+      token: "test-token",
+      egress: allow,
+      fetch: redirectFetch,
+    }).readiness()).rejects.toThrow("EGRESS_DENIED");
+    expect(calls).toEqual(["http://127.0.0.1:4300/rpc"]);
+
+    expect((await createRemoteClient({
+      url: "http://127.0.0.1:4300",
+      token: "test-token",
+      egress: allow,
+      fetch: bareFetch,
+    }).readiness()).result).toBe(true);
+    expect(calls.at(-1)).toBe("http://127.0.0.1:4300/rpc");
+  });
+
   test("远程 backend 实现 ExecutionBackend 并经 RPC 执行", async () => {
     const daemon = startDaemon(options());
-    const client = createRemoteClient({ url: daemon.url, token: "test-token" });
+    const client = createRemoteClient({
+      url: daemon.url,
+      token: "test-token",
+      egress: { allow: [egressRuleFromUrl(daemon.url)] },
+    });
     const backend = createRemoteBackend({ client, name: "remote-test" });
     expect(backend.name).toBe("remote-test");
     expect(backend.capabilities().egressDefaultDeny).toBe("active");

@@ -11,7 +11,11 @@ describe("GET /models 模型发现", () => {
         headers: { "content-type": "application/json" },
       });
     }) as unknown as typeof fetch;
-    const ids = await fetchModelIds({ baseUrl: "https://api.test/v1/", apiKey: "k-1" }, fakeFetch);
+    const ids = await fetchModelIds({
+      baseUrl: "https://api.test/v1/",
+      apiKey: "k-1",
+      egress: { allow: [{ host: "api.test", port: 443 }] },
+    }, fakeFetch);
     expect(ids).toEqual(["m1", "m2"]);
     expect(captured.url).toBe("https://api.test/v1/models");
     expect(new Headers(captured.init?.headers).get("Authorization")).toBe("Bearer k-1");
@@ -21,7 +25,11 @@ describe("GET /models 模型发现", () => {
     const fakeFetch = (async () => new Response("denied", { status: 401 })) as unknown as typeof fetch;
     let message = "";
     try {
-      await fetchModelIds({ baseUrl: "https://api.test/v1", apiKey: "secret" }, fakeFetch);
+      await fetchModelIds({
+        baseUrl: "https://api.test/v1",
+        apiKey: "secret",
+        egress: { allow: [{ host: "api.test", port: 443 }] },
+      }, fakeFetch);
     } catch (error) {
       message = (error as Error).message;
     }
@@ -33,7 +41,11 @@ describe("GET /models 模型发现", () => {
     const fakeFetch = (async () => new Response(JSON.stringify({ data: [] }), { status: 200 })) as unknown as typeof fetch;
     let message = "";
     try {
-      await fetchModelIds({ baseUrl: "https://api.test/v1", apiKey: "k" }, fakeFetch);
+      await fetchModelIds({
+        baseUrl: "https://api.test/v1",
+        apiKey: "k",
+        egress: { allow: [{ host: "api.test", port: 443 }] },
+      }, fakeFetch);
     } catch (error) {
       message = (error as Error).message;
     }

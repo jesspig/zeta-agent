@@ -53,6 +53,7 @@ describe("T-17 transport 与分页", () => {
     let sseAborted = false;
     const transport = createHttpMcpTransport({
       url: "https://mcp.example.test/mcp",
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
       fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
         seen.push({ url: String(input), init: init ?? {} });
         if ((init?.method ?? "GET") === "GET") {
@@ -89,6 +90,7 @@ describe("T-17 transport 与分页", () => {
   test("④ HTTP 非 2xx/RPC error 原样抛错，不静默兜底", async () => {
     const transport = createHttpMcpTransport({
       url: "https://mcp.example.test/mcp",
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
       fetchImpl: (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch,
     });
     await expect(transport.request({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow("HTTP_503");
@@ -135,6 +137,7 @@ describe("T-17 transport 与分页", () => {
     let first = true;
     const transport = createHttpMcpTransport({
       url: "https://mcp.example.test/mcp",
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
       oauth: { manager, grant },
       fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
         seen.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -150,6 +153,100 @@ describe("T-17 transport 与分页", () => {
     });
     expect((await transport.request({ jsonrpc: "2.0", id: 1, method: "ping" })).result).toEqual({ ok: true });
     expect(seen).toEqual(["Bearer first", "Bearer second"]);
+  });
+
+  test("⑧ HTTP transport 经统一出站客户端：默认拒绝、显式 allow、逐跳重定向拒绝", async () => {
+    const { createOutboundClient } = await import("@zeta-agent/security");
+    const calls: string[] = [];
+    const sseFetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(
+        encodeHttpSse({ jsonrpc: "2.0", id: 1, result: { ok: true } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    const denied = createOutboundClient({ egress: { allow: [] }, fetch: sseFetch });
+    await expect(createHttpMcpTransport({
+      url: "https://mcp.example.test/mcp",
+      fetchImpl: sseFetch,
+      outbound: denied,
+    }).request({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow("EGRESS_ALLOW_REQUIRED");
+    expect(calls).toEqual([]);
+
+    const allowed = createOutboundClient({
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
+      fetch: sseFetch,
+    });
+    const okTransport = createHttpMcpTransport({
+      url: "https://mcp.example.test/mcp",
+      fetchImpl: sseFetch,
+      outbound: allowed,
+    });
+    expect((await okTransport.request({ jsonrpc: "2.0", id: 1, method: "ping" })).result).toEqual({ ok: true });
+    expect(calls).toEqual(["https://mcp.example.test/mcp"]);
+
+    let first = true;
+    const redirectFetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      if (first) {
+        first = false;
+        return new Response(null, { status: 302, headers: { location: "https://evil.test/mcp" } });
+      }
+      return new Response(encodeHttpSse({ jsonrpc: "2.0", id: 1, result: { ok: true } }), { status: 200 });
+    }) as typeof fetch;
+    const redirectOutbound = createOutboundClient({
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
+      fetch: redirectFetch,
+    });
+    await expect(createHttpMcpTransport({
+      url: "https://mcp.example.test/mcp",
+      fetchImpl: redirectFetch,
+      outbound: redirectOutbound,
+    }).request({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow("EGRESS_DENIED");
+    expect(calls).toHaveLength(2);
+  });
+
+  test("⑨ 注入裸 fetchImpl 无 allow 时拒绝；配置 allow 后走该 transport 且逐跳受控", async () => {
+    const calls: string[] = [];
+    const bareFetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(encodeHttpSse({ jsonrpc: "2.0", id: 1, result: { ok: true } }), { status: 200 });
+    }) as typeof fetch;
+    const requestMessage: McpJsonRpcRequest = { jsonrpc: "2.0", id: 1, method: "ping" };
+
+    await expect(createHttpMcpTransport({
+      url: "https://mcp.example.test/mcp",
+      fetchImpl: bareFetch,
+    }).request(requestMessage)).rejects.toThrow(/EGRESS_ALLOW_REQUIRED|EGRESS_DENIED/);
+    expect(calls).toEqual([]);
+
+    let first = true;
+    const redirectFetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      if (first) {
+        first = false;
+        return new Response(null, { status: 302, headers: { location: "https://evil.test/mcp" } });
+      }
+      return new Response(encodeHttpSse({ jsonrpc: "2.0", id: 1, result: { ok: true } }), { status: 200 });
+    }) as typeof fetch;
+    await expect(createHttpMcpTransport({
+      url: "https://mcp.example.test/mcp",
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
+      fetchImpl: redirectFetch,
+    }).request(requestMessage)).rejects.toThrow("EGRESS_DENIED");
+    expect(calls).toEqual(["https://mcp.example.test/mcp"]);
+
+    const successFetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(encodeHttpSse({ jsonrpc: "2.0", id: 1, result: { ok: true } }), { status: 200 });
+    }) as typeof fetch;
+    expect((await createHttpMcpTransport({
+      url: "https://mcp.example.test/mcp",
+      egress: { allow: [{ host: "mcp.example.test", port: 443 }] },
+      fetchImpl: successFetch,
+    }).request(requestMessage)).result).toEqual({ ok: true });
+    expect(calls.at(-1)).toBe("https://mcp.example.test/mcp");
   });
 
   test("⑥ 分页：游标推进、deadline 与重复 id 防护", async () => {
