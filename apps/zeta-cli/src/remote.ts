@@ -4,6 +4,7 @@ import {
   type StdoutWriter,
 } from "@zeta-agent/deploy";
 import type { CliArgs } from "./args";
+import { createConnectionOutbound } from "./connection";
 
 function linesFromPrompt(args: CliArgs): string[] {
   return args.prompt === undefined
@@ -25,10 +26,11 @@ export async function executeRemoteFrames(
   const token = args.token ?? process.env.ZETA_DAEMON_TOKEN;
   if (typeof endpoint !== "string" || endpoint.length === 0) throw new Error("REMOTE_ENDPOINT_REQUIRED");
   if (typeof token !== "string" || token.length === 0) throw new Error("REMOTE_TOKEN_REQUIRED");
+  const outbound = createConnectionOutbound(endpoint, fetchImpl ?? globalThis.fetch);
   const client = createRemoteClient({
     url: endpoint,
     token,
-    ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }),
+    outbound,
   });
 
   for (const line of lines) {

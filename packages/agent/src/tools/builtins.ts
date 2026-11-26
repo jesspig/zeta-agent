@@ -1,10 +1,16 @@
 import { join } from "node:path";
 import {
   assertEnforcement,
+  buildShellEnv,
+  createEgressPolicy,
+  enforceOutputLimit,
   resolveStructuredBackend,
   type BackendEvidence,
+  type EgressPolicy,
+  type EgressTarget,
   type ExecutionBackend,
   type ListEntry,
+  type ShellRequest,
   type StructuredExecutionBackend,
   type StructuredResult,
 } from "@zeta-agent/security";
@@ -25,11 +31,61 @@ export interface ToolDefinition extends PluginTool<Readonly<Record<string, unkno
   renderResult(value: unknown): string;
 }
 
+/** read/grep/find 等工具的可配置资源上限；超限按 onLimit 截断或失败。 */
+export interface ToolResourceLimits {
+  /** 单次读取的最大 UTF-8 字节数（默认 1 MiB）。 */
+  readonly maxReadBytes?: number;
+  /** find 访问的最大条目数（默认 2000）。 */
+  readonly maxEntries?: number;
+  /** find 递归的最大深度（默认 32）。 */
+  readonly maxDepth?: number;
+  /** grep/find 的最大运行时间毫秒数（默认 5000）。 */
+  readonly maxRuntimeMs?: number;
+  /** grep 返回的最大匹配行数（默认 500）。 */
+  readonly maxMatchLines?: number;
+  /** 超限策略：truncate（默认，显式标记 truncated）或 fail。 */
+  readonly onLimit?: "truncate" | "fail";
+}
+
+export const DEFAULT_TOOL_LIMITS: Readonly<Required<Omit<ToolResourceLimits, "onLimit">>> & {
+  readonly onLimit: "truncate" | "fail";
+} = Object.freeze({
+  maxReadBytes: 1024 * 1024,
+  maxEntries: 2000,
+  maxDepth: 32,
+  maxRuntimeMs: 5000,
+  maxMatchLines: 500,
+  onLimit: "truncate" as const,
+});
+
+function resolveLimits(limits: ToolResourceLimits | undefined) {
+  return {
+    maxReadBytes: limits?.maxReadBytes ?? DEFAULT_TOOL_LIMITS.maxReadBytes,
+    maxEntries: limits?.maxEntries ?? DEFAULT_TOOL_LIMITS.maxEntries,
+    maxDepth: limits?.maxDepth ?? DEFAULT_TOOL_LIMITS.maxDepth,
+    maxRuntimeMs: limits?.maxRuntimeMs ?? DEFAULT_TOOL_LIMITS.maxRuntimeMs,
+    maxMatchLines: limits?.maxMatchLines ?? DEFAULT_TOOL_LIMITS.maxMatchLines,
+    onLimit: limits?.onLimit ?? DEFAULT_TOOL_LIMITS.onLimit,
+  };
+}
+
 export interface BuiltinToolOptions {
   readonly securityBackend: ExecutionBackend;
   readonly allowedDirectories: readonly string[];
   /** 可选真实结构化后端；未注入时由 securityBackend 兼容解析得到。 */
   readonly structuredBackend?: StructuredExecutionBackend;
+  readonly limits?: ToolResourceLimits;
+  /** shell 命令的出站绑定；缺省默认拒绝。 */
+  readonly egress?: EgressPolicy;
+  readonly egressTarget?: EgressTarget;
+  /** shell CPU/时间/输出上限；由 ShellRequest 透传，平台不支持时失败关闭。 */
+  readonly maxOutputBytes?: number;
+  readonly maxCpuMs?: number;
+  readonly maxRuntimeMs?: number;
+  /** 额外 deny 的 env 键与注入的伪凭证。 */
+  readonly denyEnv?: readonly string[];
+  readonly fakeCredentials?: Readonly<Record<string, string>>;
+  readonly now?: () => number;
 }
 
 type Args = Readonly<Record<string, unknown>>;
@@ -97,10 +153,22 @@ function evidenceOf(result: StructuredResult<unknown>): BackendEvidence {
 
 function fileTools(
   allowed: readonly string[],
-  structured: StructuredExecutionBackend
+  structured: StructuredExecutionBackend,
+  limitsInput?: ToolResourceLimits,
+  now: () => number = Date.now
 ): ToolDefinition[] {
   const backend = structured.name;
   void allowed;
+  const limits = resolveLimits(limitsInput);
+  const limitContent = (content: string): { text: string; truncated: boolean } => {
+    const limited = enforceOutputLimit(content, limits.maxReadBytes);
+    return { text: limited.stdout, truncated: limited.truncated };
+  };
+  const limitFailure = (extra: string): Record<string, unknown> => ({
+    ok: false,
+    error: `RESOURCE_LIMIT_EXCEEDED: ${extra}`,
+    backend,
+  });
   return [
     {
       name: "read",
@@ -113,11 +181,16 @@ function fileTools(
           const path = requireString(args, "path");
           const result = await structured.file.read(path);
           if (!result.ok) return backendFailure(result, backend);
+          const { text, truncated } = limitContent(result.value.content);
+          if (truncated && limits.onLimit === "fail") {
+            return limitFailure(`read exceeds ${limits.maxReadBytes} bytes`);
+          }
           return ok({
             path,
-            content: result.value.content,
+            content: text,
             backend,
             evidence: evidenceOf(result),
+            ...(truncated ? { truncated: true } : {}),
           });
         } catch (error) {
           return unexpectedFailure(error, backend);
@@ -203,7 +276,7 @@ function fileTools(
     {
       name: "grep",
       label: "Grep file",
-      description: "经结构化后端读取文件并搜索匹配行，返回行号与内容。",
+      description: "经结构化 file.read 读取文件并搜索匹配行；字节/行数/时间超限显式截断或失败。",
       parameters: parameters(
         pathParameter("要搜索的文件绝对路径"),
         { name: "pattern", type: "string", description: "搜索文本", required: true }
@@ -215,12 +288,34 @@ function fileTools(
           const pattern = requireString(args, "pattern");
           const result = await structured.file.read(path);
           if (!result.ok) return backendFailure(result, backend);
-          const lines = result.value.content.split(/\r?\n/);
+          const { text, truncated: contentTruncated } = limitContent(result.value.content);
+          if (contentTruncated && limits.onLimit === "fail") {
+            return limitFailure(`grep input exceeds ${limits.maxReadBytes} bytes`);
+          }
+          const started = now();
           const matches: Array<{ line: number; text: string }> = [];
-          lines.forEach((text, index) => {
-            if (text.includes(pattern)) matches.push({ line: index + 1, text });
+          let matchTruncated = false;
+          const lines = text.split(/\r?\n/);
+          for (let index = 0; index < lines.length; index += 1) {
+            if (matches.length >= limits.maxMatchLines || now() - started > limits.maxRuntimeMs) {
+              matchTruncated = true;
+              break;
+            }
+            const line = lines[index]!;
+            if (line.includes(pattern)) matches.push({ line: index + 1, text: line });
+          }
+          if (matchTruncated && limits.onLimit === "fail") {
+            return limitFailure(`grep exceeds ${limits.maxMatchLines} lines or ${limits.maxRuntimeMs}ms`);
+          }
+          const truncated = contentTruncated || matchTruncated;
+          return ok({
+            path,
+            pattern,
+            matches,
+            backend,
+            evidence: evidenceOf(result),
+            ...(truncated ? { truncated: true } : {}),
           });
-          return ok({ path, pattern, matches, backend, evidence: evidenceOf(result) });
         } catch (error) {
           return unexpectedFailure(error, backend);
         }
@@ -231,7 +326,7 @@ function fileTools(
     {
       name: "find",
       label: "Find files",
-      description: "经结构化后端递归列出受控目录内按名称子串匹配的文件。",
+      description: "经结构化 file.list 递归查找；深度/条目/时间超限显式截断或失败。",
       parameters: parameters(
         pathParameter("查找起始目录绝对路径"),
         { name: "pattern", type: "string", description: "文件名子串", required: true }
@@ -242,20 +337,41 @@ function fileTools(
           const start = requireString(args, "path");
           const pattern = requireString(args, "pattern");
           const paths: string[] = [];
-          const visit = async (directory: string): Promise<void> => {
+          const started = now();
+          let truncated = false;
+          const visit = async (directory: string, depth: number): Promise<void> => {
+            if (truncated) return;
+            if (depth > limits.maxDepth || paths.length >= limits.maxEntries || now() - started > limits.maxRuntimeMs) {
+              truncated = true;
+              return;
+            }
             const result = await structured.file.list(directory);
             if (!result.ok) {
               paths.push(`ERROR:${directory}:${result.code}`);
               return;
             }
             for (const entry of result.value.entries) {
+              if (truncated) break;
+              if (paths.length >= limits.maxEntries || now() - started > limits.maxRuntimeMs) {
+                truncated = true;
+                break;
+              }
               const full = join(directory, entry.name);
-              if (entry.type === "directory") await visit(full);
+              if (entry.type === "directory") await visit(full, depth + 1);
               else if (entry.name.includes(pattern)) paths.push(full);
             }
           };
-          await visit(start);
-          return ok({ path: start, pattern, paths, backend });
+          await visit(start, 0);
+          if (truncated && limits.onLimit === "fail") {
+            return limitFailure(`find exceeds ${limits.maxEntries} entries / ${limits.maxDepth} depth / ${limits.maxRuntimeMs}ms`);
+          }
+          return ok({
+            path: start,
+            pattern,
+            paths,
+            backend,
+            ...(truncated ? { truncated: true } : {}),
+          });
         } catch (error) {
           return unexpectedFailure(error, backend);
         }
@@ -266,32 +382,85 @@ function fileTools(
   ];
 }
 
-function commandTools(backend: ExecutionBackend, guard: () => void): ToolDefinition[] {
+interface ShellToolConfig {
+  readonly guard: () => void;
+  readonly structured: StructuredExecutionBackend;
+  readonly cwd: string;
+  readonly egress?: EgressPolicy;
+  readonly egressTarget?: EgressTarget;
+  readonly maxOutputBytes?: number;
+  readonly maxCpuMs?: number;
+  readonly maxRuntimeMs?: number;
+  readonly denyEnv?: readonly string[];
+  readonly fakeCredentials?: Readonly<Record<string, string>>;
+}
+
+/**
+ * bash/powershell 统一走 structured.shell.start(ShellRequest)，不再以
+ * backend.run({argv:[flag,command]}) 绕过结构化执行边界。
+ */
+function commandTools(config: ShellToolConfig): ToolDefinition[] {
   const make = (name: string, label: string, flag: string): ToolDefinition => ({
     name,
     label,
-    description: `经安全后端执行命令（${name}）。`,
+    description: `经结构化 shell.start 执行命令（${name}）。`,
     parameters: parameters({
       name: "command",
       type: "string",
       description: "要执行的命令字符串",
       required: true,
     }),
-    async execute(input) {
-      guard();
+    async execute(input, signal) {
+      config.guard();
       const args = isRecord(input) ? input : {};
       const command = requireString(args, "command");
-      const result = await backend.run({ argv: [flag, command] });
-      if (result.exitCode !== 0) {
+      const request: ShellRequest = {
+        argv: [name, flag, command],
+        cwd: config.cwd,
+        env: buildShellEnv(process.env, {
+          ...(config.denyEnv === undefined ? {} : { denyEnv: config.denyEnv }),
+          ...(config.fakeCredentials === undefined ? {} : { fakeCredentials: config.fakeCredentials }),
+        }),
+        ...(config.denyEnv === undefined ? {} : { denyEnv: config.denyEnv }),
+        ...(config.fakeCredentials === undefined ? {} : { fakeCredentials: config.fakeCredentials }),
+        ...(config.maxOutputBytes === undefined ? {} : { maxOutputBytes: config.maxOutputBytes }),
+        ...(config.maxCpuMs === undefined ? {} : { maxCpuMs: config.maxCpuMs }),
+        ...(config.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: config.maxRuntimeMs }),
+        ...(config.egress === undefined
+          ? {}
+          : {
+              egress: {
+                policy: config.egress,
+                ...(config.egressTarget === undefined ? {} : { target: config.egressTarget }),
+              },
+            }),
+        ...(signal === undefined ? {} : { signal }),
+      };
+      const started = await config.structured.shell.start(request);
+      if (!started.ok) {
+        return { ok: false, error: `${started.code}: ${started.error}`, backend: config.structured.name };
+      }
+      const finished = await started.value.exited;
+      const termination = finished.termination ?? "confirmed";
+      const base = {
+        command,
+        stdout: finished.stdout,
+        stderr: finished.stderr,
+        exitCode: finished.exitCode,
+        termination,
+      };
+      if (termination === "unknown") {
         return {
           ok: false,
-          error: `COMMAND_FAILED: exit ${result.exitCode}`,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
+          error: `SHELL_TERMINATION_UNKNOWN: ${finished.reconciliation ?? "reconciliation required"}`,
+          ...base,
+          ...(finished.reconciliation === undefined ? {} : { reconciliation: finished.reconciliation }),
         };
       }
-      return ok({ command, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode });
+      if (finished.exitCode !== 0) {
+        return { ok: false, error: `COMMAND_FAILED: exit ${finished.exitCode}`, ...base };
+      }
+      return ok(base);
     },
     renderCall: renderCall(name, ["command"]),
     renderResult,
@@ -304,10 +473,24 @@ export function builtinToolDefinitions(options: BuiltinToolOptions): readonly To
   const guard = (): void => assertEnforcement(options.securityBackend.capabilities());
   const structured =
     options.structuredBackend ?? resolveStructuredBackend(options.securityBackend, options.allowedDirectories);
-  const files = fileTools(options.allowedDirectories, structured);
+  const files = fileTools(options.allowedDirectories, structured, options.limits, options.now);
+  const cwd = options.allowedDirectories[0] ?? process.cwd();
+  const egress =
+    options.egress ?? (options.egressTarget === undefined ? undefined : createEgressPolicy());
   return [
     ...files.slice(0, 1),
-    ...commandTools(options.securityBackend, guard),
+    ...commandTools({
+      guard,
+      structured,
+      cwd,
+      ...(egress === undefined ? {} : { egress }),
+      ...(options.egressTarget === undefined ? {} : { egressTarget: options.egressTarget }),
+      ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
+      ...(options.maxCpuMs === undefined ? {} : { maxCpuMs: options.maxCpuMs }),
+      ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }),
+      ...(options.denyEnv === undefined ? {} : { denyEnv: options.denyEnv }),
+      ...(options.fakeCredentials === undefined ? {} : { fakeCredentials: options.fakeCredentials }),
+    }),
     ...files.slice(1),
   ];
 }

@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
+import { atomicWriteFileSync } from "./atomic-file";
 
 export interface AuditRecord {
   readonly ts: number;
@@ -131,15 +132,26 @@ export function createFileAuditStorage(dir: string): AuditStorage {
   return {
     append(line) {
       mkdirSync(dir, { recursive: true });
-      appendFileSync(logPath, `${line}\n`, "utf8");
+      const buffer = Buffer.from(`${line}\n`, "utf8");
+      const fd = openSync(logPath, "a");
+      try {
+        let written = 0;
+        while (written < buffer.length) {
+          const count = writeSync(fd, buffer, written, buffer.length - written);
+          if (count <= 0) throw new Error("AUDIT_APPEND_STALL");
+          written += count;
+        }
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
     },
     readLines() {
       if (!existsSync(logPath)) return [];
       return readFileSync(logPath, "utf8").split(/\r?\n/).filter((line) => line.length > 0);
     },
     writeMarker(revision, marker) {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(markerPath(revision), marker, "utf8");
+      atomicWriteFileSync(markerPath(revision), marker);
     },
     readMarker(revision) {
       const path = markerPath(revision);

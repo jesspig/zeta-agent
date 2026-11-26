@@ -4,6 +4,7 @@ import {
   withCredentialFetch,
   type CredentialBinding,
 } from "./credentials";
+import { createOutboundClient } from "./outbound";
 
 const binding: CredentialBinding = {
   scheme: "https",
@@ -114,6 +115,109 @@ describe("T-14 IF-11 CredentialBroker", () => {
     expect(calls[0]!.headers.get("Authorization")).toBe("Bearer boundary-secret");
 
     expect(() => gated("https://evil.example/v1", { method: "POST" })).toThrow("CREDENTIAL_BINDING_MISMATCH");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("withCredentialFetch 正确处理 Request 输入的 method/headers/url", async () => {
+    const broker = createCredentialBroker({ now: () => 0 });
+    const handle = broker.issue({ name: "k", binding, secret: "request-secret" });
+    const seen: Array<{ url: string; method: string; keep: string | null; authorization: string | null }> = [];
+    const baseFetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input.toString(), init);
+      seen.push({
+        url: request.url,
+        method: request.method,
+        keep: request.headers.get("x-keep"),
+        authorization: request.headers.get("authorization"),
+      });
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    const gated = withCredentialFetch(broker, handle, baseFetch);
+
+    await gated(new Request("https://api.example.com/v1/chat", {
+      method: "POST",
+      headers: { "x-keep": "yes" },
+    }));
+    expect(seen).toEqual([{
+      url: "https://api.example.com/v1/chat",
+      method: "POST",
+      keep: "yes",
+      authorization: "Bearer request-secret",
+    }]);
+
+    // Request 自身的 method 参与绑定校验，不能被默认 GET 掩盖。
+    expect(() => gated(new Request("https://api.example.com/v1/chat", { method: "GET" })))
+      .toThrow("CREDENTIAL_BINDING_MISMATCH");
+    expect(seen).toHaveLength(1);
+  });
+
+  test("handle 冻结且权威副本不受外部篡改", () => {
+    let now = 1000;
+    const broker = createCredentialBroker({ now: () => now });
+    const handle = broker.issue({ name: "ttl", binding, secret: "s", ttlMs: 100 });
+    expect(Object.isFrozen(handle)).toBe(true);
+    expect(() => {
+      (handle as { expiresAt?: number }).expiresAt = 1;
+    }).toThrow();
+
+    // 副本带伪造的 revision/expiresAt 时，状态仍以 broker 内部 handle 为准。
+    const tampered = { ...handle, revision: 999, expiresAt: 0 };
+    expect(broker.status(tampered)).toBe("active");
+    expect(broker.resolve(tampered, { url: "https://api.example.com/v1", method: "POST" })).toEqual({
+      Authorization: "Bearer s",
+    });
+    now = 1101;
+    expect(broker.status(tampered)).toBe("expired");
+    expect(() => broker.resolve(tampered, { url: "https://api.example.com/v1", method: "POST" }))
+      .toThrow("CREDENTIAL_EXPIRED");
+
+    const snapshot = broker.handles[0]!;
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(() => {
+      (snapshot as { revision?: number }).revision = 999;
+    }).toThrow();
+    expect(broker.handles[0]!.revision).toBe(0);
+  });
+
+  test("preconnect 不透过凭证边界或统一出站客户端", async () => {
+    let preconnectCalls = 0;
+    const baseFetch = Object.assign(
+      (async () => new Response("ok")) as unknown as typeof fetch,
+      { preconnect: () => { preconnectCalls += 1; } }
+    );
+    const broker = createCredentialBroker({ now: () => 0 });
+    const handle = broker.issue({ name: "k", binding, secret: "s" });
+    const gated = withCredentialFetch(broker, handle, baseFetch);
+    expect((gated as { preconnect?: unknown }).preconnect).toBeUndefined();
+
+    const outbound = createOutboundClient({
+      egress: { allow: [{ host: "api.example.com", port: 443 }] },
+      fetch: baseFetch,
+      credential: { broker, handle },
+    });
+    expect((outbound.fetch as { preconnect?: unknown }).preconnect).toBeUndefined();
+    expect(preconnectCalls).toBe(0);
+    await outbound.fetch("https://api.example.com/v1/chat", { method: "POST" });
+    expect(preconnectCalls).toBe(0);
+  });
+
+  test("统一出站客户端：无 allow 规则在 fetch 前抛配置错误，显式 allow 才联网", async () => {
+    const calls: string[] = [];
+    const baseFetch = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push(String(input));
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    const denied = createOutboundClient({ egress: { allow: [] }, fetch: baseFetch });
+    await expect(denied.fetch("https://api.example.com/v1")).rejects.toThrow("EGRESS_ALLOW_REQUIRED");
+    expect(calls).toEqual([]);
+
+    const allowed = createOutboundClient({
+      egress: { allow: [{ host: "api.example.com", port: 443 }] },
+      fetch: baseFetch,
+    });
+    expect((await allowed.fetch("https://api.example.com/v1")).ok).toBe(true);
+    expect(calls).toEqual(["https://api.example.com/v1"]);
+    await expect(allowed.fetch("https://evil.example/v1")).rejects.toThrow("EGRESS_DENIED");
     expect(calls).toHaveLength(1);
   });
 });

@@ -26,7 +26,7 @@ describe("T-07 provider conformance 终态矩阵", () => {
       "data: [DONE]\n\n",
     ]);
     const chunks = await collect(createProviderStreamFn(
-      { provider: "openai", model: "gpt-4o", apiKey: "k", baseUrl: "https://openai.test/v1" },
+      { provider: "openai", model: "gpt-4o", apiKey: "k", baseUrl: "https://openai.test/v1", egress: { allow: [{ host: "openai.test", port: 443 }] } },
       (async () => response) as unknown as typeof fetch,
     )(request));
     expect(chunks.at(-1)).toEqual({
@@ -45,7 +45,7 @@ describe("T-07 provider conformance 终态矩阵", () => {
       ['{"type":"response.incomplete","response":{"id":"r2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":4,"output_tokens":6}}}', "length"],
     ] as const) {
       const chunks = await collect(createProviderStreamFn(
-        { provider: "openai-responses", model: "responses", apiKey: "k", baseUrl: "https://responses.test/v1" },
+        { provider: "openai-responses", model: "responses", apiKey: "k", baseUrl: "https://responses.test/v1", egress: { allow: [{ host: "responses.test", port: 443 }] } },
         (async () => sse([`data: ${event}\n\n`])) as unknown as typeof fetch,
       )(request));
       expect(chunks.at(-1)).toMatchObject({ type: "done", stopReason, responseId: event.includes("r1") ? "r1" : "r2" });
@@ -55,7 +55,7 @@ describe("T-07 provider conformance 终态矩阵", () => {
 
   test("Anthropic 映射 message_delta stop_reason 与 usage", async () => {
     const chunks = await collect(createProviderStreamFn(
-      { provider: "anthropic", model: "sonnet", apiKey: "k", baseUrl: "https://anthropic.test/v1" },
+      { provider: "anthropic", model: "sonnet", apiKey: "k", baseUrl: "https://anthropic.test/v1", egress: { allow: [{ host: "anthropic.test", port: 443 }] } },
       (async () => sse([
         'data: {"type":"message_start","message":{"id":"msg-1","usage":{"input_tokens":7,"output_tokens":0}}}\n\n',
         'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":8}}\n\n',
@@ -72,7 +72,7 @@ describe("T-07 provider conformance 终态矩阵", () => {
 
   test("Google 映射 finishReason 与 usageMetadata", async () => {
     const chunks = await collect(createProviderStreamFn(
-      { provider: "google", model: "flash", apiKey: "k", baseUrl: "https://google.test/v1beta" },
+      { provider: "google", model: "flash", apiKey: "k", baseUrl: "https://google.test/v1beta", egress: { allow: [{ host: "google.test", port: 443 }] } },
       (async () => sse([
         'data: {"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"ok"}]}}],"responseId":"g1","usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":9,"totalTokenCount":12}}\n\n',
       ])) as unknown as typeof fetch,
@@ -87,7 +87,7 @@ describe("T-07 provider conformance 终态矩阵", () => {
 
   test("HTTP 429 映射可分类 error chunk 与 Retry-After", async () => {
     const chunks = await collect(createProviderStreamFn(
-      { provider: "openai", model: "gpt-4o", apiKey: "secret", baseUrl: "https://openai.test/v1" },
+      { provider: "openai", model: "gpt-4o", apiKey: "secret", baseUrl: "https://openai.test/v1", egress: { allow: [{ host: "openai.test", port: 443 }] } },
       (async () => new Response("limited", { status: 429, headers: { "retry-after": "2" } })) as unknown as typeof fetch,
     )(request));
     expect(chunks).toHaveLength(1);

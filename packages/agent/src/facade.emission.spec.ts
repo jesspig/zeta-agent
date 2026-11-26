@@ -214,6 +214,7 @@ describe("T-06 安全组件接入真实工具/provider 路径（系统级证据�
       includeBuiltins: false,
       credentialVault: vault,
       secretBroker: broker,
+      egressPolicy: createEgressPolicy({ allow: [{ host: "api.example.test", port: 443 }] }),
       observability: { runId: "cred", sink: (message) => logs.push(message.message) },
     });
 
@@ -251,7 +252,7 @@ describe("T-06 安全组件接入真实工具/provider 路径（系统级证据�
     }) as unknown as typeof fetch;
     const { createProviderStreamFn } = await import("./providers/dispatch");
     await collect(createProviderStreamFn(
-      { provider: "groq", model: "llama", baseUrl, apiKey: placeholder!.token },
+      { provider: "groq", model: "llama", baseUrl, apiKey: placeholder!.token, egress: { allow: [{ host: "api.example.test", port: 443 }] } },
       plainFetch
     )(request));
     expect(preBoundaryHeader).toBe(`Bearer ${placeholder!.token}`);

@@ -102,8 +102,8 @@ describe("T-24 durable effects and replay semantics", () => {
 
     expect(dispatched).toEqual(["message:m1:hello", "file:f1:data"]);
     expect(receipts).toEqual([
-      { kind: "message", key: "m1", ok: true, value: "ok" },
-      { kind: "file", key: "f1", ok: true, value: "ok" },
+      { kind: "message", key: "m1", ok: true, value: "ok", idempotencyKey: "message\u0000m1", generation: 1 },
+      { kind: "file", key: "f1", ok: true, value: "ok", idempotencyKey: "file\u0000f1", generation: 1 },
     ]);
     expect(effects.pending()).toEqual([]);
     expect(effects.receipts()).toHaveLength(2);

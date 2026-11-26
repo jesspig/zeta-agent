@@ -1,8 +1,9 @@
 import type { AgentTool as FrameworkAgentTool } from "@zeta-agent/agent-framework";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import {
+  atomicWriteFileSync,
   createPersistentOutbox,
+  OUTBOX_SCHEMA_VERSION,
   type OutboxEntry,
   type OutboxJournal,
   type OutboxReceipt,
@@ -162,7 +163,7 @@ export function createInMemoryDurableJournal(): DurableJournal {
   };
 }
 
-/** 文件 journal：状态转换逐次落盘，回执先于出队写入。 */
+/** 文件 journal：状态转换经原子写逐次落盘，回执先于出队写入。 */
 export function createFileDurableJournal(filePath: string): DurableJournal {
   assertKey(filePath, "durable journal path");
   return {
@@ -172,11 +173,15 @@ export function createFileDurableJournal(filePath: string): DurableJournal {
       if (!isRecord(parsed) || !Array.isArray(parsed.pending) || !Array.isArray(parsed.receipts) || !Array.isArray(parsed.seen)) {
         throw new Error("INVALID_DURABLE_JOURNAL");
       }
+      // 历史快照没有 schemaVersion 时按当前版本只读兼容；未来版本拒绝读取。
+      const version: unknown = parsed.schemaVersion ?? OUTBOX_SCHEMA_VERSION;
+      if (typeof version !== "number" || !Number.isInteger(version) || version > OUTBOX_SCHEMA_VERSION) {
+        throw new Error("DURABLE_JOURNAL_SCHEMA_UNSUPPORTED");
+      }
       return parsed as unknown as DurableSnapshot;
     },
     save(snapshot) {
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(filePath, JSON.stringify(snapshot), "utf8");
+      atomicWriteFileSync(filePath, JSON.stringify(snapshot));
     },
   };
 }

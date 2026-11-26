@@ -131,6 +131,7 @@ interface Principal { userId: string; spaceId: string; realm: symbol }
 - **配额作为 coeffect**：`QuotaService{check({tenant,tool}),reserve({tokens,qps})}`，withhold 前先 reserve——避免 coze 配额不落地；
 - **经验库隔离**（自演化）：per-domain + per-mode 各持一个，只读更早任务。
 - **实现状态（2026-11-24）**：`listeners` 已按 realm 分桶，`isolate(realm)` 派生 context 的事件默认严格隔离（root 与派生互不串扰），`on/emit/dispose` 均绑定 realm；配额 reserve 与资源隔离已有专测（证据：`packages/framework/src/context.spec.ts` A28 章节）。facade 自己的 eventBus/stream 为独立总线，不在 realm 隔离范围。
+- **实现状态（T-15 / 2026-11-26）**：租户治理缺省为 `multi-tenant`，缺 origin 抛 `TENANT_ORIGIN_REQUIRED`、缺 per-realm research 工厂抛 `TENANT_FACTORY_REQUIRED`，无共享回退；`single-tenant` 必须由装配点显式声明（当前仅 runtime）。配额经 `quotaKey` coeffect 按 realm provide，覆盖工具/token/qps；对象 host 实例身份绑定 realm/principal/space，跨 realm grant 被拒。证据：`packages/agent/src/tenant/dual-tenant.spec.ts`、`scripts/red-cases/tenant-origin-missing.case.mjs`、`scripts/red-cases/tenant-realm-breach.case.mjs`。
 
 ## 8 错误模型（缺口 8）
 

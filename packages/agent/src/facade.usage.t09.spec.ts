@@ -62,7 +62,7 @@ describe("T-09 usage 单源", () => {
       { status: 200 },
     );
     const streamFn = createProviderStreamFn(
-      { provider: "openai", model: "gpt-4o", apiKey: "k", baseUrl: "https://usage.test/v1" },
+      { provider: "openai", model: "gpt-4o", apiKey: "k", baseUrl: "https://usage.test/v1", egress: { allow: [{ host: "usage.test", port: 443 }] } },
       (async () => sse) as unknown as typeof fetch,
     );
     const agent = createAgent({ includeBuiltins: false, streamFn });

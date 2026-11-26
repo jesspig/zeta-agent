@@ -261,4 +261,23 @@ describe("A22-b：write/edit 经 ExecutionBackend，realpath 防逃逸保留", (
     expect(JSON.stringify(result)).toMatch(/CONFINEMENT|outside/i);
     expect(calls.some((argv) => argv[0] === "fs:write")).toBe(false);
   });
+
+  test("facade.createProviderStreamFn 注入裸 fetch 且无 allow 仍失败关闭", async () => {
+    let calls = 0;
+    const bareFetch = (async () => {
+      calls += 1;
+      return new Response("data: [DONE]\n\n", { status: 200 });
+    }) as unknown as typeof fetch;
+    const agent = createAgent({ includeBuiltins: false });
+    const stream = agent.createProviderStreamFn({
+      provider: "openai",
+      model: "gpt-4o",
+      apiKey: "k",
+      baseUrl: "https://api.test/v1",
+    }, bareFetch);
+    await expect((async () => {
+      for await (const _chunk of stream({ messages: [] })) void _chunk;
+    })()).rejects.toThrow(/EGRESS_ALLOW_REQUIRED|EGRESS_DENIED/);
+    expect(calls).toBe(0);
+  });
 });

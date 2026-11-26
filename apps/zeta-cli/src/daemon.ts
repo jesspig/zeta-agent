@@ -5,6 +5,7 @@ import {
   hostTarget,
   startDaemon,
   type DaemonHandle,
+  type DaemonTlsConfig,
   type DeployConfig,
   type RpcRuntime,
   type StdoutWriter,
@@ -34,6 +35,13 @@ export interface CliDaemonOptions {
   readonly ipcPort?: number;
   readonly token?: string;
   readonly writer?: StdoutWriter;
+  readonly runtimeFactory?: () => RpcRuntime;
+  readonly autoRestart?: boolean;
+  readonly leaseTtlMs?: number;
+  readonly heartbeatMs?: number;
+  readonly tls?: DaemonTlsConfig;
+  /** CLI 是显式开发入口：loopback 明文必须在这里显式开启。 */
+  readonly allowPlainLoopback?: boolean;
 }
 
 export function startCliDaemon(
@@ -48,6 +56,12 @@ export function startCliDaemon(
     token,
     config,
     runtime: createCliRpcRuntime(bundle),
+    runtimeFactory: options.runtimeFactory ?? (() => createCliRpcRuntime(bundle)),
+    autoRestart: options.autoRestart ?? true,
+    leaseTtlMs: options.leaseTtlMs,
+    heartbeatMs: options.heartbeatMs,
+    tls: options.tls,
+    allowPlainLoopback: options.allowPlainLoopback ?? true,
     port: options.port ?? 0,
     ipcPort: options.ipcPort ?? 0,
     writer: options.writer,

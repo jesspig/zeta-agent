@@ -113,6 +113,7 @@ describe("T-17 真实 MCP server E2E", () => {
     if (address === null || typeof address === "string") throw new Error("HTTP_ADDRESS_MISSING");
     const transport = createHttpMcpTransport({
       url: `http://127.0.0.1:${address.port}/mcp`,
+      egress: { allow: [{ host: "127.0.0.1", port: address.port }] },
       fetchImpl: fetch,
     });
     try {

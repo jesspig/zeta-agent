@@ -9,6 +9,7 @@
     "./backend": "./src/backend.ts",
     "./credentials": "./src/credentials.ts",
     "./egress": "./src/egress.ts",
+    "./outbound": "./src/outbound.ts",
     "./audit": "./src/audit.ts",
     "./vault": "./src/vault.ts",
     "./types": "./src/types.ts",

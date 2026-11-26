@@ -1,4 +1,4 @@
-import { computeConfigDigest } from "./canonical";
+import { computeStableConfigDigest } from "./config-digest";
 import { hostTarget } from "./build-plan";
 
 /** AgentRuntime 的最小稳定 seam：只读取真实装配的生命周期与身份，不重建执行路径。 */
@@ -27,11 +27,12 @@ export function createRuntimeProbeSource(runtime: AgentRuntimeLike): RuntimeProb
       const kind = state();
       return kind !== "DISPOSED" && kind !== "FAILED";
     },
+    // session id / PID 属于每次启动都会变化的非稳定字段，禁止进入配置摘要。
     configDigest: () =>
-      computeConfigDigest({
+      computeStableConfigDigest({
+        target,
         profile: runtime.profile,
         manifest: runtime.manifest,
-        session: runtime.protocol?.session?.id,
       }),
   };
 }

@@ -6,6 +6,9 @@
 
 export type OutboxState = "queued" | "dispatching" | "unknown" | "settled" | "deferred";
 
+/** 历史快照没有该字段，读取时一律视为 1；高于当前版本则失败关闭。 */
+export const OUTBOX_SCHEMA_VERSION = 1;
+
 export interface OutboxEntry {
   readonly kind: string;
   readonly key: string;
@@ -23,9 +26,13 @@ export interface OutboxReceipt {
   readonly key: string;
   readonly ok: boolean;
   readonly value?: unknown;
+  /** 历史 receipt 可缺字段：读取时只读兼容，不重写旧回执。 */
+  readonly idempotencyKey?: string;
+  readonly generation?: number;
 }
 
 export interface OutboxSnapshot {
+  readonly schemaVersion?: number;
   readonly seq: number;
   readonly pending: readonly OutboxEntry[];
   readonly receipts: readonly OutboxReceipt[];
@@ -120,6 +127,7 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
   const persist = (): void => {
     revision += 1;
     journal.save({
+      schemaVersion: OUTBOX_SCHEMA_VERSION,
       seq,
       pending: pending.map((entry) => ({ ...entry })),
       receipts: receipts.map((receipt) => ({ ...receipt })),
@@ -138,6 +146,20 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
     return next;
   }
 
+  /** 只接受当前仍处于 dispatching 的同一代次，陈旧确认一律拒绝，避免重复回执/重复计费。 */
+  function requireDispatching(entry: OutboxEntry): OutboxEntry {
+    const current = pending.find((item) => item.seq === entry.seq);
+    if (
+      current === undefined ||
+      current.state !== "dispatching" ||
+      current.generation !== entry.generation ||
+      current.idempotencyKey !== entry.idempotencyKey
+    ) {
+      throw new Error("OUTBOX_NOT_DISPATCHABLE");
+    }
+    return current;
+  }
+
   function finish(entry: OutboxEntry, ok: boolean, value?: unknown): OutboxReceipt {
     pending = pending.filter((item) => item.seq !== entry.seq);
     const receipt: OutboxReceipt = {
@@ -145,6 +167,8 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
       key: entry.key,
       ok,
       ...(value === undefined ? {} : { value }),
+      idempotencyKey: entry.idempotencyKey,
+      generation: entry.generation,
     };
     receipts.push(receipt);
     consecutiveFailures = ok ? 0 : consecutiveFailures + 1;
@@ -157,12 +181,28 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
     if (snapshot === undefined) {
       return { restored: false, pending: pending.length, receipts: receipts.length, unknown: unknown().length };
     }
+    const schemaVersion = snapshot.schemaVersion ?? OUTBOX_SCHEMA_VERSION;
+    if (!Number.isInteger(schemaVersion) || schemaVersion > OUTBOX_SCHEMA_VERSION) {
+      throw new Error("OUTBOX_SCHEMA_UNSUPPORTED");
+    }
+    if (
+      !Number.isInteger(snapshot.seq) ||
+      !Number.isInteger(snapshot.revision) ||
+      !Number.isInteger(snapshot.consecutiveFailures) ||
+      !Array.isArray(snapshot.pending) ||
+      !Array.isArray(snapshot.receipts) ||
+      !Array.isArray(snapshot.seen)
+    ) {
+      throw new Error("INVALID_OUTBOX_SNAPSHOT");
+    }
     seq = snapshot.seq;
     revision = snapshot.revision;
     consecutiveFailures = snapshot.consecutiveFailures;
     receipts = snapshot.receipts.map((receipt) => ({ ...receipt }));
     seen = new Set(snapshot.seen);
-    const settledKeys = new Set(receipts.map((receipt) => `${receipt.kind}\u0000${receipt.key}`));
+    const settledKeys = new Set(
+      receipts.map((receipt) => receipt.idempotencyKey ?? `${receipt.kind}\u0000${receipt.key}`)
+    );
     pending = snapshot.pending.map((entry) =>
       entry.state === "dispatching" && !settledKeys.has(entry.idempotencyKey)
         ? { ...entry, state: "unknown" as const }
@@ -186,9 +226,18 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
       const idempotencyKey = `${kind}\u0000${key}`;
       if (seen.has(idempotencyKey)) {
         const existing = pending.find((entry) => entry.idempotencyKey === idempotencyKey);
-        return existing === undefined
-          ? { kind, key, seq: 0, payload, idempotencyKey, state: "settled", generation: 0, attempts: 0 }
-          : { ...existing };
+        if (existing !== undefined) return { ...existing };
+        const prior = [...receipts].reverse().find((receipt) => receipt.idempotencyKey === idempotencyKey);
+        return {
+          kind,
+          key,
+          seq: 0,
+          payload,
+          idempotencyKey,
+          state: "settled",
+          generation: prior?.generation ?? 0,
+          attempts: prior?.generation ?? 0,
+        };
       }
       seen.add(idempotencyKey);
       seq += 1;
@@ -218,11 +267,10 @@ export function createPersistentOutbox(options: PersistentOutboxOptions): Persis
       return replace(current, { state: "dispatching", generation: current.generation + 1, attempts: current.attempts + 1 });
     },
     settle(entry, ok, value) {
-      return finish({ ...entry }, ok, value);
+      return finish(requireDispatching(entry), ok, value);
     },
     fail(entry) {
-      const current = pending.find((item) => item.seq === entry.seq);
-      if (current === undefined) throw new Error("OUTBOX_ENTRY_NOT_PENDING");
+      const current = requireDispatching(entry);
       if (current.attempts < maxAttempts) {
         const retried = replace(current, { state: "queued", generation: current.generation + 1 });
         return { retry: true, entry: retried };

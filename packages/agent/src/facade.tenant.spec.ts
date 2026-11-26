@@ -4,7 +4,10 @@ import type { AgentStreamChunk, AgentStreamRequest } from "./facade";
 import { createAgent } from "./facade";
 import { createDurableEffects, type DurableEffects } from "./plugins/effects/durable";
 import type { SessionStore } from "./session/store";
+import { createExperienceStore } from "./research/experience";
 import { createTenantGovernance } from "./tenant/governance";
+
+const freshResearch = () => createExperienceStore();
 
 function toolHarness(options: {
   readonly scope: ReturnType<ReturnType<typeof createTenantGovernance>["resolve"]>;
@@ -48,6 +51,7 @@ describe("T-13 facade principal/resource/quota 注入", () => {
       return "DISPATCHED";
     });
     const governance = createTenantGovernance({
+      createExperienceStore: freshResearch,
       tokensPerTenant: 2,
       createDurableEffects: () => effects,
     });
@@ -69,6 +73,7 @@ describe("T-13 facade principal/resource/quota 注入", () => {
       return "DISPATCHED";
     });
     const governance = createTenantGovernance({
+      createExperienceStore: freshResearch,
       tokensPerTenant: 1,
       createDurableEffects: () => effects,
     });
@@ -88,7 +93,7 @@ describe("T-13 facade principal/resource/quota 注入", () => {
   });
 
   test("principal 注入审计：AuditRecord.tenant 来自 realm 的 spaceId", async () => {
-    const governance = createTenantGovernance();
+    const governance = createTenantGovernance({ createExperienceStore: freshResearch });
     const scope = governance.resolve({ spaceId: "audit-tenant", userId: "user-1" });
     const auditSink = createAuditSink();
     const { agent } = toolHarness({ scope, auditSink });
@@ -107,6 +112,7 @@ describe("T-13 facade principal/resource/quota 注入", () => {
     const sessionStores: Record<string, SessionStore> = {};
     const effectsBySpace: Record<string, DurableEffects> = {};
     const governance = createTenantGovernance({
+      createExperienceStore: freshResearch,
       tokensPerTenant: 5,
       createSessionStore: (principal) => {
         const tag = principal.spaceId;

@@ -1,8 +1,10 @@
 import {
-  createEgressGateway,
+  resolveOutboundFetch,
   withCredentialFetch,
   type CredentialBoundaryRef,
   type EgressPolicy,
+  type EgressPolicyOptions,
+  type OutboundClient,
 } from "@zeta-agent/security";
 
 export interface ImageSource {
@@ -33,8 +35,17 @@ export function encodeImage(source: ImageSource): EncodedImage {
 export interface FetchImageOptions {
   /** 远程图片抓取同样走统一凭证边界，明文不进入调用方配置。 */
   readonly credentialBoundary?: CredentialBoundaryRef;
-  /** 数据面 egress 策略：缺省不额外约束（沿用注入 fetch 的治理）。 */
-  readonly egress?: { readonly policy: EgressPolicy };
+  /** 数据面 egress 策略；缺省空 allow，一律失败关闭。兼容旧 `{ policy }` 形状。 */
+  readonly egress?: EgressPolicy | EgressPolicyOptions | { readonly policy: EgressPolicy };
+  /** 统一出站客户端：与 provider/discovery/MCP/remote 共用的唯一 fetch 入口。 */
+  readonly outbound?: OutboundClient;
+}
+
+function normalizeEgress(
+  egress: EgressPolicy | EgressPolicyOptions | { readonly policy: EgressPolicy } | undefined
+): EgressPolicy | EgressPolicyOptions | undefined {
+  if (egress === undefined) return undefined;
+  return "policy" in egress ? egress.policy : egress;
 }
 
 /** 远程图片字节抓取：凭据只在 fetch 边界注入，绑定/TTL/revision 失败在请求前抛错。 */
@@ -47,13 +58,17 @@ export async function fetchImageBytes(
     throw new Error("IMAGE_SOURCE_REQUIRED: 远程抓取须提供 url");
   }
   const boundary = options.credentialBoundary;
-  let gated: typeof fetch = boundary === undefined
-    ? fetchImpl
-    : withCredentialFetch(boundary.broker, boundary.handle, fetchImpl);
-  if (options.egress !== undefined) {
-    const gateway = createEgressGateway({ policy: options.egress.policy, fetch: gated });
-    gated = gateway.fetch as typeof fetch;
-  }
+  const outboundFetch = resolveOutboundFetch({
+    ...(options.outbound === undefined ? {} : { outbound: options.outbound }),
+    ...(() => {
+      const egress = normalizeEgress(options.egress);
+      return egress === undefined ? {} : { egress };
+    })(),
+    fetch: fetchImpl,
+  });
+  const gated = boundary === undefined
+    ? outboundFetch
+    : withCredentialFetch(boundary.broker, boundary.handle, outboundFetch);
   const response = await gated(source.url, { method: "GET" });
   if (!response.ok) throw new Error(`IMAGE_HTTP_${response.status}`);
   return new Uint8Array(await response.arrayBuffer());

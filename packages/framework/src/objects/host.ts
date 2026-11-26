@@ -155,6 +155,17 @@ export function createHost(options: HostOptions = {}): Host {
 
   const providers = new Map<string, ProviderDef<any>>();
   const instances = new Map<string, Instance>();
+  /**
+   * 实例身份绑定 realm/principal/space：即使 host 被误用为共享实例，
+   * 不同 realm 也不会命中同一 instance key。缺省走显式 anonymous 标记。
+   */
+  const realmLabel = options.realm?.description ?? (options.realm === undefined ? "anonymous" : options.realm.toString());
+  const hostIdentity =
+    options.principal === undefined
+      ? `anonymous:${realmLabel}`
+      : `${options.principal.spaceId}:${options.principal.userId}:${realmLabel}`;
+  const instanceKey = (contract: Contract<any, any>, params: unknown): string =>
+    `${hostIdentity}|${stableKey(contract, params)}`;
   /** contract fingerprint → 依赖转 live 时唤醒 park 的监听器。 */
   const liveListeners = new Map<string, Set<() => void>>();
   let closed = false;
@@ -476,7 +487,7 @@ export function createHost(options: HostOptions = {}): Host {
       }), "get");
     }
 
-    const key = stableKey(contract, params);
+    const key = instanceKey(contract, params);
     let instance = instances.get(key);
     if (instance === undefined) {
       const provider = providers.get(contract.fingerprint)!;

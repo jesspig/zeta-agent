@@ -138,10 +138,12 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
   });
 
   const ownsGovernance = options.tenantGovernance === undefined && options.principalInput !== undefined;
+  // runtime 自身只承载一个 principal：显式声明单租户默认路径，不借共享回退。
   const governance = options.tenantGovernance ?? (ownsGovernance
-    ? createTenantGovernance(
-        options.tokensPerTenant === undefined ? {} : { tokensPerTenant: options.tokensPerTenant }
-      )
+    ? createTenantGovernance({
+        mode: "single-tenant",
+        ...(options.tokensPerTenant === undefined ? {} : { tokensPerTenant: options.tokensPerTenant }),
+      })
     : undefined);
   const tenantScope = governance?.resolve(options.principalInput ?? {});
 

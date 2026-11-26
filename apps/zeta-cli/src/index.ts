@@ -27,6 +27,7 @@ import type {
   UsagePricing,
 } from "@zeta-agent/tui";
 import { parseArgs, type CliArgs } from "./args";
+import { createConnectionOutbound } from "./connection";
 import { resolveModelConfig } from "./config";
 import { runDaemonMode } from "./daemon";
 import { runRemoteMode } from "./remote";
@@ -140,9 +141,10 @@ export async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
       ? { baseUrl: resolution.config.baseUrl, apiKey: resolution.config.apiKey }
       : undefined;
   let modelName = resolution.kind === "configured" ? resolution.config.model : "echo";
+  let outbound = connection === undefined ? undefined : createConnectionOutbound(connection.baseUrl);
   const streamFn: AgentStreamFn = (request) => {
-    if (connection !== undefined) {
-      return createOpenAiStreamFn({ ...connection, model: modelName })(request);
+    if (connection !== undefined && outbound !== undefined) {
+      return createOpenAiStreamFn({ ...connection, model: modelName }, outbound.fetch)(request);
     }
     return echoStream()(request);
   };
@@ -172,6 +174,7 @@ export async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
     },
     connect(baseUrl: string, apiKey: string) {
       connection = { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey };
+      outbound = createConnectionOutbound(connection.baseUrl);
       // 不在此处清空模型；模型选择由 selectModelAfterConnect 基于新列表统一决定。
     },
   };
@@ -291,7 +294,11 @@ async function runTui(args: CliArgs, bundle: AgentBundle): Promise<number> {
     const generation = connectionSeq.next();
     notice(`连接 ${baseUrl}：正在拉取模型列表…`);
     try {
-      const ids = await fetchModelIds({ baseUrl, apiKey });
+      const ids = await fetchModelIds({
+        baseUrl,
+        apiKey,
+        outbound: createConnectionOutbound(baseUrl),
+      });
       if (!connectionSeq.isCurrent(generation)) return; // 迟到结果，忽略
       const previousModel = bundle.model;
       const chosen = selectModelAfterConnect(previousModel, ids);

@@ -1,9 +1,13 @@
 import type { AgentStreamChunk, AgentStreamFn, AgentStreamRequest } from "../facade";
 import {
   resolveAtBoundary,
+  resolveOutboundFetch,
   withCredentialFetch,
   type CredentialBoundaryRef,
   type CredentialVault,
+  type EgressPolicy,
+  type EgressPolicyOptions,
+  type OutboundClient,
   type Placeholder,
   type SecretBroker,
 } from "@zeta-agent/security";
@@ -32,6 +36,10 @@ export interface ProviderConfig {
   readonly secretBroker?: SecretBroker;
   /** 统一 credential boundary：优先级高于 vault 对，明文不进入 config。 */
   readonly credentialBoundary?: CredentialBoundaryRef;
+  /** 统一出站客户端：provider 的默认 fetch 入口，策略与逐跳门禁由它集中承担。 */
+  readonly outbound?: OutboundClient;
+  /** 未提供 outbound 时用于包装注入 fetch 的显式策略；缺省空 allow，一律失败关闭。 */
+  readonly egress?: EgressPolicy | EgressPolicyOptions;
   /** 显式启用时在输出前按中央策略重试；缺省保持既有单次请求行为。 */
   readonly retry?: ProviderRetryOptions | false;
 }
@@ -97,9 +105,7 @@ function withCredentialBoundary(
     }
     return fetchImpl(nextInput, { ...init, headers });
   }) as typeof fetch;
-  // Bun 的 fetch 带 preconnect；原样转发，避免包装后类型/行为退化。
-  const preconnect = (fetchImpl as { preconnect?: unknown }).preconnect;
-  if (typeof preconnect === "function") (boundary as { preconnect?: unknown }).preconnect = preconnect;
+  // 不转发 preconnect：它会绕过 egress 门禁提前建连。
   return boundary;
 }
 
@@ -400,10 +406,14 @@ export function createProviderStreamFn(
   const broker = config.secretBroker;
   const unified = config.credentialBoundary;
   let apiKey: string;
-  let boundaryFetch: typeof fetch = fetchImpl;
+  let boundaryFetch: typeof fetch = resolveOutboundFetch({
+    ...(config.outbound === undefined ? {} : { outbound: config.outbound }),
+    ...(config.egress === undefined ? {} : { egress: config.egress }),
+    fetch: fetchImpl,
+  });
   if (unified !== undefined) {
     apiKey = unified.handle.token;
-    boundaryFetch = withCredentialFetch(unified.broker, unified.handle, fetchImpl);
+    boundaryFetch = withCredentialFetch(unified.broker, unified.handle, boundaryFetch);
   } else if (vault !== undefined && broker !== undefined) {
     const parsedBase = new URL(baseUrl);
     const placeholder = vault.issue({
@@ -419,7 +429,7 @@ export function createProviderStreamFn(
     });
     // provider 拿到的只是占位符 token；明文 key 不进入 config、请求 URL/header 构造对象或日志。
     apiKey = placeholder.token;
-    boundaryFetch = withCredentialBoundary(vault, placeholder, broker, fetchImpl);
+    boundaryFetch = withCredentialBoundary(vault, placeholder, broker, boundaryFetch);
   } else {
     apiKey = resolveApiKey(config.provider, config.apiKey);
   }

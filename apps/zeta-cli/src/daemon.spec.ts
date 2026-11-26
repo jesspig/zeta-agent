@@ -3,7 +3,7 @@ import { hostTarget, startDaemon } from "@zeta-agent/deploy";
 import { createMemorySessionControl, type RpcRuntime } from "@zeta-agent/deploy";
 import type { RuntimeProtocol } from "@zeta-agent/agent";
 import { parseArgs } from "./args";
-import { startCliDaemon } from "./daemon";
+import { createCliRpcRuntime, startCliDaemon } from "./daemon";
 import { createProbeHandle } from "./probes";
 import { executeRemoteFrames } from "./remote";
 import { createStdoutWriter } from "@zeta-agent/deploy";
@@ -68,6 +68,7 @@ describe("T-21 CLI daemon / remote / RPC 接线", () => {
       config: { target: "linux-x64" },
       runtime,
       port: 0,
+      allowPlainLoopback: true,
     });
     const out: string[] = [];
     const err: string[] = [];
@@ -93,5 +94,31 @@ describe("T-21 CLI daemon / remote / RPC 接线", () => {
     expect(JSON.parse(out.join(""))).toMatchObject({ id: 1, result: { live: true } });
     expect(err).toEqual([]);
     await daemon.stop();
+  });
+
+  test("CLI 注入 runtimeFactory/autoRestart，故障后自动重建并提升代次", async () => {
+    let created = 0;
+    const handle = startCliDaemon(parseArgs(["--daemon", "--token", "t"]), bundle(), {
+      port: 0,
+      runtimeFactory: () => {
+        created += 1;
+        return createCliRpcRuntime(bundle());
+      },
+      autoRestart: true,
+      heartbeatMs: 10,
+    });
+    try {
+      const before = handle.generation;
+      handle.fault();
+      const deadline = Date.now() + 5000;
+      while (handle.restartCount === 0 && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      }
+      expect(handle.restartCount).toBe(1);
+      expect(created).toBe(1);
+      expect(handle.generation).toBeGreaterThan(before);
+    } finally {
+      await handle.stop();
+    }
   });
 });

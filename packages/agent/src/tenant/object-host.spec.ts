@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { defineContract, defineFacet, grantFor } from "@zeta-agent/framework";
+import { createExperienceStore } from "../research/experience";
 import { createTenantGovernance } from "./governance";
 
 const Service = defineContract({
@@ -11,7 +12,7 @@ const Service = defineContract({
 
 describe("T-18 租户对象 host 接线", () => {
   test("每租户得到复用自身 context/principal/realm 的独立 host，跨 realm 调用被拒", async () => {
-    const governance = createTenantGovernance();
+    const governance = createTenantGovernance({ createExperienceStore: () => createExperienceStore() });
     const a = governance.resolve({ spaceId: "space-a", userId: "u-a" });
     const b = governance.resolve({ spaceId: "space-b", userId: "u-b" });
 

@@ -1,8 +1,9 @@
 import {
+  assertEnforcement,
   createCredentialBroker,
-  createEgressGateway,
   createEgressPolicy,
-  withCredentialFetch,
+  createOutboundClient,
+  resolveOutboundFetch,
   type Capabilities,
   type Command,
   type CredentialBinding,
@@ -10,8 +11,11 @@ import {
   type DnsGate,
   type EgressEnforcer,
   type EgressGateway,
+  type EgressPolicy,
   type EgressPolicyOptions,
   type ExecutionBackend,
+  type LayerState,
+  type OutboundClient,
   type RunOptions,
   type RunResult,
 } from "@zeta-agent/components";
@@ -66,6 +70,10 @@ export interface RemoteClientOptions {
   /** 客户端代次；与 daemon 代次不符时请求被栅栏拒绝。 */
   readonly generation?: number;
   readonly fetch?: typeof fetch;
+  /** 统一出站客户端：remote 调用与 provider/discovery/MCP 共用同一受策略约束的 fetch 入口。 */
+  readonly outbound?: OutboundClient;
+  /** 未提供 outbound 时用于包装注入 fetch 的显式策略；缺省空 allow，一律失败关闭。 */
+  readonly egress?: EgressPolicy | EgressPolicyOptions;
 }
 
 export interface RemoteInvokeResult {
@@ -99,7 +107,11 @@ export function createRemoteClient(options: RemoteClientOptions): RemoteClient {
   if (typeof options.url !== "string" || options.url.length === 0) throw new Error("REMOTE_URL_REQUIRED");
   if (typeof options.token !== "string" || options.token.length === 0) throw new Error("REMOTE_TOKEN_REQUIRED");
   const url = options.url.replace(/\/+$/, "");
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = resolveOutboundFetch({
+    ...(options.outbound === undefined ? {} : { outbound: options.outbound }),
+    ...(options.egress === undefined ? {} : { egress: options.egress }),
+    fetch: options.fetch ?? globalThis.fetch,
+  });
   let seq = 0;
 
   async function invoke(method: string, params?: Record<string, unknown>): Promise<RemoteInvokeResult> {
@@ -159,22 +171,70 @@ export function createRemoteClient(options: RemoteClientOptions): RemoteClient {
 export interface RemoteBackendOptions {
   readonly client: RemoteClient;
   readonly name?: string;
+  /** 只有收到远端真实能力证明时才允许声明 active；缺省为诚实降级并失败关闭。 */
+  readonly proof?: RemoteCapabilityProof;
 }
 
+/** 远端能力证明：必须来自真实的 backend.capabilities RPC 才能把层标成 active。 */
+export interface RemoteCapabilityProof {
+  readonly source: "rpc:backend.capabilities";
+  readonly capabilities: Capabilities;
+  readonly at: number;
+}
+
+/** 未收到远端证明前所有层都不声明 active，审计/egress 同样如实降级。 */
 const REMOTE_CAPABILITIES: Capabilities = Object.freeze({
   isolation: "degraded",
   seccomp: "unsupported",
   fsConfinement: "degraded",
-  auditSink: "active",
-  egressDefaultDeny: "active",
+  auditSink: "degraded",
+  egressDefaultDeny: "degraded",
 });
+
+const CAPABILITY_LAYERS = ["isolation", "seccomp", "fsConfinement", "auditSink", "egressDefaultDeny"] as const;
+const VALID_LAYER_STATES: ReadonlySet<string> = new Set(["active", "degraded", "unsupported", "disabled"]);
+
+/**
+ * 从真实远端探测能力；响应形状非法即失败关闭，绝不把猜测当成证明。
+ * 审计/egress 等层即使未接隔离执行器也可由远端如实证明。
+ */
+export async function probeRemoteCapabilities(client: RemoteClient): Promise<RemoteCapabilityProof> {
+  const reply = await client.call("backend.capabilities");
+  const raw = reply.result;
+  if (typeof raw !== "object" || raw === null) throw new Error("REMOTE_CAPABILITY_PROOF_INVALID");
+  const candidate = raw as Record<string, unknown>;
+  const capabilities = {} as Capabilities;
+  for (const layer of CAPABILITY_LAYERS) {
+    const state = candidate[layer];
+    if (typeof state !== "string" || !VALID_LAYER_STATES.has(state)) {
+      throw new Error("REMOTE_CAPABILITY_PROOF_INVALID");
+    }
+    capabilities[layer] = state as LayerState;
+  }
+  return { source: "rpc:backend.capabilities", capabilities, at: Date.now() };
+}
+
+function remoteCapabilities(proof: RemoteCapabilityProof | undefined): Capabilities {
+  if (proof === undefined || proof.source !== "rpc:backend.capabilities") {
+    return { ...REMOTE_CAPABILITIES };
+  }
+  const merged = { ...REMOTE_CAPABILITIES } as Capabilities;
+  for (const layer of CAPABILITY_LAYERS) {
+    const state = proof.capabilities[layer];
+    if (typeof state === "string" && VALID_LAYER_STATES.has(state)) merged[layer] = state as LayerState;
+  }
+  return merged;
+}
 
 /** 远程执行后端：复用 ExecutionBackend 契约，执行经 RPC 转发，不新建权限路径。 */
 export function createRemoteBackend(options: RemoteBackendOptions): ExecutionBackend {
+  const capabilities = remoteCapabilities(options.proof);
   return {
     name: options.name ?? "remote",
-    capabilities: () => REMOTE_CAPABILITIES,
+    capabilities: () => ({ ...capabilities }),
     async run(command: Command, runOptions: RunOptions = {}): Promise<RunResult> {
+      // 关键层 degraded/unsupported/disabled 时在发 RPC 之前拒绝执行。
+      assertEnforcement(capabilities);
       const reply = await options.client.call("backend.run", {
         argv: [...command.argv],
         ...(runOptions.realm === undefined ? {} : { realm: runOptions.realm }),
@@ -222,17 +282,19 @@ export function createRemoteSidecar(options: RemoteSidecarOptions): RemoteSideca
     secret: options.secret.secret,
   });
   const credential: CredentialBoundaryRef = { broker, handle };
-  const gateway = createEgressGateway({
-    policy: createEgressPolicy(options.egress),
+  const outbound = createOutboundClient({
+    egress: createEgressPolicy(options.egress),
     fetch: options.fetch ?? globalThis.fetch,
     ...(options.dns === undefined ? {} : { dns: options.dns }),
     ...(options.enforcers === undefined ? {} : { enforcers: options.enforcers }),
+    credential,
   });
+  const gateway = outbound.gateway;
   const client = createRemoteClient({
     url: options.url,
     token: options.token,
     ...(options.generation === undefined ? {} : { generation: options.generation }),
-    fetch: withCredentialFetch(broker, handle, gateway.fetch as typeof fetch),
+    outbound,
   });
   return {
     credential,

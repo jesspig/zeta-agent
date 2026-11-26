@@ -1,5 +1,11 @@
 import { createConnection, type Socket } from "node:net";
 import type { Disposer } from "@zeta-agent/framework";
+import {
+  resolveOutboundFetch,
+  type EgressPolicy,
+  type EgressPolicyOptions,
+  type OutboundClient,
+} from "@zeta-agent/security";
 import type {
   McpJsonRpcNotification,
   McpJsonRpcRequest,
@@ -181,6 +187,10 @@ export function decodeHttpSse(frame: string): readonly (McpJsonRpcResponse | Mcp
 export interface HttpMcpTransportOptions {
   readonly url: string;
   readonly fetchImpl: typeof fetch;
+  /** 统一出站客户端：提供时代替裸 fetchImpl，逐跳 egress 与凭证边界由它承担。 */
+  readonly outbound?: OutboundClient;
+  /** 未提供 outbound 时用于包装 fetchImpl 的显式策略；缺省空 allow，一律失败关闭。 */
+  readonly egress?: EgressPolicy | EgressPolicyOptions;
   readonly headers?: Readonly<Record<string, string>>;
   readonly sessionId?: string;
   /** 可选 SSE 订阅（GET），用于接收服务器通知。 */
@@ -196,6 +206,11 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpTra
   const notifications = listenerSet<McpJsonRpcNotification>();
   const requests = listenerSet<McpJsonRpcRequest>();
   const sseController = new AbortController();
+  const gatedFetch = resolveOutboundFetch({
+    ...(options.outbound === undefined ? {} : { outbound: options.outbound }),
+    ...(options.egress === undefined ? {} : { egress: options.egress }),
+    fetch: options.fetchImpl,
+  });
   let sseReady: Promise<void> | undefined;
   let disposed = false;
   const baseHeaders = (url: string, method = "POST"): Headers => {
@@ -223,7 +238,7 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpTra
   const readySse = async (): Promise<void> => {
     if (!options.sse || sseReady !== undefined) return;
     sseReady = (async () => {
-      const response = await options.fetchImpl(options.url, {
+      const response = await gatedFetch(options.url, {
         method: "GET",
         headers: baseHeaders(options.url, "GET"),
         signal: sseController.signal,
@@ -251,7 +266,7 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpTra
   return {
     async request(message, requestOptions) {
       if (disposed) throw new Error("MCP_TRANSPORT_DISPOSED");
-      const send = (): Promise<Response> => options.fetchImpl(options.url, {
+      const send = (): Promise<Response> => gatedFetch(options.url, {
         method: "POST",
         headers: baseHeaders(options.url, "POST"),
         body: JSON.stringify(message),
@@ -274,7 +289,7 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpTra
     },
     async notify(message) {
       if (disposed) throw new Error("MCP_TRANSPORT_DISPOSED");
-      const response = await options.fetchImpl(options.url, {
+      const response = await gatedFetch(options.url, {
         method: "POST",
         headers: baseHeaders(options.url, "POST"),
         body: JSON.stringify(message),
@@ -284,7 +299,7 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpTra
     onNotification: (listener) => notifications.add(listener),
     onRequest: (listener) => requests.add(listener),
     async respond(message) {
-      await options.fetchImpl(options.url, {
+      await gatedFetch(options.url, {
         method: "POST",
         headers: baseHeaders(options.url, "POST"),
         body: JSON.stringify(message),

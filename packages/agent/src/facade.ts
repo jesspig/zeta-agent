@@ -56,6 +56,8 @@ import {
   type PluginMetadata,
   type ContributionContext,
   type ContributionExecutors,
+  type InvocationGate,
+  type IsolatedPlugin,
   type PluginTool,
   type PrepareNextTurn,
   type PrepareRequest,
@@ -106,7 +108,7 @@ import {
   type DurableIntent,
   type Receipt,
 } from "./plugins/effects/durable";
-import { builtinToolDefinitions, type ToolDefinition } from "./tools/builtins";
+import { builtinToolDefinitions, type ToolDefinition, type ToolResourceLimits } from "./tools/builtins";
 import {
   createEffectBridge,
   createLogger,
@@ -118,7 +120,9 @@ import {
   type SinkResolution,
 } from "@zeta-agent/observability";
 import {
+  confinedPath,
   createEgressPolicy,
+  createOutboundClient,
   createLocalSafeBackend,
   createProfileBackend,
   createSocketAuditSink,
@@ -136,6 +140,7 @@ import {
   type EgressTarget,
   type ExecutionBackend,
   type FinalizedState,
+  type OutboundClient,
   type SecretBroker,
   type StructuredExecutionBackend,
 } from "@zeta-agent/security";
@@ -194,8 +199,24 @@ function builtinTools(options: {
   readonly securityBackend: ExecutionBackend;
   readonly allowedDirectories: readonly string[];
   readonly structuredBackend?: StructuredExecutionBackend;
+  readonly toolLimits?: ToolResourceLimits;
+  readonly egressPolicy?: EgressPolicy;
+  readonly egressTarget?: EgressTarget;
+  readonly shellLimits?: AgentOptions["shellLimits"];
 }): ToolDefinition[] {
-  return [...builtinToolDefinitions(options)];
+  return [
+    ...builtinToolDefinitions({
+      securityBackend: options.securityBackend,
+      allowedDirectories: options.allowedDirectories,
+      ...(options.structuredBackend === undefined ? {} : { structuredBackend: options.structuredBackend }),
+      ...(options.toolLimits === undefined ? {} : { limits: options.toolLimits }),
+      ...(options.egressPolicy === undefined ? {} : { egress: options.egressPolicy }),
+      ...(options.egressTarget === undefined ? {} : { egressTarget: options.egressTarget }),
+      ...(options.shellLimits?.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.shellLimits.maxOutputBytes }),
+      ...(options.shellLimits?.maxCpuMs === undefined ? {} : { maxCpuMs: options.shellLimits.maxCpuMs }),
+      ...(options.shellLimits?.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.shellLimits.maxRuntimeMs }),
+    }),
+  ];
 }
 
 export interface WrapRegistrationOptions extends PluginMetadata {
@@ -424,12 +445,45 @@ function checkEgress(args: Readonly<Record<string, unknown>>, policy: EgressPoli
   return { status: "allowed", target };
 }
 
+/** 运行时识别隔离插件：品牌字段与隔离求值器一一对应，不能靠字符串猜测。 */
+function isIsolatedPlugin(value: AgentPlugin): value is AgentPlugin & IsolatedPlugin {
+  return (value as { isolated?: unknown }).isolated === true;
+}
+
+/**
+ * 隔离插件 IPC 调用的宿主门禁：直接复用 T-11 出站策略/T-12 文件边界，
+ * 不另起炉灶。任何携带网络目标或文件路径的参数都先过这两条既有边界。
+ */
+function createPluginInvocationGate(
+  egressPolicy: EgressPolicy,
+  allowedDirectories: readonly string[]
+): InvocationGate {
+  return {
+    check(request) {
+      const event: unknown = request.event;
+      if (event === null || typeof event !== "object") return;
+      const args = event as Readonly<Record<string, unknown>>;
+      if (checkEgress(args, egressPolicy).status === "denied") throw new Error("EGRESS_DENIED");
+      for (const key of ["path", "file", "filename", "cwd"] as const) {
+        const value = args[key];
+        if (typeof value !== "string" || value.length === 0) continue;
+        try {
+          confinedPath(value, allowedDirectories);
+        } catch {
+          throw new Error("FILE_CONFINEMENT_DENIED");
+        }
+      }
+    },
+  };
+}
+
 /** createProviderStreamFn 的 facade 投影；凭据由 Agent 注入，调用方无需重复传递。 */
 export interface AgentProviderConfig {
   readonly provider: string;
   readonly model: string;
   readonly apiKey?: string;
   readonly baseUrl?: string;
+  readonly outbound?: OutboundClient;
 }
 
 export interface AuditFinalization {
@@ -515,6 +569,16 @@ export interface AgentOptions {
    * 对所有工具调用生效，非发射工具的外联目标同样受控。
    */
   readonly egressPolicy?: EgressPolicy;
+  /** shell 命令的显式出站目标；未提供时结构化 shell 不声明网络目标（默认拒绝）。 */
+  readonly egressTarget?: EgressTarget;
+  /** read/grep/find 的字节、条目、深度与运行时间上限；超限显式截断或失败。 */
+  readonly toolLimits?: ToolResourceLimits;
+  /** shell 输出/CPU/时间上限；经 ShellRequest 透传给结构化后端。 */
+  readonly shellLimits?: {
+    readonly maxOutputBytes?: number;
+    readonly maxCpuMs?: number;
+    readonly maxRuntimeMs?: number;
+  };
   /** 视作发射工具的工具名集合；缺省时由 emissionPolicy 决定（withhold 用默认清单，direct 为空）。 */
   readonly emissionTools?: readonly string[];
   /** 可选凭据保管库，需与 secretBroker 成对注入才启用占位符路径。 */
@@ -999,7 +1063,16 @@ export function createAgent(options: AgentOptions = {}): Agent {
   }
 
   const toolDefinitions = includeBuiltins
-    ? builtinTools({ securityBackend, allowedDirectories, structuredBackend })
+    ? builtinTools({
+        securityBackend,
+        allowedDirectories,
+        structuredBackend,
+        toolLimits: options.toolLimits,
+        // 默认拒绝的出站策略也必须随 ShellRequest 下发，避免 shell 绕开数据面。
+        egressPolicy: options.egressPolicy ?? createEgressPolicy(),
+        egressTarget: options.egressTarget,
+        shellLimits: options.shellLimits,
+      })
     : [];
   // 只有 builtin 工具走静态 contributions；插件与服务都经真实注册入口（安装事务 + registry）。
   const contributions: PluginContribution[] = includeBuiltins
@@ -1381,6 +1454,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
     const review = reviewExtension(source, pluginPolicy);
     pluginReviews.push({ plugin, review });
     if (review.decision === "denied") continue;
+    // T-13：隔离插件的可执行项只能经 IPC 调用；把 T-11/T-12 边界注入到调用门禁。
+    if (isIsolatedPlugin(plugin)) {
+      plugin.setInvocationGate(createPluginInvocationGate(egressPolicy, allowedDirectories));
+    }
     stagedInputs.push({
       item: plugin,
       meta: {
@@ -1404,7 +1481,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
   const installResult = stage.commit({
     install: (entry) => {
       pluginGeneration += 1;
-      const dispose = entry.item.install();
+      // T-13 信任收口：宿主只对可信插件调用 install()；不可信插件的 install 永不进入宿主。
+      const dispose = entry.trusted ? entry.item.install() : (): void => undefined;
       // 保留 install() 原样 disposer；管理器只登记状态/顺序，不重复调用 install。
       pluginTracking.set(entry.item, addDisposer(pluginManager.trackInstall(entry.item)));
       return dispose;
@@ -1425,8 +1503,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
       installationContributionDisposers.set(installation, contributionDisposers);
       addDisposer(record.dispose);
       for (const item of entry.item.contributions) {
-        // 沙箱扩展只保留提示词/事件观察能力；工具、任务、服务与 wrap 一概不授予。
-        if (!entry.trusted && item.kind !== "section" && item.kind !== "hook") continue;
+        // T-13 信任收口：宿主只对可信插件注册可执行项；不可信插件只保留数据型 section。
+        // hook 曾在宿主链上执行不可信函数，这条路径必须关闭；不可信工具/服务/wrap/task 同理。
+        if (!entry.trusted && item.kind !== "section") continue;
         const stop = contributionHost.apply(item, {
           realm: item.realm ?? entry.realm ?? defaultRealm,
           order: item.order ?? entry.order,
@@ -1639,7 +1718,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
     if (committed === undefined) {
       if (commitPromise === undefined) commitPromise = durableEffects.commit();
       const receipts = await commitPromise;
-      committed = new Map(receipts.map((receipt) => [receipt.key, receipt]));
+      // 回填必须查全部历史回执：重复 enqueue 命中已 settle 的幂等键时本次 commit 为空，
+      // 但调用方仍应拿回第一次执行的真实结果，而不是停在 withheld 占位值。
+      committed = new Map(durableEffects.receipts().map((receipt) => [receipt.key, receipt]));
       for (const receipt of receipts) {
         if (!receipt.ok) tenantScope?.quota.release(1);
         recordAudit(
@@ -2603,9 +2684,13 @@ export function createAgent(options: AgentOptions = {}): Agent {
     },
     closeAudit: () => closeAuditSink(),
     createProviderStreamFn(config, fetchImpl) {
+      // 注入 fetch 只能作为底层 transport；无论是否注入，都强制构造受策略约束的 OutboundClient。
+      const outbound = config.outbound
+        ?? createOutboundClient({ egress: egressPolicy, fetch: fetchImpl ?? globalThis.fetch });
       return createProviderStreamFn(
         {
           ...config,
+          outbound,
           ...(credentialVault !== undefined ? { credentialVault } : {}),
           ...(secretBroker !== undefined ? { secretBroker } : {}),
           ...(credentialBoundary !== undefined ? { credentialBoundary } : {}),
