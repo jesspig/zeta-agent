@@ -17,6 +17,7 @@ import {
   resolveResearchEnablement,
   runResearchLoop,
 } from "./orchestration";
+import { createFilePromotionSealRegistry } from "./seal-registry";
 
 const identity = {
   run: "research-run",
@@ -91,6 +92,113 @@ describe("T-22 ResearchProfile 默认禁用与显式启用", () => {
           rounds: 2,
         })
       ).toThrow(/RESEARCH_DISABLED/);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("T-22 跨进程 RESUME seal 绑定", () => {
+  function registryPath(root: string): string {
+    return join(root, "seals.json");
+  }
+
+  test("持久化 seal 注册后跨进程 RESUME 可继续；伪造注册表被拒绝", async () => {
+    const f = setup();
+    try {
+      const sealRegistry = createFilePromotionSealRegistry(registryPath(f.root));
+      const first = runResearchLoop({
+        runId: "sealed-resume",
+        enableResearch: true,
+        identity,
+        store: f.store,
+        experienceStore: f.experienceStore,
+        surface: f.surface,
+        strategy: strategy(),
+        regressionGate: regressionGate(),
+        evaluator: evaluator(),
+        rounds: 1,
+        sealRegistry,
+      });
+      const reopened = createFilePromotionSealRegistry(registryPath(f.root));
+      const second = runResearchLoop({
+        runId: "sealed-resume",
+        enableResearch: true,
+        identity,
+        store: f.store,
+        experienceStore: f.experienceStore,
+        surface: first.surface,
+        strategy: strategy(),
+        regressionGate: regressionGate(),
+        evaluator: evaluator(),
+        rounds: 2,
+        resume: first.resume,
+        sealRegistry: reopened,
+      });
+      expect(second.rounds).toHaveLength(1);
+      expect(second.rounds[0]!.round).toBe(2);
+
+      const empty = createFilePromotionSealRegistry(join(f.root, "empty-seals.json"));
+      expect(() => runResearchLoop({
+        runId: "sealed-resume",
+        enableResearch: true,
+        identity,
+        store: f.store,
+        experienceStore: f.experienceStore,
+        surface: first.surface,
+        strategy: strategy(),
+        regressionGate: regressionGate(),
+        evaluator: evaluator(),
+        rounds: 2,
+        resume: first.resume,
+        sealRegistry: empty,
+      })).toThrow(/RESUME_SEAL_NOT_REGISTERED/);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test("旧 runId 与不同身份的 checkpoint 均被拒绝", () => {
+    const f = setup();
+    try {
+      const first = runResearchLoop({
+        runId: "identity-run",
+        enableResearch: true,
+        identity,
+        store: f.store,
+        experienceStore: f.experienceStore,
+        surface: f.surface,
+        strategy: strategy(),
+        regressionGate: regressionGate(),
+        evaluator: evaluator(),
+        rounds: 1,
+      });
+      expect(() => runResearchLoop({
+        runId: "different-run",
+        enableResearch: true,
+        identity,
+        store: f.store,
+        experienceStore: f.experienceStore,
+        surface: first.surface,
+        strategy: strategy(),
+        regressionGate: regressionGate(),
+        evaluator: evaluator(),
+        rounds: 2,
+        resume: first.resume,
+      })).toThrow(/RESUME_RUN_MISMATCH/);
+      expect(() => runResearchLoop({
+        runId: "identity-run",
+        enableResearch: true,
+        identity: { ...identity, tenant: "other-tenant" },
+        store: f.store,
+        experienceStore: f.experienceStore,
+        surface: first.surface,
+        strategy: strategy(),
+        regressionGate: regressionGate(),
+        evaluator: evaluator(),
+        rounds: 2,
+        resume: first.resume,
+      })).toThrow(/RESUME_IDENTITY_MISMATCH/);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
