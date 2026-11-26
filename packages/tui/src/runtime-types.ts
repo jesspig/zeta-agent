@@ -97,6 +97,8 @@ export interface RuntimeTuiHandle {
   setModelOptions(options: readonly RuntimeModelOption[]): void;
   /** 异步更新当前模型显示。 */
   setModel(model: string): void;
+  /** 响应式热更新三层键位；native/custom backend 共用。 */
+  setKeyBindings?(bindings: readonly KeyBinding[]): void;
   readonly restoreDraft?: (text: string) => void;
   waitForExit(): Promise<void>;
   destroy(): Promise<void>;

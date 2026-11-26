@@ -21,6 +21,7 @@
     "gates:perf": "bun scripts/gate-performance.mjs",
     "gates:authenticity": "bun scripts/gate-authenticity.mjs",
     "gates:platform": "bun scripts/gate-platform.mjs",
+    "gates:pty": "bun scripts/gate-pty.mjs",
     "gates:supply": "bun scripts/gate-supply-chain.mjs",
     "gates": "bun scripts/quality-gates.mjs",
     "dev": "turbo run dev",

@@ -68,6 +68,11 @@ export interface RendererBackend {
   /** 剪贴板能力。 */
   readonly clipboard: BackendClipboard;
   testRender(app: () => FrameState, opts: TestRenderOptions): Promise<TestHandle>;
+  /**
+   * 可选：后端自行渲染完整 Solid App（七槽位 + 三层键位）。
+   * 实现后 renderTui 与 native 共用同一 App 工厂；未实现时回退到帧快照路径。
+   */
+  renderApp?(app: () => unknown, opts: AppRenderOptions): Promise<AppRenderHandle>;
   /** 释放全部资源；幂等，之后不得再接管。 */
   destroy(): void;
 }
@@ -81,6 +86,16 @@ export interface TuiHandle {
   resize(size: BackendSize): void;
   readonly clipboard: BackendClipboard;
   destroy(): void;
+}
+
+export interface AppRenderHandle {
+  waitForExit(): Promise<void>;
+  destroy(): Promise<void>;
+}
+
+export interface AppRenderOptions extends BackendMountOptions {
+  /** 后端自有渲染器已就绪时可直接复用，避免重复挂载终端。 */
+  readonly renderer?: unknown;
 }
 
 export interface CreateTuiOptions {

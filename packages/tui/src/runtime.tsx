@@ -5,14 +5,14 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import { createApprovalUiChannel, ApprovalOverlay } from "./approval-ui";
 import type { ApprovalUiChannel } from "./approval-ui";
 import type { BackendSize, RendererBackend } from "./backend";
-import { createRuntimeKeymap, isImeCompositionKey, resolveKittyCombo } from "./keymap";
+import { createReactiveKeymap, isImeCompositionKey, resolveKittyCombo, type KeyBinding } from "./keymap";
 import { ConnectDialog } from "./components/connect-dialog";
 import { ModelPicker } from "./components/model-picker";
 import { ConfirmOverlay } from "./components/overlay";
 import { clampWidth } from "./components/layout";
 import { FooterBridge } from "./components/footer-bridge";
 import { ThemeProvider, useTheme } from "./theme-context";
-import { createOscBridge, createOscReporter } from "./osc";
+import { createOscBridge, createOscReporter, type OscReporter } from "./osc";
 import { OscProvider } from "./osc-context";
 import { createUsageTracker, initialTelemetry } from "./usage";
 import type { AgentUsageTelemetry } from "./telemetry-types";
@@ -318,7 +318,11 @@ export function ZetaApp(props: ZetaAppProps) {
     return (await props.onSubmit(value, mode)) !== false;
   };
 
-  const keymap = createRuntimeKeymap({ bindings: props.keyBindings });
+  // 键位响应式热更新：宿主调用 handle.setKeyBindings 后下一次按键即按新表解析。
+  const keymap = createReactiveKeymap();
+  createEffect(() => {
+    keymap.setBindings(props.keyBindings ?? []);
+  });
 
   useKeyboard((key) => {
     if (key.eventType === "release" || isImeCompositionKey(key)) return;
@@ -393,49 +397,62 @@ export function ZetaApp(props: ZetaAppProps) {
 
   return (
     <>
+      {/* 七个官方槽位全部接线：插件 replace/extend 覆盖任一区域，基础内容作为 fallback。 */}
+      <BoundSlot name="header" mode="replace">
+        <text> </text>
+      </BoundSlot>
       <ViewportLayout
         transcript={
-          <Show
-            when={props.source}
-            fallback={<ZetaFrame title={props.title} lines={lines().map(messageLine)} />}
-          >
-            {(sourceAccessor: () => EventSource) => (
-              <Transcript
-                source={sourceAccessor()}
-                cwd={props.cwd}
-                resources={props.resources}
-                resetKey={resetKey()}
-                notices={lines()
-                  .filter((message) => message.role === "notice")
-                  .map((message, index) => ({
-                    kind: "notice" as const,
-                    id: `n${index}-${String(message.content)}`,
-                    tone: "muted" as const,
-                    text: String(message.content),
-                  }))}
-              />
-            )}
-          </Show>
+          <box flexDirection="column" flexGrow={1}>
+            {/* tool/message 为兄弟槽位：任一被 replace 不影响另一槽位渲染。 */}
+            <BoundSlot name="tool" mode="replace">
+              <text> </text>
+            </BoundSlot>
+            <BoundSlot name="message" mode="replace">
+              <Show
+                when={props.source}
+                fallback={<ZetaFrame title={props.title} lines={lines().map(messageLine)} />}
+              >
+                {(sourceAccessor: () => EventSource) => (
+                  <Transcript
+                    source={sourceAccessor()}
+                    cwd={props.cwd}
+                    resources={props.resources}
+                    resetKey={resetKey()}
+                    notices={lines()
+                      .filter((message) => message.role === "notice")
+                      .map((message, index) => ({
+                        kind: "notice" as const,
+                        id: `n${index}-${String(message.content)}`,
+                        tone: "muted" as const,
+                        text: String(message.content),
+                      }))}
+                  />
+                )}
+              </Show>
+            </BoundSlot>
+          </box>
         }
         dock={
           <>
-            <Show
-              when={selectorOpen() !== undefined}
-              fallback={
-                <Show when={!paletteOpen() && !overlayOpen() && !helpOpen()}>
-                  <ZetaEditor
-                    commands={catalog()}
-                    status={status()}
-                    placeholder="输入消息，/ 查看命令"
-                    onChange={setEditorText}
-                    onEscape={() => props.onAbort?.()}
-                    onSubmitWithMode={(text, mode) => submit(text, mode)}
-                    onSubmitError={props.onSubmitError}
-                    onHandle={props.onEditorHandle}
-                  />
-                </Show>
-              }
-            >
+            <BoundSlot name="editor" mode="replace">
+              <Show
+                when={selectorOpen() !== undefined}
+                fallback={
+                  <Show when={!paletteOpen() && !overlayOpen() && !helpOpen()}>
+                    <ZetaEditor
+                      commands={catalog()}
+                      status={status()}
+                      placeholder="输入消息，/ 查看命令"
+                      onChange={setEditorText}
+                      onEscape={() => props.onAbort?.()}
+                      onSubmitWithMode={(text, mode) => submit(text, mode)}
+                      onSubmitError={props.onSubmitError}
+                      onHandle={props.onEditorHandle}
+                    />
+                  </Show>
+                }
+              >
               {() => {
                 const kind = selectorOpen() as SelectorKind;
                 const options = DEMO_OPTIONS()[kind];
@@ -510,6 +527,7 @@ export function ZetaApp(props: ZetaAppProps) {
                 return <SettingsSelector {...shared} title={SELECTOR_TITLES[kind]} />;
               }}
             </Show>
+            </BoundSlot>
             <BoundSlot name="footer" mode="replace">
               <FooterBridge
                 source={props.source}
@@ -520,35 +538,40 @@ export function ZetaApp(props: ZetaAppProps) {
                 telemetry={props.telemetry}
               />
             </BoundSlot>
+            <BoundSlot name="hud" mode="replace">
+              <text> </text>
+            </BoundSlot>
           </>
         }
       />
-      <Show when={overlayOpen()}>
-        <ConfirmOverlay
-          message="确定退出？"
-          onConfirm={() => {
-            setOverlayOpen(false);
-            props.onExit();
-          }}
-          onCancel={() => setOverlayOpen(false)}
-        />
-      </Show>
-      <Show when={props.approvalUi !== undefined}>
-        {(channel: () => ApprovalUiChannel) => <ApprovalOverlay channel={channel()} />}
-      </Show>
-      <Show when={helpOpen()}>
-        <HelpOverlay onClose={() => setHelpOpen(false)} />
-      </Show>
-      <Show when={paletteOpen()}>
-        <CommandPaletteView
-          commands={paletteCommands()}
-          onRun={(command: Command) => {
-            setPaletteOpen(false);
-            submit(`/${command.id}`);
-          }}
-          onCancel={() => setPaletteOpen(false)}
-        />
-      </Show>
+      <BoundSlot name="overlay" mode="replace">
+        <Show when={overlayOpen()}>
+          <ConfirmOverlay
+            message="确定退出？"
+            onConfirm={() => {
+              setOverlayOpen(false);
+              props.onExit();
+            }}
+            onCancel={() => setOverlayOpen(false)}
+          />
+        </Show>
+        <Show when={props.approvalUi}>
+          {(channel: () => ApprovalUiChannel) => <ApprovalOverlay channel={channel()} />}
+        </Show>
+        <Show when={helpOpen()}>
+          <HelpOverlay onClose={() => setHelpOpen(false)} />
+        </Show>
+        <Show when={paletteOpen()}>
+          <CommandPaletteView
+            commands={paletteCommands()}
+            onRun={(command: Command) => {
+              setPaletteOpen(false);
+              submit(`/${command.id}`);
+            }}
+            onCancel={() => setPaletteOpen(false)}
+          />
+        </Show>
+      </BoundSlot>
     </>
   );
 }
@@ -561,6 +584,64 @@ export function createTuiSubmitHandler(options: RuntimeTuiOptions) {
   };
 }
 
+export interface ZetaAppDeps {
+  readonly onPush: (sink: (message: RuntimeMessage) => void) => void;
+  readonly onEditorHandle: (handle: EditorHandle) => void;
+  readonly approvalUi: ApprovalUiChannel;
+  readonly onSubmit: ReturnType<typeof createTuiSubmitHandler>;
+  readonly onExit: () => void;
+  readonly modelList: () => readonly RuntimeModelOption[];
+  readonly currentModel: () => string | undefined;
+  readonly telemetry: () => AgentUsageTelemetry | undefined;
+  readonly keyBindings: () => readonly KeyBinding[];
+  readonly reporter: OscReporter;
+}
+
+/**
+ * native 与可注入 backend 共用的完整 App 工厂。
+ * 七槽位、三层键位热更新、审批覆盖层与遥测都在 ZetaApp 内，backend 只负责终端 I/O。
+ */
+export function createZetaAppElement(options: RuntimeTuiOptions, deps: ZetaAppDeps): () => unknown {
+  return () => (
+    <ThemeProvider initial={options.theme ?? "dark"}>
+      <OscProvider reporter={deps.reporter}>
+        <ZetaApp
+          title={options.title ?? "zeta"}
+          messages={options.messages ?? []}
+          source={options.source}
+          onPush={deps.onPush}
+          onSubmit={deps.onSubmit}
+          onSubmitError={options.onSubmitError}
+          onEditorHandle={deps.onEditorHandle}
+          onCommand={options.onCommand}
+          onAbort={options.onAbort}
+          commandList={options.commandList}
+          commandCatalog={options.commandCatalog}
+          plugins={options.plugins}
+          cwd={options.cwd}
+          model={options.model}
+          models={options.models}
+          modelList={deps.modelList()}
+          currentModel={deps.currentModel()}
+          reasoningEffort={options.reasoningEffort}
+          onEffortChange={options.onEffortChange}
+          onNewSession={options.onNewSession}
+          onConnect={options.onConnect}
+          connection={options.connection}
+          onModelChange={options.onModelChange}
+          provider={options.provider}
+          resources={options.resources}
+          theme={options.theme}
+          telemetry={deps.telemetry()}
+          keyBindings={deps.keyBindings()}
+          approvalUi={deps.approvalUi}
+          onExit={deps.onExit}
+        />
+      </OscProvider>
+    </ThemeProvider>
+  );
+}
+
 const CONTROL_ACTIONS: ReadonlySet<string> = new Set<ControlAction>([
   "prompt", "continue", "steer", "followUp", "abort", "reset",
 ]);
@@ -570,7 +651,7 @@ async function renderTuiWithBackend(
   options: RuntimeTuiOptions,
   backend: RendererBackend,
 ): Promise<RuntimeTuiHandle> {
-  const keymap = createRuntimeKeymap({ bindings: options.keyBindings });
+  const keymap = createReactiveKeymap({ bindings: options.keyBindings });
   const approvalUi = options.approvalUi ?? createApprovalUiChannel();
   let size: BackendSize = {
     width: process.stdout.columns || 80,
@@ -668,6 +749,9 @@ async function renderTuiWithBackend(
     setModels() {},
     setModelOptions() {},
     setModel() {},
+    setKeyBindings(bindings) {
+      keymap.setBindings(bindings);
+    },
     waitForExit() {
       return closed;
     },
@@ -685,8 +769,75 @@ async function renderTuiWithBackend(
   };
 }
 
+/** 自定义后端实现 renderApp 时，与 native 共用同一个完整 App 工厂。 */
+async function renderTuiWithBackendApp(
+  options: RuntimeTuiOptions,
+  backend: RendererBackend,
+): Promise<RuntimeTuiHandle> {
+  const renderApp = backend.renderApp;
+  if (renderApp === undefined) return renderTuiWithBackend(options, backend);
+  const approvalUi = options.approvalUi ?? createApprovalUiChannel();
+  const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
+  const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
+  const [keyBindings, setKeyBindings] = createSignal(options.keyBindings ?? []);
+  let push: (message: RuntimeMessage) => void = () => {};
+  let editorHandle: EditorHandle | undefined;
+  const appElement = createZetaAppElement(options, {
+    onPush: (sink) => { push = sink; },
+    onEditorHandle: (handle) => { editorHandle = handle; },
+    approvalUi,
+    onSubmit: createTuiSubmitHandler(options),
+    onExit: () => options.onExit?.(),
+    modelList,
+    currentModel,
+    telemetry: () => options.telemetry,
+    keyBindings,
+    reporter: createOscReporter((sequence) => process.stdout.write(sequence)),
+  });
+  const handle = await renderApp.call(backend, appElement, {
+    width: process.stdout.columns || 80,
+    height: process.stdout.rows || 24,
+    screenMode: resolveDualMode(options.mode).screenMode,
+    useKittyKeyboard: true,
+  });
+  return {
+    approvalUi,
+    appendMessage(message) {
+      push(message);
+    },
+    setModels(models) {
+      setModelList(models.map((value) => ({ value })));
+    },
+    setModelOptions(next) {
+      setModelList(next);
+    },
+    setModel(model) {
+      setCurrentModel(model);
+    },
+    setKeyBindings(bindings) {
+      setKeyBindings(bindings);
+    },
+    restoreDraft(text) {
+      if ((editorHandle?.value() ?? "").trim().length === 0) editorHandle?.setValue(text);
+    },
+    waitForExit() {
+      return handle.waitForExit();
+    },
+    getSignals() {
+      return undefined;
+    },
+    destroy() {
+      return handle.destroy();
+    },
+  };
+}
+
 export async function renderTui(options: RuntimeTuiOptions = {}): Promise<RuntimeTuiHandle> {
-  if (options.backend !== undefined) return renderTuiWithBackend(options, options.backend);
+  if (options.backend !== undefined) {
+    return typeof options.backend.renderApp === "function"
+      ? renderTuiWithBackendApp(options, options.backend)
+      : renderTuiWithBackend(options, options.backend);
+  }
   const screenMode = resolveDualMode(options.mode).screenMode;
   const renderer = new CliRenderer(
     process.stdin,
@@ -720,6 +871,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
+  const [keyBindings, setKeyBindings] = createSignal(options.keyBindings ?? []);
 
   // 真实遥测：分支/会话/定价来自宿主，token/成本由 agent 的 message_end usage 事件累计。
   const [telemetry, setTelemetry] = createSignal<AgentUsageTelemetry | undefined>(undefined);
@@ -777,53 +929,23 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   // 避免宿主 waitForExit() 永久挂起。
   void renderer.closed.then(cleanup, cleanup);
 
+  const appElement = createZetaAppElement(options, {
+    onPush: (sink) => { push = sink; },
+    onEditorHandle: (handle) => { editorHandle = handle; },
+    approvalUi,
+    onSubmit,
+    onExit: () => {
+      options.onExit?.();
+      exit();
+    },
+    modelList,
+    currentModel,
+    telemetry,
+    keyBindings,
+    reporter: osc,
+  });
   try {
-    await openTuiRender(
-      () => (
-        <ThemeProvider initial={options.theme ?? "dark"}>
-          <OscProvider reporter={osc}>
-            <ZetaApp
-            title={options.title ?? "zeta"}
-            messages={options.messages ?? []}
-            source={options.source}
-            onPush={(sink) => {
-              push = sink;
-            }}
-            onSubmit={onSubmit}
-            onSubmitError={options.onSubmitError}
-            onEditorHandle={(handle) => { editorHandle = handle; }}
-            onCommand={options.onCommand}
-            onAbort={options.onAbort}
-            commandList={options.commandList}
-            commandCatalog={options.commandCatalog}
-            plugins={options.plugins}
-            cwd={options.cwd}
-            model={options.model}
-            models={options.models}
-            modelList={modelList()}
-            currentModel={currentModel()}
-            reasoningEffort={options.reasoningEffort}
-            onEffortChange={options.onEffortChange}
-            onNewSession={options.onNewSession}
-            onConnect={options.onConnect}
-            connection={options.connection}
-            onModelChange={options.onModelChange}
-            provider={options.provider}
-            resources={options.resources}
-            theme={options.theme}
-            telemetry={telemetry()}
-            keyBindings={options.keyBindings}
-            approvalUi={approvalUi}
-            onExit={() => {
-              options.onExit?.();
-              exit();
-            }}
-          />
-          </OscProvider>
-        </ThemeProvider>
-      ),
-      renderer,
-    );
+    await openTuiRender(appElement, renderer);
   } catch (error) {
     exit();
     await renderer.closed.catch(() => {});
@@ -843,6 +965,9 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     },
     setModel(model) {
       setCurrentModel(model);
+    },
+    setKeyBindings(bindings) {
+      setKeyBindings(bindings);
     },
     waitForExit() {
       return closed;
