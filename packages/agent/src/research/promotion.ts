@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { assertPromotionBody, assertPromotionSeal, type PromotionSeal } from "./seal";
+import {
+  assertPromotionAuthorizationReusable,
+  assertPromotionBody,
+  assertPromotionSeal,
+  type PromotionSeal,
+} from "./seal";
 
 export type PromotionArtifact = string | Uint8Array;
 
@@ -69,6 +74,7 @@ function applyPromotion(
   check?: PromotionCheck
 ): PromotionState {
   assertCandidate(candidate);
+  assertPromotionAuthorizationReusable(candidate.seal);
   const incumbent = state.incumbent;
   const promoted =
     (check === undefined || check.allow) &&
@@ -96,6 +102,7 @@ export function recordPromotionRejection(
   digest?: string
 ): PromotionState {
   assertCandidate(candidate);
+  assertPromotionAuthorizationReusable(candidate.seal);
   const decision: PromotionDecision = Object.freeze({
     candidate,
     promoted: false,

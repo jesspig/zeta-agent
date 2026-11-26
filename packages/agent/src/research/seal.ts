@@ -111,3 +111,90 @@ export function assertPromotionBody(value: unknown, body: unknown): true {
   }
   return true;
 }
+
+/**
+ * 一次性晋升授权。seal 只证明来源合法，授权进一步绑定 candidate/artifact/
+ * snapshot/identity/nonce，且只能在唯一一次 commit 中消费；消费后 seal 不可
+ * 被低阶 promote 系列再次使用。
+ */
+export interface PromotionAuthorizationBinding {
+  readonly candidateId: string;
+  readonly artifactDigest: string;
+  readonly snapshotDigest: string;
+  readonly identityDigest: string;
+  readonly nonce: string;
+}
+
+const PROMOTION_AUTHORIZATION_BINDINGS = new WeakMap<object, PromotionAuthorizationBinding>();
+const CONSUMED_PROMOTION_AUTHORIZATIONS = new WeakSet<object>();
+
+function assertBinding(value: unknown): asserts value is PromotionAuthorizationBinding {
+  if (!isRecord(value)) throw new Error("INVALID_PROMOTION_AUTHORIZATION");
+  for (const field of [
+    "candidateId",
+    "artifactDigest",
+    "snapshotDigest",
+    "identityDigest",
+    "nonce",
+  ] as const) {
+    if (typeof value[field] !== "string" || (value[field] as string).length === 0) {
+      throw new Error(`INVALID_PROMOTION_AUTHORIZATION: ${field}`);
+    }
+  }
+}
+
+function sameBinding(
+  left: PromotionAuthorizationBinding,
+  right: PromotionAuthorizationBinding
+): boolean {
+  return (
+    left.candidateId === right.candidateId &&
+    left.artifactDigest === right.artifactDigest &&
+    left.snapshotDigest === right.snapshotDigest &&
+    left.identityDigest === right.identityDigest &&
+    left.nonce === right.nonce
+  );
+}
+
+/** 由唯一权威入口（pipeline）把授权绑定到本次 run 的全部上下文。 */
+export function bindPromotionAuthorization(
+  seal: PromotionSeal,
+  binding: PromotionAuthorizationBinding
+): true {
+  assertPromotionSeal(seal);
+  assertBinding(binding);
+  if (PROMOTION_AUTHORIZATION_BINDINGS.has(seal) || CONSUMED_PROMOTION_AUTHORIZATIONS.has(seal)) {
+    throw new Error("PROMOTION_AUTHORIZATION_ALREADY_BOUND");
+  }
+  PROMOTION_AUTHORIZATION_BINDINGS.set(seal, Object.freeze({ ...binding }));
+  return true;
+}
+
+/** 消费授权；绑定不符或已消费均抛错，保证不可转移/不可重放。 */
+export function consumePromotionAuthorization(
+  seal: PromotionSeal,
+  binding: PromotionAuthorizationBinding
+): true {
+  assertPromotionSeal(seal);
+  assertBinding(binding);
+  const bound = PROMOTION_AUTHORIZATION_BINDINGS.get(seal);
+  if (bound === undefined) throw new Error("PROMOTION_AUTHORIZATION_MISSING");
+  if (!sameBinding(bound, binding)) throw new Error("PROMOTION_AUTHORIZATION_BINDING_MISMATCH");
+  if (CONSUMED_PROMOTION_AUTHORIZATIONS.has(seal)) {
+    throw new Error("PROMOTION_AUTHORIZATION_CONSUMED");
+  }
+  CONSUMED_PROMOTION_AUTHORIZATIONS.add(seal);
+  return true;
+}
+
+export function isPromotionAuthorizationConsumed(value: unknown): boolean {
+  return isRecord(value) && CONSUMED_PROMOTION_AUTHORIZATIONS.has(value);
+}
+
+/** 低阶 promote 系列在改动历史前必须确认授权尚未被消费。 */
+export function assertPromotionAuthorizationReusable(seal: PromotionSeal): true {
+  if (isPromotionAuthorizationConsumed(seal)) {
+    throw new Error("PROMOTION_AUTHORIZATION_CONSUMED");
+  }
+  return true;
+}
