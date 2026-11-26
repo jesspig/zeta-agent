@@ -4,9 +4,11 @@ import {
   currentRelease,
   installRelease,
   rollbackRelease,
-  upgradeRelease,
+  stageRelease,
   type Release,
+  type ReleaseProbe,
   type ReleaseStore,
+  type StagedReleaseResult,
 } from "./lifecycle";
 
 export interface SupervisorEvent {
@@ -20,6 +22,9 @@ export interface SupervisorOptions {
   readonly root: string;
   readonly store: ReleaseStore;
   readonly config: DeployConfig;
+  readonly probe: ReleaseProbe;
+  readonly expectedDigest?: string;
+  readonly expectedConfigDigest?: string;
   readonly startFactory?: (release: Release, config: DeployConfig, generation: number) => DeployHandle;
 }
 
@@ -31,7 +36,7 @@ export interface Supervisor {
   readonly events: readonly SupervisorEvent[];
   liveness(): boolean;
   install(version: string, manifest: ArtifactManifest): Release;
-  upgrade(version: string, manifest: ArtifactManifest): { readonly from: string; readonly to: string; readonly digest: string };
+  upgrade(version: string, manifest: ArtifactManifest): Promise<StagedReleaseResult>;
   rollback(): { readonly from: string; readonly to: string; readonly digest: string };
   /** 进程内故障注入：停止当前 handle，保留 current 指针供后续恢复。 */
   fault(): void;
@@ -93,9 +98,21 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       activate(release, "install");
       return release;
     },
-    upgrade(version, manifest) {
-      const result = upgradeRelease(options.root, version, manifest, options.store);
-      activate(currentRelease(options.root, options.store), "upgrade");
+    async upgrade(version, manifest) {
+      const result = await stageRelease(options.root, version, manifest, options.store, {
+        probe: options.probe,
+        ...(options.expectedDigest === undefined ? {} : { expectedDigest: options.expectedDigest }),
+        ...(options.expectedConfigDigest === undefined ? {} : { expectedConfigDigest: options.expectedConfigDigest }),
+      });
+      try {
+        activate(currentRelease(options.root, options.store), result.rolledBack ? "rollback" : "upgrade");
+      } catch (error) {
+        if (!result.rolledBack) {
+          rollbackRelease(options.root, options.store);
+          activate(currentRelease(options.root, options.store), "rollback");
+        }
+        throw error;
+      }
       return result;
     },
     rollback() {
