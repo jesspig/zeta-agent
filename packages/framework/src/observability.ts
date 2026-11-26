@@ -2,6 +2,9 @@
 export {
   createEffectBridge,
   createLogger,
+  createOtlpHttpExporter,
+  createOtlpSpanExporter,
+  createSpanCollector,
   getActiveEffectBridge,
   redact,
   resolveLogSink,
@@ -18,9 +21,12 @@ export type {
   LoggerOptions,
   LogSink,
   OtlpExporter,
+  OtlpSpan,
+  OtlpWireOptions,
   RedactRule,
   SinkOptions,
   SinkResolution,
   Span,
+  SpanExporter,
 } from "@zeta-agent/observability";
 export type { EffectMeta, EffectObserver } from "@zeta-agent/cordis/types";

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname } from "node:path";
 import { realmForSpace, type Principal } from "@zeta-agent/capabilities";
@@ -9,7 +10,12 @@ export interface ExperienceEntry {
   readonly kind: string;
   readonly code: string;
   readonly scores: Readonly<Record<string, number>>;
+  /** 原始 trace 全文（不做 prompt 截断/有损摘要）。 */
   readonly traces: readonly string[];
+  /** 任务步序：earlier-only 检索只取 step 严格小于当前步的条目。 */
+  readonly step?: number;
+  /** 原始 trace 的 sha256（按 \0 连接）；提供时必须逐字匹配。 */
+  readonly traceDigest?: string;
   readonly [key: string]: unknown;
 }
 
@@ -168,11 +174,40 @@ function entryEvidence(entry: ExperienceEntry): Record<string, unknown> {
   return tree;
 }
 
+/** 原始 trace 全文摘要：按 \0 连接后 sha256，任何截断/改写都会改变摘要。 */
+export function rawTraceDigest(traces: readonly string[]): string {
+  if (!Array.isArray(traces) || traces.some((item) => typeof item !== "string")) {
+    throw new Error("INVALID_RAW_TRACE");
+  }
+  return createHash("sha256").update(traces.join("\0")).digest("hex");
+}
+
+/** 拒绝以省略号/占位符代替完整 trace 的入库记录。 */
+export function assertRawTraceIntegrity(entry: ExperienceEntry): true {
+  if (
+    !Array.isArray(entry.traces) ||
+    entry.traces.length === 0 ||
+    entry.traces.some((item) => typeof item !== "string" || item.length === 0)
+  ) {
+    throw new Error("RAW_TRACE_INVALID");
+  }
+  for (const trace of entry.traces) {
+    if (/\.\.\.|…|\[truncated\]|\[redacted\]/i.test(trace)) {
+      throw new Error("RAW_TRACE_TRUNCATED");
+    }
+  }
+  if (entry.traceDigest !== undefined && entry.traceDigest !== rawTraceDigest(entry.traces)) {
+    throw new Error("RAW_TRACE_DIGEST_MISMATCH");
+  }
+  return true;
+}
+
 function assertEntry(entry: ExperienceEntry): void {
   if (entry === null || typeof entry !== "object") throw new Error("INVALID_ENTRY");
   if (typeof entry.id !== "string" || entry.id.length === 0) throw new Error("INVALID_ENTRY_ID");
   assertNoLeakage(entry);
   assertNoGraderVerdicts(entryEvidence(entry));
+  assertRawTraceIntegrity(entry);
 }
 
 /** realm 是 symbol，标准结构化克隆无法复制；按结构复制并保留 symbol 引用。 */
@@ -385,6 +420,8 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
 
 export interface ExperienceQueryWithTransfer extends ExperienceQuery {
   readonly transferable?: boolean;
+  /** earlier-only：只取 step 严格小于该值的历史条目；缺省不按时间过滤。 */
+  readonly before?: number;
 }
 
 export interface ScopedExperienceLibrary {
@@ -441,10 +478,15 @@ export function createExperienceLibrary(
       const base = store.query({ candidate: criteria.candidate, kind: criteria.kind, regex: criteria.regex });
       return Object.freeze(
         base
-          .filter(
-            (entry) =>
-              inScope(entry, scope) && (transferable !== true || hasTransferableExperience(entry))
-          )
+          .filter((entry) => {
+            if (!inScope(entry, scope)) return false;
+            if (transferable === true && !hasTransferableExperience(entry)) return false;
+            if (criteria.before !== undefined) {
+              if (typeof entry.step !== "number" || !Number.isFinite(entry.step)) return false;
+              if (entry.step >= criteria.before) return false;
+            }
+            return true;
+          })
           .map((entry) => deepFreeze(entry))
       );
     },
@@ -476,7 +518,7 @@ export function createExperienceLibrary(
   };
 }
 
-/** 非马尔可夫检索：按任意历史条件取回，可选仅保留可迁移条目。 */
+/** 非马尔可夫检索：按任意历史条件取回，可限定 earlier-only 与仅可迁移条目。 */
 export function retrieveExperience(
   library: ScopedExperienceLibrary,
   criteria: ExperienceQueryWithTransfer

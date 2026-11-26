@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { realmForSpace, type Principal } from "@zeta-agent/capabilities";
+import { atomicWriteFileSync } from "@zeta-agent/security";
 import { createFrameId, type SessionProjection } from "../session/store";
 
 export const FROZEN_FORMAT = "zeta-frozen-evidence" as const;
 export const FROZEN_VERSION = 1 as const;
+/** 持久化 manifest 的 schema 版本；历史无版本字段按 1 只读兼容。 */
+export const FROZEN_SCHEMA_VERSION = 1 as const;
 
 export type ResearchMode = "live" | "replay";
 
@@ -17,6 +20,8 @@ export interface EpisodeIdentity {
   readonly domain: string;
   readonly mode: ResearchMode;
   readonly realm: symbol;
+  /** 候选身份：同一 episode 下不同候选的证据按 candidate/digest 隔离。 */
+  readonly candidate?: string;
 }
 
 export interface EpisodeIdentityInput {
@@ -26,6 +31,7 @@ export interface EpisodeIdentityInput {
   readonly domain: string;
   readonly mode: ResearchMode;
   readonly principal?: Principal;
+  readonly candidate?: string;
 }
 
 export function createEpisodeIdentity(input: EpisodeIdentityInput): EpisodeIdentity {
@@ -36,6 +42,9 @@ export function createEpisodeIdentity(input: EpisodeIdentityInput): EpisodeIdent
     }
   }
   if (input.mode !== "live" && input.mode !== "replay") throw new Error("INVALID_IDENTITY: mode");
+  if (input.candidate !== undefined && (typeof input.candidate !== "string" || input.candidate.length === 0)) {
+    throw new Error("INVALID_IDENTITY: candidate");
+  }
   return Object.freeze({
     run: input.run,
     task: input.task,
@@ -43,6 +52,7 @@ export function createEpisodeIdentity(input: EpisodeIdentityInput): EpisodeIdent
     domain: input.domain,
     mode: input.mode,
     realm: input.principal?.realm ?? realmForSpace(input.tenant),
+    ...(input.candidate === undefined ? {} : { candidate: input.candidate }),
   });
 }
 
@@ -74,6 +84,7 @@ export function identityDigest(identity: EpisodeIdentity): string {
         domain: identity.domain,
         mode: identity.mode,
         realm: String(identity.realm.description ?? ""),
+        ...(identity.candidate === undefined ? {} : { candidate: identity.candidate }),
       })
     )
     .digest("hex");
@@ -149,6 +160,67 @@ export function createFileEvidenceFiles(rootDir: string): EvidenceFiles {
   };
 }
 
+/** 每个冻结产物按 candidate/digest 隔离的索引键。 */
+export function frozenEntryKey(candidate: string | undefined, digest: string): string {
+  return `${candidate === undefined || candidate.length === 0 ? "__none__" : candidate}/${digest}`;
+}
+
+export interface PersistedFrozenEntry {
+  readonly key: string;
+  readonly candidate: string | undefined;
+  readonly digest: string;
+  readonly frameId: string;
+  readonly manifest: Record<string, unknown>;
+  readonly evidence: Record<string, string>;
+}
+
+export interface PersistedFrozenManifest {
+  /** 历史 manifest 可无此字段；读取时按 1 兼容，写入总是当前版本。 */
+  readonly schemaVersion?: number;
+  readonly entries: readonly PersistedFrozenEntry[];
+}
+
+export interface FrozenPersistence {
+  load(): PersistedFrozenManifest | undefined;
+  save(state: PersistedFrozenManifest): void;
+}
+
+/**
+ * 文件持久化：manifest 索引以 atomicWriteFileSync 提交，条目按 candidate/digest 分目录落盘。
+ * 重启后 load 还原全部快照与 evidence 全文，不依赖进程内存。
+ */
+export function createFileFrozenPersistence(rootDir: string): FrozenPersistence {
+  if (typeof rootDir !== "string" || rootDir.length === 0) throw new Error("INVALID_FROZEN_ROOT");
+  const manifestPath = join(rootDir, "manifest.json");
+  return {
+    load() {
+      if (!existsSync(manifestPath)) return undefined;
+      const parsed = JSON.parse(readFileSync(manifestPath, "utf8")) as PersistedFrozenManifest;
+      if (parsed === null || typeof parsed !== "object" || !Array.isArray(parsed.entries)) {
+        throw new Error("FROZEN_MANIFEST_INVALID");
+      }
+      const version = parsed.schemaVersion ?? 1;
+      if (version > FROZEN_SCHEMA_VERSION) throw new Error("FROZEN_SCHEMA_UNSUPPORTED");
+      return { schemaVersion: version, entries: parsed.entries };
+    },
+    save(state) {
+      mkdirSync(rootDir, { recursive: true });
+      for (const entry of state.entries) {
+        const directory = join(rootDir, "candidates", entry.key.split("/")[0]!);
+        mkdirSync(directory, { recursive: true });
+        atomicWriteFileSync(
+          join(directory, `${entry.digest}.json`),
+          stableEvidenceStringify(entry)
+        );
+      }
+      atomicWriteFileSync(manifestPath, stableEvidenceStringify({
+        ...state,
+        schemaVersion: FROZEN_SCHEMA_VERSION,
+      }));
+    },
+  };
+}
+
 /** T-11 SessionStore 的只读投影直接转成冻结证据文件，不复制会话实现。 */
 export function evidenceFromSessionProjection(projection: SessionProjection): EvidenceTree {
   return Object.freeze({
@@ -188,13 +260,16 @@ export interface FrozenStoreOptions {
   readonly files?: EvidenceFiles;
   readonly now?: () => string;
   readonly generation?: () => number;
+  /** 注入后 freeze 原子提交 manifest，构造时从 manifest 恢复（重启不丢证据）。 */
+  readonly persistence?: FrozenPersistence;
 }
 
 export interface FrozenStore {
   readonly files: EvidenceFiles;
   freeze(identity: EpisodeIdentity, evidence: EvidenceTree, generation?: number): FrozenSnapshot;
-  get(digest: string): FrozenSnapshot | undefined;
-  require(digest: string): FrozenSnapshot;
+  /** candidate 给定时只返回该候选的证据，避免跨候选串用。 */
+  get(digest: string, candidate?: string): FrozenSnapshot | undefined;
+  require(digest: string, candidate?: string): FrozenSnapshot;
   latest(identityDigest: string): FrozenSnapshot | undefined;
   manifests(): readonly FrozenManifest[];
 }
@@ -242,6 +317,69 @@ export function assertFrozenImmutable(snapshot: FrozenSnapshot): true {
   return true;
 }
 
+function serializeSnapshot(snapshot: FrozenSnapshot): PersistedFrozenEntry {
+  const identity = snapshot.manifest.identity;
+  return {
+    key: frozenEntryKey(identity.candidate, snapshot.manifest.digest),
+    candidate: identity.candidate,
+    digest: snapshot.manifest.digest,
+    frameId: snapshot.frameId,
+    manifest: {
+      ...snapshot.manifest,
+      // realm 是 symbol，结构化 clone 会丢失；只保留可重建的描述并靠 identityDigest 校验。
+      identity: { ...identity, realm: String(identity.realm.description ?? "") },
+    },
+    evidence: { ...snapshot.evidence },
+  };
+}
+
+function deserializeSnapshot(entry: PersistedFrozenEntry, files: EvidenceFiles): FrozenSnapshot {
+  const raw = entry.manifest?.identity as Record<string, unknown> | undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("FROZEN_MANIFEST_INVALID");
+  }
+  const identity: EpisodeIdentity = Object.freeze({
+    run: String(raw.run),
+    task: String(raw.task),
+    tenant: String(raw.tenant),
+    domain: String(raw.domain),
+    mode: raw.mode === "replay" ? "replay" : "live",
+    realm: Symbol(String(raw.realm ?? "")),
+    ...(typeof raw.candidate === "string" ? { candidate: raw.candidate } : {}),
+  });
+  const parsedFiles = (entry.manifest.files ?? []) as readonly EvidenceFileRef[];
+  const filesRefs = Object.freeze(parsedFiles.map((ref) => Object.freeze({ ...ref })));
+  const stored = entry.manifest as unknown as FrozenManifest;
+  const manifest: FrozenManifest = Object.freeze({
+    format: stored.format,
+    version: stored.version,
+    identity,
+    identityDigest: stored.identityDigest,
+    generation: stored.generation,
+    files: filesRefs,
+    rootDigest: stored.rootDigest,
+    createdAt: stored.createdAt,
+    digest: stored.digest,
+  });
+  if (manifest.identityDigest !== identityDigest(identity)) {
+    throw new Error("FROZEN_MANIFEST_TAMPERED");
+  }
+  const evidence: Record<string, string> = {};
+  for (const [path, content] of Object.entries(entry.evidence ?? {})) {
+    if (typeof content !== "string") throw new Error("FROZEN_MANIFEST_INVALID");
+    files.write(path, content);
+    evidence[path] = content;
+  }
+  const snapshot: FrozenSnapshot = Object.freeze({
+    frameId: entry.frameId,
+    manifest,
+    evidence: Object.freeze(evidence),
+    pointers: Object.freeze(manifest.files.map((ref) => ref.path)),
+  });
+  assertFrozenImmutable(snapshot);
+  return snapshot;
+}
+
 export function createFrozenStore(options: FrozenStoreOptions = {}): FrozenStore {
   const files = options.files ?? createMemoryEvidenceFiles();
   const now = options.now ?? (() => new Date().toISOString());
@@ -252,6 +390,27 @@ export function createFrozenStore(options: FrozenStoreOptions = {}): FrozenStore
   });
   const snapshots = new Map<string, FrozenSnapshot>();
   const byIdentity = new Map<string, FrozenSnapshot[]>();
+  const persistence = options.persistence;
+
+  const commit = (): void => {
+    if (persistence === undefined) return;
+    persistence.save({
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      entries: Object.freeze([...snapshots.values()].map(serializeSnapshot)),
+    });
+  };
+
+  const restored = persistence?.load();
+  if (restored !== undefined) {
+    for (const entry of restored.entries) {
+      const snapshot = deserializeSnapshot(entry, files);
+      snapshots.set(snapshot.manifest.digest, snapshot);
+      const lineage = byIdentity.get(snapshot.manifest.identityDigest) ?? [];
+      lineage.push(snapshot);
+      byIdentity.set(snapshot.manifest.identityDigest, lineage);
+      generationCounter = Math.max(generationCounter, snapshot.manifest.generation);
+    }
+  }
 
   return {
     files,
@@ -305,13 +464,17 @@ export function createFrozenStore(options: FrozenStoreOptions = {}): FrozenStore
       const lineage = byIdentity.get(key) ?? [];
       lineage.push(snapshot);
       byIdentity.set(key, lineage);
+      commit();
       return snapshot;
     },
-    get(digest) {
-      return snapshots.get(digest);
-    },
-    require(digest) {
+    get(digest, candidate) {
       const snapshot = snapshots.get(digest);
+      if (snapshot === undefined) return undefined;
+      if (candidate !== undefined && snapshot.manifest.identity.candidate !== candidate) return undefined;
+      return snapshot;
+    },
+    require(digest, candidate) {
+      const snapshot = this.get(digest, candidate);
       if (snapshot === undefined) throw new Error("FROZEN_NOT_FOUND");
       return snapshot;
     },
