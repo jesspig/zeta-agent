@@ -30,11 +30,15 @@ function snapshot(revision) {
 
 atomicWriteFileSync(file, JSON.stringify(snapshot(0)));
 process.stdout.write("READY\n");
+let signaled = false;
 for (let revision = 1; ; revision += 1) {
   atomicWriteFileSync(file, JSON.stringify(snapshot(revision)), {
     maxWriteChunk: 4096,
     hook: (current) => {
-      process.stdout.write(`STAGE:${current}\n`);
+      if (current !== "temp-writing" || signaled) return;
+      signaled = true;
+      process.stdout.write("STAGE:temp-writing\n");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
     },
   });
   process.stdout.write(`WROTE:${revision}\n`);
