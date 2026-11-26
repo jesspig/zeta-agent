@@ -19,7 +19,12 @@ import {
   type RunOptions,
   type RunResult,
 } from "@zeta-agent/components";
-import { RPC_ERROR_CODES, type RpcRequest, type RpcResponse } from "./rpc";
+import {
+  RPC_ERROR_CODES,
+  type RpcRequest,
+  type RpcResponse,
+  type RpcSessionControl,
+} from "./rpc";
 
 /** gRPC 风格 unary 状态码：远端调用无本地 gRPC 运行时依赖，但沿用同一状态语义。 */
 export const GRPC_STATUS = Object.freeze({
@@ -165,6 +170,37 @@ export function createRemoteClient(options: RemoteClientOptions): RemoteClient {
     liveness: () => call("liveness"),
     configDigest: () => call("configDigest"),
     health: () => call("health"),
+  };
+}
+
+/**
+ * remote 侧会话控制适配器：四个动作都跨进程发到真实 daemon 会话存储，
+ * 不返回本地固定值；daemon 未注入真实 store 时由服务端失败关闭。
+ */
+export function createRemoteSessionControl(client: RemoteClient): RpcSessionControl {
+  const resultOf = (response: RpcResponse): Record<string, unknown> => {
+    if (typeof response.result !== "object" || response.result === null) {
+      throw new Error("REMOTE_SESSION_RESULT_INVALID");
+    }
+    return response.result as Record<string, unknown>;
+  };
+  return {
+    async load(sessionId) {
+      const result = resultOf(await client.load(sessionId));
+      return { sessionId: String(result.sessionId ?? sessionId), messages: Array.isArray(result.messages) ? result.messages : [] };
+    },
+    async fork(fromId) {
+      const result = resultOf(await client.fork(fromId));
+      return { sessionId: String(result.sessionId ?? ""), from: (result.from as string | null | undefined) ?? null };
+    },
+    async resume(frameId) {
+      const result = resultOf(await client.resume(frameId));
+      return { sessionId: String(result.sessionId ?? frameId), frameId: String(result.frameId ?? frameId) };
+    },
+    async compact(sessionId) {
+      const result = resultOf(await client.compact(sessionId));
+      return { sessionId: String(result.sessionId ?? sessionId), compacted: result.compacted === true };
+    },
   };
 }
 

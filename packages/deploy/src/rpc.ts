@@ -1,11 +1,13 @@
 import {
   createApprovalBroker,
+  createStoreSessionControl as createAgentStoreSessionControl,
   encodeControlFrame,
   type AgentMessage,
   type ApprovalChannel,
   type ApprovalRequest,
   type ControlAction,
   type RuntimeProtocol,
+  type StoreSessionControlOptions,
 } from "@zeta-agent/agent";
 
 /** approve 复用 T-14 四态审批通道；这里只声明最小 seam，不新建审批路径。 */
@@ -24,7 +26,15 @@ export interface RpcSessionControl {
   compact(sessionId: string): Promise<{ readonly sessionId: string; readonly compacted: boolean }>;
 }
 
-/** 默认内存会话控制：可注入真实 SessionStore 适配器替换。 */
+/**
+ * 真实 SessionStore 适配器：生产 daemon / CLI / remote 注入它替换内存 stub。
+ * load/fork/resume/compact 的返回值全部来自 committed frame 与 workspace 记录。
+ */
+export function createStoreSessionControl(options: StoreSessionControlOptions): RpcSessionControl {
+  return createAgentStoreSessionControl(options);
+}
+
+/** 仅供 RPC 协议/传输夹具使用的内存 seam；生产路径禁止把它当作真实会话能力。 */
 export function createMemorySessionControl(): RpcSessionControl {
   return {
     async load(sessionId) {

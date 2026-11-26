@@ -16,6 +16,17 @@ export interface CompactionBudget {
 
 export type BudgetDecision = "ok" | "compact" | "exceeded";
 
+/** EoCC=阈值触发（默认）；SAC=每动作一次，共享同一 recap schema。 */
+export type CompactionMode = "EoCC" | "SAC";
+
+export interface ResolveCompactionBudgetInput {
+  readonly totalContextLimit: number;
+  readonly compactionThreshold?: number;
+  /** 外置块/工具输出字节上限；与阈值联动，保证 verbose 轨迹仍有工作空间。 */
+  readonly maxOutputBytes?: number;
+  readonly mode?: CompactionMode;
+}
+
 export interface BudgetTracker {
   observe(tokens: number): BudgetDecision;
   readonly peak: number;
@@ -103,6 +114,28 @@ function assertBudget(budget: CompactionBudget): void {
   if (peakLiveContextTokens !== undefined && (typeof peakLiveContextTokens !== "number" || !Number.isFinite(peakLiveContextTokens) || peakLiveContextTokens <= 0)) {
     throw new Error("budget: invalid peakLiveContextTokens");
   }
+}
+
+/**
+ * EoCC/SAC 与 maxOutputBytes 的唯一解析入口：
+ * - EoCC 缺省阈值取上下文上限的 3/4；SAC 缺省为 1（每动作压缩）。
+ * - 显式阈值与 maxOutputBytes 取更严格者：threshold <= totalContextLimit - maxOutputBytes，
+ *   防止 verbose 轨迹在紧阈值下没有工作空间而崩塌。
+ */
+export function resolveCompactionBudget(input: ResolveCompactionBudgetInput): CompactionBudget {
+  const { totalContextLimit, compactionThreshold, maxOutputBytes, mode = "EoCC" } = input;
+  if (mode !== "EoCC" && mode !== "SAC") throw new Error("budget: invalid compaction mode");
+  if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 0)) {
+    throw new Error("budget: invalid maxOutputBytes");
+  }
+  const requested = compactionThreshold ?? (mode === "SAC" ? 1 : Math.floor(totalContextLimit * 0.75));
+  const workspaceFloor = maxOutputBytes === undefined
+    ? requested
+    : Math.min(requested, Math.max(1, Math.floor(totalContextLimit - maxOutputBytes)));
+  const threshold = Math.max(1, Math.floor(workspaceFloor));
+  const budget: CompactionBudget = { totalContextLimit, compactionThreshold: threshold };
+  assertBudget(budget);
+  return budget;
 }
 
 export function checkBudget(budget: CompactionBudget, liveTokens: number): BudgetDecision {

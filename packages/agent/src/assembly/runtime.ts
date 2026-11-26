@@ -31,6 +31,12 @@ import { createJsonlSessionStore } from "../session/jsonl-store";
 import { createSqliteSessionStore } from "../session/sqlite-store";
 import type { SessionStore } from "../session/store";
 import {
+  createFileWorkspaceStore,
+  type CompactionBudget,
+  type CompactionMode,
+  type WorkspaceStore,
+} from "@zeta-agent/agent-framework";
+import {
   createTenantGovernance,
   type TenantGovernance,
   type TenantScope,
@@ -42,7 +48,11 @@ import {
   type InstalledResource,
 } from "./manifest";
 import { diagnoseCapabilities } from "./profile";
-import { createRuntimeProtocol, type RuntimeProtocol } from "./protocol";
+import {
+  createRuntimeProtocol,
+  createStoreSessionControl,
+  type RuntimeProtocol,
+} from "./protocol";
 
 export interface DefaultRuntimeOptions {
   readonly streamFn?: AgentStreamFn;
@@ -59,6 +69,13 @@ export interface DefaultRuntimeOptions {
   /** 按路径创建正式后端；不传时保持 T-10 的纯内存会话零回归。 */
   readonly sessionStorePath?: string;
   readonly sessionStoreBackend?: "jsonl" | "sqlite";
+  /** 文件持久 workspace 根目录；提供后压缩块跨进程可取回。 */
+  readonly workspaceStorePath?: string;
+  /** 显式开启压缩并指定预算；未提供时保持既有装配零回归。 */
+  readonly compactionBudget?: CompactionBudget;
+  readonly compactionMode?: CompactionMode;
+  /** 压缩外置块与工具输出的字节上限；与阈值联动。 */
+  readonly compactionMaxOutputBytes?: number;
   readonly permissionGate?: AgentOptions["permissionGate"];
   readonly approvalChannel?: AgentOptions["approvalChannel"];
   readonly egressPolicy?: AgentOptions["egressPolicy"];
@@ -91,6 +108,7 @@ export interface DefaultRuntime {
   readonly profile: AssemblyProfile;
   readonly resources: ResourceRegistry;
   readonly sessionStore: SessionStore | undefined;
+  readonly workspaceStore: WorkspaceStore | undefined;
   readonly services: Readonly<Record<string, unknown>>;
   readonly rootFiber: ContextFiber;
   readonly tenantScope: TenantScope | undefined;
@@ -168,10 +186,23 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     providerBroker.register(registration.id, registration.streamFn, registration.options);
   }
 
+  const workspaceStore = options.workspaceStorePath === undefined
+    ? undefined
+    : createFileWorkspaceStore({ root: options.workspaceStorePath });
+  const compactionEnabled = options.compactionBudget !== undefined || workspaceStore !== undefined;
+  const compaction = compactionEnabled
+    ? {
+        budget: options.compactionBudget ?? { totalContextLimit: 128_000, compactionThreshold: 96_000 },
+        ...(options.compactionMode === undefined ? {} : { mode: options.compactionMode }),
+        ...(workspaceStore === undefined ? {} : { workspaceStore }),
+        ...(options.compactionMaxOutputBytes === undefined ? {} : { maxOutputBytes: options.compactionMaxOutputBytes }),
+      }
+    : undefined;
   const agent = createAgent({
     tenantScope,
     streamFn: options.streamFn,
     providerBroker,
+    ...(compaction === undefined ? {} : { compaction }),
     ...(options.provider === undefined ? {} : { provider: options.provider }),
     ...(options.model === undefined ? {} : { model: options.model }),
     allowedDirectories,
@@ -187,7 +218,15 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     sessionStore,
   });
 
-  const protocol = createRuntimeProtocol(agent, sessionId);
+  const sessionControl = sessionStore === undefined
+    ? undefined
+    : createStoreSessionControl({
+        store: sessionStore,
+        agent,
+        workspaceStore,
+        ...(options.compactionMaxOutputBytes === undefined ? {} : { maxOutputBytes: options.compactionMaxOutputBytes }),
+      });
+  const protocol = createRuntimeProtocol(agent, sessionId, sessionControl);
 
   // root fiber 持有运行时生命周期；dispose 是唯一的逆操作。
   const ctx = createContext({ uid: `zeta:runtime:${sessionId}` });
@@ -260,6 +299,7 @@ export async function createDefaultRuntime(options: DefaultRuntimeOptions = {}):
     profile,
     resources,
     sessionStore,
+    workspaceStore,
     services,
     rootFiber,
     tenantScope,

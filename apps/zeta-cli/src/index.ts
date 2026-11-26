@@ -120,6 +120,8 @@ interface Connection {
 
 interface AgentBundle {
   readonly runtime: DefaultRuntime;
+  readonly sessionStore: DefaultRuntime["sessionStore"];
+  readonly workspaceStore: DefaultRuntime["workspaceStore"];
   readonly agent: Agent;
   readonly probes: DeployHandle;
   readonly model: string;
@@ -148,15 +150,30 @@ export async function makeRuntime(args: CliArgs): Promise<AgentBundle> {
     }
     return echoStream()(request);
   };
+  // daemon/rpc 是跨进程控制面：会话与 workspace 必须落在真实持久存储，不用内存 stub。
+  const persistentControl = args.mode === "daemon" || args.mode === "rpc" ||
+    typeof process.env.ZETA_SESSION_PATH === "string";
+  const sessionStorePath = process.env.ZETA_SESSION_PATH ??
+    (persistentControl ? join(resolveDataDir(), "session.jsonl") : undefined);
+  const workspaceStorePath = process.env.ZETA_WORKSPACE_PATH ??
+    (persistentControl ? join(resolveDataDir(), "workspace") : undefined);
   const runtime = await createDefaultRuntime({
     streamFn,
     allowedDirectories: [process.cwd()],
     profile: args.profile,
     hotReloadDirs: args.watchDirs,
+    ...(sessionStorePath === undefined ? {} : { sessionStorePath }),
+    ...(workspaceStorePath === undefined ? {} : { workspaceStorePath }),
+    ...(sessionStorePath === undefined ? {} : {
+      compactionBudget: { totalContextLimit: 128_000, compactionThreshold: 96_000 },
+      compactionMaxOutputBytes: 64 * 1024,
+    }),
   });
   const probes = createProbeHandle(runtime, { target: hostTarget() ?? "linux-x64", profile: args.profile });
   return {
     runtime,
+    sessionStore: runtime.sessionStore,
+    workspaceStore: runtime.workspaceStore,
     agent: runtime.agent,
     probes,
     get model() {

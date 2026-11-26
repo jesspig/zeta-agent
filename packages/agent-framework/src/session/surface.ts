@@ -134,6 +134,71 @@ export function createRecap(input: SemanticRecap): SemanticRecap {
   };
 }
 
+const projectionEncoder = new TextEncoder();
+
+function projectionBytes(value: string): number {
+  return projectionEncoder.encode(value).length;
+}
+
+/** 按完整数组条目裁剪投影段；对象退化成有界字符串，绝不截断半个 JSON 数组条目。 */
+function boundedSegment(value: unknown, budget: number): string {
+  const raw = JSON.stringify(value) ?? "null";
+  if (budget <= 0) return Array.isArray(value) ? "[]" : "{}";
+  if (projectionBytes(raw) <= budget) return raw;
+  if (Array.isArray(value)) {
+    const kept: unknown[] = [];
+    for (const item of value) {
+      const candidate = [...kept, item];
+      if (projectionBytes(JSON.stringify(candidate)) > budget) break;
+      kept.push(item);
+    }
+    return JSON.stringify(kept);
+  }
+  return raw.slice(0, budget);
+}
+
+/**
+ * 把 typed recap 投影成下一轮 provider 请求真实携带的 system 消息：
+ * 六段齐全、objective 逐字保真、workspace URI 可见。
+ *
+ * 关键：被替换的原块只能以 workspace URI 指针出现，不能把 verbose 正文重新塞回请求——
+ * 否则峰值不降反升，RED-06 的“旧块消失”也无法成立。详情由 offloader.retrieve 窄取回。
+ */
+export function projectRecapToMessage(
+  recap: SemanticRecap,
+  uris: readonly string[],
+  maxOutputBytes?: number
+): AgentMessage {
+  const header = "Compacted conversation recap (six segments; objective verbatim):";
+  const pointer = uris.length > 0 ? ` [details: ${uris.join(" ")}]` : "";
+  const count = (key: string, items: readonly unknown[]): string => `${key}: ${items.length} item(s)${pointer}`;
+  const planBudget = maxOutputBytes === undefined
+    ? undefined
+    : Math.max(0, maxOutputBytes - projectionBytes(header + "\n" + recap.objective + "\n" + uris.join(" ") + "\n"));
+  const lines = [
+    header,
+    `objective: ${recap.objective}`,
+    count("establishedFacts", recap.establishedFacts),
+    count("appliedChanges", recap.appliedChanges),
+    count("verification", recap.verification),
+    count("deadEnds", recap.deadEnds),
+    `remainingPlan: ${boundedSegment(recap.remainingPlan, planBudget ?? Number.POSITIVE_INFINITY)}`,
+    `workspace: ${uris.join(" ")}`,
+  ];
+  return { role: "system", content: lines.join("\n") };
+}
+
+/** surface 是投影后的会话视图：recap 节点投影成 system 消息，message 节点原样透传。 */
+export function projectSurfaceEntries(
+  entries: readonly SurfaceEntry[],
+  maxOutputBytes?: number
+): readonly AgentMessage[] {
+  return entries.map((entry) =>
+    entry.kind === "message"
+      ? entry.message
+      : projectRecapToMessage(entry.recap, entry.uris, maxOutputBytes));
+}
+
 export function createSessionSurface(): SessionSurface {
   let entries: SurfaceEntry[] = [];
   let lineage: CompactionLineage[] = [];

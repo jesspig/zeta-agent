@@ -9,14 +9,19 @@ import {
   createPluginRegistry,
   createContributionHost,
   DEFAULT_PLUGIN_REALM,
+  classifyRecap,
   createBudgetTracker,
   createCompactionListener,
+  createFileWorkspaceStore,
   createMemoryWorkspaceStore,
   createOffloader,
   createSessionSurface,
+  projectSurfaceEntries,
+  resolveCompactionBudget,
   type CompactionBudget,
   type CompactionEvent,
   type CompactionLineage,
+  type CompactionMode,
   type AgentEvent,
   type AgentListener,
   type AgentMessage,
@@ -36,6 +41,7 @@ import {
   type EffectMeta,
   type Offloader,
   type SessionSurface,
+  type SurfaceEntry,
   type WorkspaceStore,
   type EventBus,
   type FinishTurn,
@@ -631,12 +637,16 @@ export interface AgentOptions {
 
 export interface AgentCompactionOptions {
   readonly budget: CompactionBudget;
+  /** EoCC（阈值触发，默认）或 SAC（每动作一次）；两者共享 recap schema。 */
+  readonly mode?: CompactionMode;
   /** 可注入自定义 surface（缺省新建内存 surface）。 */
   readonly surface?: SessionSurface;
   /** 可注入自定义 offloader 或 workspace store。 */
   readonly offloader?: Offloader;
   readonly workspaceStore?: WorkspaceStore;
-  /** 传给默认 offloader 的输出字节上限。 */
+  /** 文件持久 workspace 根目录；提供后 offloader 跨 agent 重启仍可 retrieve。 */
+  readonly workspaceStorePath?: string;
+  /** 传给默认 offloader 的输出字节上限；同时与 budget 阈值联动。 */
   readonly maxOutputBytes?: number;
   /** started/completed/failed/interrupted 事件；facade 同时把它们写入审计链。 */
   readonly emit?: (event: CompactionEvent) => void | Promise<void>;
@@ -838,6 +848,19 @@ function projectionMessages(store: SessionStore | undefined): readonly AgentMess
   return Array.isArray(projection?.messages) ? projection!.messages : [];
 }
 
+/**
+ * 压缩后的 provider 请求以 surface 为权威视图：recap 节点投影成带 workspace URI 的 system 消息，
+ * 已被替换的原块不再出现；未发生压缩时保持原 transcript 路径，零回归。
+ */
+function projectCompactionMessages(
+  messages: readonly AgentMessage[],
+  entries: readonly SurfaceEntry[],
+  maxOutputBytes?: number
+): readonly AgentMessage[] {
+  if (!entries.some((entry) => entry.kind === "recap")) return messages;
+  return projectSurfaceEntries(entries, maxOutputBytes);
+}
+
 export function createAgent(options: AgentOptions = {}): Agent {
   const tenantScope = options.tenantScope;
   let activeSessionStore: SessionStore | undefined = tenantScope?.sessionStore ?? options.sessionStore;
@@ -978,15 +1001,33 @@ export function createAgent(options: AgentOptions = {}): Agent {
 
   // 压缩装配复用 SessionStore 的 appendRecap 血缘与 agent_end 屏障，不另建会话协议。
   const compactionOptions = options.compaction;
+  const compactionBudget: CompactionBudget | undefined = compactionOptions === undefined
+    ? undefined
+    : compactionOptions.maxOutputBytes === undefined && compactionOptions.mode === undefined
+      ? compactionOptions.budget
+      : resolveCompactionBudget({
+          totalContextLimit: compactionOptions.budget.totalContextLimit,
+          compactionThreshold: compactionOptions.budget.compactionThreshold,
+          ...(compactionOptions.maxOutputBytes === undefined ? {} : { maxOutputBytes: compactionOptions.maxOutputBytes }),
+          ...(compactionOptions.mode === undefined ? {} : { mode: compactionOptions.mode }),
+        });
   const compaction: AgentCompactionHandle | undefined = compactionOptions === undefined
     ? undefined
     : (() => {
         const surface = compactionOptions.surface ?? createSessionSurface();
+        const workspaceStore = compactionOptions.workspaceStore ?? (
+          compactionOptions.workspaceStorePath === undefined
+            ? createMemoryWorkspaceStore()
+            : createFileWorkspaceStore({ root: compactionOptions.workspaceStorePath })
+        );
         const offloader = compactionOptions.offloader ?? createOffloader(
-          compactionOptions.workspaceStore ?? createMemoryWorkspaceStore(),
+          workspaceStore,
           compactionOptions.maxOutputBytes === undefined ? {} : { maxOutputBytes: compactionOptions.maxOutputBytes }
         );
-        return { surface, offloader, budgetTracker: createBudgetTracker(compactionOptions.budget) };
+        // surface 是唯一投影视图：从 committed transcript 恢复的条目必须同样在 surface 中，
+        // 否则下一轮 prepareRequest 的投影会丢掉恢复出来的历史。
+        for (const message of restoredTranscript.messages) surface.append(message);
+        return { surface, offloader, budgetTracker: createBudgetTracker(compactionBudget!) };
       })();
   let persistedLineageCount = 0;
   async function persistCompaction(lineages: readonly CompactionLineage[]): Promise<void> {
@@ -1617,7 +1658,12 @@ export function createAgent(options: AgentOptions = {}): Agent {
     }));
     activeSessionStore = store;
     declaredToolNames = replayed.declaredTools ?? [...toolNamesSnapshot()];
-    persistedLineageCount = projection.lineage.length;
+    // surface 随会话一起重建：旧投影/血缘不能污染新会话的下一轮请求。
+    if (compaction !== undefined) {
+      compaction.surface.restore({ entries: [], lineage: [] });
+      for (const message of replayed.messages) compaction.surface.append(message);
+    }
+    persistedLineageCount = 0;
     lastRunMessages = [];
     lastTurnHadNativeTools = false;
     inbox.clear("nextTurn");
@@ -2105,16 +2151,23 @@ export function createAgent(options: AgentOptions = {}): Agent {
       },
       prepareRequest: async (request) => {
         const base = (request ?? {}) as { readonly messages?: readonly AgentMessage[] };
+        const projectedMessages = compaction === undefined
+          ? (base.messages ?? [])
+          : projectCompactionMessages(
+              base.messages ?? [],
+              compaction.surface.entries(),
+              compactionOptions?.maxOutputBytes
+            );
         const prompt = resolveSystemPrompt();
         // 系统提示词只进入请求，不写入会话状态，避免 transcript 出现 system 行。
         // 工具声明 system 消息可能排在 transcript 首位；按内容判重，保证提示词恰好注入一次。
-        const alreadyInjected = base.messages?.some((message) => message.role === "system" && message.content === prompt) === true;
+        const alreadyInjected = projectedMessages.some((message) => message.role === "system" && message.content === prompt) === true;
         const seeded = {
           ...(request as object),
           messages:
             prompt.length > 0 && !alreadyInjected
-              ? [{ role: "system" as const, content: prompt }, ...(base.messages ?? [])]
-              : (base.messages ?? []),
+              ? [{ role: "system" as const, content: prompt }, ...projectedMessages]
+              : projectedMessages,
         };
         const transformed = await hookRun("contextTransform", seeded, signal);
         return await hookRun("prepareRequest", transformed, signal);
@@ -2267,10 +2320,20 @@ export function createAgent(options: AgentOptions = {}): Agent {
     const unsubscribeCompaction = compaction === undefined || compactionOptions === undefined
       ? undefined
       : stream.subscribe(createCompactionListener({
-          budget: compactionOptions.budget,
+          budget: compactionBudget!,
           surface: compaction.surface,
           offloader: compaction.offloader,
           persist: persistCompaction,
+          // system 提示词只存在请求里；构造 recap 时作为合成 system 条目逐字进入 objective。
+          buildRecap: (block, uris) => {
+            const prompt = resolveSystemPrompt();
+            return classifyRecap(
+              prompt.length > 0
+                ? [{ kind: "message", message: { role: "system", content: prompt } } as const, ...block]
+                : block,
+              uris
+            );
+          },
           emit: emitCompaction,
           budgetTracker: compaction.budgetTracker,
           signal,
@@ -2524,6 +2587,10 @@ export function createAgent(options: AgentOptions = {}): Agent {
       inbox.clear("nextStep");
       inbox.clear("followUp");
       stream.reset();
+      if (compaction !== undefined) {
+        compaction.surface.restore({ entries: [], lineage: [] });
+        persistedLineageCount = 0;
+      }
     },
     waitForIdle: () => drainLeases(),
     dispose() {
