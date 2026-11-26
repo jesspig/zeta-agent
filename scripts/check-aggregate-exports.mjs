@@ -32,10 +32,10 @@ for (const [pkg, expected] of aggregates) {
   try {
     const r = spawnSync(bun, [probe], {
       cwd: join(root, "packages", pkg),
-      encoding: "utf8",
+      stdio: "inherit",
       shell: process.platform === "win32",
     });
-    console.log(`\n--- aggregate @zeta-agent/${pkg} (exit=${r.status}) ---\n${(r.stdout + r.stderr).trim()}`);
+    console.log(`\n--- aggregate @zeta-agent/${pkg} (exit=${r.status}) ---`);
     check(r.status === 0, `@zeta-agent/${pkg} 有非空聚合导出且含稳定 API`);
   } finally {
     unlinkSync(probe);
