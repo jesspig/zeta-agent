@@ -34,12 +34,12 @@ import {
 } from "./loop";
 import { createToolPipeline, createToolRegistry } from "../tools/pipeline";
 
-const ACTIVE_CAPABILITIES: Capabilities = Object.freeze({
-  isolation: "active",
-  seccomp: "active",
-  fsConfinement: "active",
-  auditSink: "active",
-  egressDefaultDeny: "active",
+const UNSUPPORTED_CAPABILITIES: Capabilities = Object.freeze({
+  isolation: "unsupported",
+  seccomp: "unsupported",
+  fsConfinement: "unsupported",
+  auditSink: "unsupported",
+  egressDefaultDeny: "unsupported",
 });
 
 function createSharedEventBus(): EventBus {
@@ -137,7 +137,7 @@ export class Agent {
     this.baseStreamFn = options.streamFn;
     this.coreContextValue = options.coreContext;
     this.bus = options.eventBus ?? createSharedEventBus();
-    this.capabilitiesFn = options.capabilities ?? (() => ACTIVE_CAPABILITIES);
+    this.capabilitiesFn = options.capabilities ?? (() => UNSUPPORTED_CAPABILITIES);
     this.onEffectFn = options.onEffect ?? (() => () => {});
     this.emitEffectFn = options.emitEffect;
     this.addRedactorFn = options.addRedactor ?? (() => () => {});
