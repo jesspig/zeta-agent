@@ -323,6 +323,9 @@ export interface AgentToolSchema {
     readonly description: string;
     readonly required?: boolean;
   }[];
+  /** MCP 等插件的原始 JSON Schema 原样透传给 provider：嵌套对象/数组、required、description 不扁平化、不丢弃。 */
+  readonly inputSchema?: unknown;
+  readonly outputSchema?: unknown;
 }
 
 /** provider 流式块：纯文本字符串为兼容形态；对象形态携带推理与工具调用。 */
@@ -2054,6 +2057,8 @@ export function createAgent(options: AgentOptions = {}): Agent {
         description: parameter.description ?? parameter.name,
         ...(parameter.required === true ? { required: true } : {}),
       })),
+      ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+      ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
     };
   }
 

@@ -38,6 +38,9 @@ interface CallSlot {
 }
 
 function toParameters(schema: AgentToolSchema): Record<string, unknown> {
+  if (schema.inputSchema !== undefined && typeof schema.inputSchema === "object" && schema.inputSchema !== null) {
+    return schema.inputSchema as Record<string, unknown>;
+  }
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   for (const parameter of schema.parameters) {

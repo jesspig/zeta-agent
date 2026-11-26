@@ -22,6 +22,7 @@ const CASES = [
   "./red-cases/tenant-realm-breach.case.mjs",
   "./red-cases/daemon-lease-probe-tls.case.mjs",
   "./red-cases/session-cas-lease-and-bad-frame.case.mjs",
+  "./red-cases/mcp-schema-oauth.case.mjs",
 ];
 
 const { TIMEOUT_MS } = await import("./red-cases/common.mjs");
