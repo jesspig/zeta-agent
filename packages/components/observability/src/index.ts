@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { setActiveEffectObserver, type Disposer, type EffectMeta, type EffectObserver } from "@zeta-agent/cordis";
+import type { TelemetryPipeline } from "./pipeline";
 
 export type { EffectMeta, EffectObserver } from "@zeta-agent/cordis";
 
@@ -43,8 +45,22 @@ export interface Span {
   readonly name: string;
 }
 
+export type ExportResult =
+  | { readonly ok: true }
+  | {
+    readonly ok: false;
+    readonly retryable: boolean;
+    readonly error: Error;
+    readonly status?: number;
+    readonly retryAfterMs?: number;
+  };
+
 export interface OtlpExporter {
   export(message: LogMessage): void;
+}
+
+export interface AsyncOtlpExporter extends OtlpExporter {
+  export(message: LogMessage): Promise<ExportResult>;
 }
 
 export interface FileSink {
@@ -53,6 +69,7 @@ export interface FileSink {
 
 export interface SinkOptions {
   readonly endpoint: string;
+  /** 真实 OTLP exporter 异步返回 ExportResult；同步 void/ExportResult seam 保持兼容。 */
   readonly exporter: OtlpExporter;
   readonly file: FileSink;
 }
@@ -183,10 +200,27 @@ export function resolveLogSink(options: SinkOptions): SinkResolution {
   return {
     mode: "otlp",
     sink: (message) => {
+      const fallback = (): void => {
+        try {
+          options.file.write(message);
+        } catch {
+          // file 旁路失败同样不能改变日志主流程。
+        }
+      };
       try {
-        options.exporter.export(message);
+        const exported: unknown = options.exporter.export(message);
+        if (isPromiseLike<unknown>(exported)) {
+          void Promise.resolve(exported).then(
+            (result) => {
+              if (isExportResult(result) && !result.ok) fallback();
+            },
+            () => fallback(),
+          );
+        } else if (isExportResult(exported) && !exported.ok) {
+          fallback();
+        }
       } catch {
-        options.file.write(message);
+        fallback();
       }
     },
   };
@@ -202,7 +236,8 @@ export interface OtlpWireOptions {
   readonly fetchImpl?: typeof fetch;
   readonly serviceName?: string;
   readonly headers?: Readonly<Record<string, string>>;
-  /** 异步导出失败的可观测出口；不阻断主流程，但不再把失败完全吞掉。 */
+  readonly timeoutMs?: number;
+  /** 导出失败的可观测出口；结果仍由 export 的 Promise 明确返回。 */
   readonly onAsyncFailure?: (error: Error) => void;
 }
 
@@ -220,6 +255,10 @@ export interface SpanExporter {
   export(spans: readonly OtlpSpan[]): void;
 }
 
+export interface AsyncSpanExporter extends SpanExporter {
+  export(spans: readonly OtlpSpan[]): Promise<ExportResult>;
+}
+
 function otlpResource(serviceName: string): Record<string, unknown> {
   return {
     resource: {
@@ -229,12 +268,9 @@ function otlpResource(serviceName: string): Record<string, unknown> {
 }
 
 function hexId(bytes: number): string {
-  const alphabet = "0123456789abcdef";
-  let out = "";
-  for (let index = 0; index < bytes * 2; index += 1) {
-    out += alphabet[Math.floor(Math.random() * 16)];
-  }
-  return out;
+  let value = randomBytes(bytes).toString("hex");
+  while (/^0+$/.test(value)) value = randomBytes(bytes).toString("hex");
+  return value;
 }
 
 function nanoClock(): () => string {
@@ -243,14 +279,99 @@ function nanoClock(): () => string {
   return () => (wall + (process.hrtime.bigint() - origin)).toString();
 }
 
-/** OTLP/HTTP JSON logs exporter：真实 POST 到 endpoint，非 2xx/网络异常即抛错。 */
-export function createOtlpHttpExporter(options: OtlpWireOptions): OtlpExporter {
-  const endpoint = new URL(options.endpoint).toString();
+const EXPORT_OK: ExportResult = Object.freeze({ ok: true });
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return (typeof value === "object" && value !== null || typeof value === "function") &&
+    typeof (value as { readonly then?: unknown }).then === "function";
+}
+
+function isExportResult(value: unknown): value is ExportResult {
+  return typeof value === "object" && value !== null && "ok" in value &&
+    typeof (value as { readonly ok?: unknown }).ok === "boolean";
+}
+
+function retryAfterMs(reply: Response): number | undefined {
+  const value = reply.headers.get("retry-after");
+  if (value === null) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed) * 1000;
+  const at = Date.parse(trimmed);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500 && status <= 599;
+}
+
+function reportAsyncFailure(options: OtlpWireOptions, error: Error): void {
+  try {
+    options.onAsyncFailure?.(error);
+  } catch {
+    // 观测回调故障不得改变 export 的明确结果。
+  }
+}
+
+async function postOtlp(
+  endpoint: string,
+  body: unknown,
+  options: OtlpWireOptions,
+  failureCode: "OTLP_EXPORT_FAILED" | "OTLP_SPAN_EXPORT_FAILED",
+): Promise<ExportResult> {
   const send = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("OTLP timeoutMs must be a positive finite number");
+  }
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    const reply = await send(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(options.headers ?? {}) },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (reply.ok) return EXPORT_OK;
+    const status = reply.status;
+    const error = new Error(`${failureCode}: ${status}`);
+    const retryAfter = retryAfterMs(reply);
+    const result: ExportResult = {
+      ok: false,
+      retryable: isRetryableStatus(status),
+      error,
+      status,
+      ...(retryAfter === undefined ? {} : { retryAfterMs: retryAfter }),
+    };
+    reportAsyncFailure(options, error);
+    return result;
+  } catch (cause) {
+    const error = timedOut
+      ? new Error(`${failureCode}: TIMEOUT`, { cause })
+      : asError(cause);
+    const result: ExportResult = { ok: false, retryable: true, error };
+    reportAsyncFailure(options, error);
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** OTLP/HTTP JSON logs exporter：真实 POST 到 endpoint，并返回明确投递结果。 */
+export function createOtlpHttpExporter(options: OtlpWireOptions): AsyncOtlpExporter {
+  const endpoint = new URL(options.endpoint).toString();
   const serviceName = options.serviceName ?? "zeta-agent";
   const clock = nanoClock();
   return {
-    export(message) {
+    async export(message) {
       const body = {
         resourceLogs: [
           {
@@ -275,31 +396,18 @@ export function createOtlpHttpExporter(options: OtlpWireOptions): OtlpExporter {
           },
         ],
       };
-      const response = send(endpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...(options.headers ?? {}) },
-        body: JSON.stringify(body),
-      });
-      // fetch 返回 Promise；显式同步校验已发起的请求对象，异步结果由 then 抛出，
-      // 但不影响调用方主流程（调用方已经 try/catch 旁路）。
-      void response.then((reply) => {
-        if (!reply.ok) throw new Error(`OTLP_EXPORT_FAILED: ${reply.status}`);
-      }).catch((error: unknown) => {
-        // 旁路错误不得产生 unhandled rejection；通过显式回调暴露，避免静默丢失。
-        options.onAsyncFailure?.(error instanceof Error ? error : new Error(String(error)));
-      });
+      return postOtlp(endpoint, body, options, "OTLP_EXPORT_FAILED");
     },
   };
 }
 
-/** OTLP/HTTP JSON traces exporter：真实 POST 到 endpoint。 */
-export function createOtlpSpanExporter(options: OtlpWireOptions): SpanExporter {
+/** OTLP/HTTP JSON traces exporter：真实 POST 到 endpoint，并返回明确投递结果。 */
+export function createOtlpSpanExporter(options: OtlpWireOptions): AsyncSpanExporter {
   const endpoint = new URL(options.endpoint).toString();
-  const send = options.fetchImpl ?? fetch;
   const serviceName = options.serviceName ?? "zeta-agent";
   return {
-    export(spans) {
-      if (spans.length === 0) return;
+    async export(spans) {
+      if (spans.length === 0) return EXPORT_OK;
       const body = {
         resourceSpans: [
           {
@@ -324,15 +432,7 @@ export function createOtlpSpanExporter(options: OtlpWireOptions): SpanExporter {
           },
         ],
       };
-      void send(endpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...(options.headers ?? {}) },
-        body: JSON.stringify(body),
-      }).then((reply) => {
-        if (!reply.ok) throw new Error(`OTLP_SPAN_EXPORT_FAILED: ${reply.status}`);
-      }).catch((error: unknown) => {
-        options.onAsyncFailure?.(error instanceof Error ? error : new Error(String(error)));
-      });
+      return postOtlp(endpoint, body, options, "OTLP_SPAN_EXPORT_FAILED");
     },
   };
 }
@@ -342,44 +442,111 @@ export function createSpanCollector(options: {
   readonly bridge: EffectBridge;
   readonly exporter?: SpanExporter;
   readonly failingExporter?: SpanExporter;
-}): { readonly spans: () => readonly OtlpSpan[]; readonly dispose: () => void } {
+  readonly pipeline?: TelemetryPipeline<OtlpSpan>;
+  readonly maxRecordedSpans?: number;
+  readonly maxPendingBatches?: number;
+  readonly onExportFailure?: (error: Error) => void;
+}): {
+  readonly spans: () => readonly OtlpSpan[];
+  readonly flush: () => Promise<void>;
+  readonly dispose: () => void;
+} {
+  const maxRecordedSpans = options.maxRecordedSpans ?? 10_000;
+  if (!Number.isSafeInteger(maxRecordedSpans) || maxRecordedSpans <= 0) {
+    throw new RangeError("maxRecordedSpans must be a positive safe integer");
+  }
+  const maxPendingBatches = options.maxPendingBatches ?? 64;
+  if (!Number.isSafeInteger(maxPendingBatches) || maxPendingBatches <= 0) {
+    throw new RangeError("maxPendingBatches must be a positive safe integer");
+  }
   const recorded: OtlpSpan[] = [];
+  const pendingExports = new Set<Promise<void>>();
   const clock = nanoClock();
   const traceId = hexId(16);
+  let enqueueTail = Promise.resolve();
+  let pendingBatches = 0;
+  const reportFailure = (error: unknown): void => {
+    try {
+      options.onExportFailure?.(asError(error));
+    } catch {
+      // span 导出失败不能反向影响 effect 生命周期。
+    }
+  };
+  const remember = (record: OtlpSpan): void => {
+    recorded.push(record);
+    const overflow = recorded.length - maxRecordedSpans;
+    if (overflow > 0) recorded.splice(0, overflow);
+  };
   const stop = options.bridge.onEffect((meta) => {
+    const spanIds = new Map<string, string>();
+    const batch: OtlpSpan[] = [];
     for (const span of spansFromEffectMeta(meta)) {
+      const spanId = hexId(8);
+      spanIds.set(span.spanId, spanId);
+      const parentSpanId = span.parentId === null ? undefined : spanIds.get(span.parentId);
       const record: OtlpSpan = Object.freeze({
         traceId,
-        spanId: hexId(8),
-        ...(span.parentId === null ? {} : { parentSpanId: span.parentId }),
+        spanId,
+        ...(parentSpanId === undefined ? {} : { parentSpanId }),
         name: span.name,
         startTimeUnixNano: clock(),
         endTimeUnixNano: clock(),
         attributes: Object.freeze({ "effect.label": span.name }),
       });
-      recorded.push(record);
+      remember(record);
+      batch.push(record);
+    }
+    if (pendingBatches >= maxPendingBatches) {
+      reportFailure(new Error("TELEMETRY_SPAN_EXPORT_QUEUE_FULL"));
+      return;
+    }
+    const pipeline = options.pipeline;
+    if (pipeline !== undefined) {
+      pendingBatches += 1;
+      enqueueTail = enqueueTail.then(async () => {
+        for (const record of batch) {
+          if (await pipeline.enqueue(record)) continue;
+          reportFailure(new Error("TELEMETRY_PIPELINE_REJECTED"));
+        }
+      }).catch(reportFailure).finally(() => {
+        pendingBatches -= 1;
+      });
+      return;
     }
     const exporter = options.failingExporter ?? options.exporter;
     if (exporter !== undefined) {
       try {
-        exporter.export(recorded.slice(-optionsBridgeCount(meta)));
-      } catch {
-        // sink 故障旁路：主流程与采集都不受影响。
+        const exported: unknown = exporter.export(batch);
+        if (isPromiseLike<unknown>(exported)) {
+          pendingBatches += 1;
+          const pending = Promise.resolve(exported).then(
+            (result) => {
+              if (isExportResult(result) && !result.ok) reportFailure(result.error);
+            },
+            (error: unknown) => reportFailure(error),
+          ).finally(() => {
+            pendingBatches -= 1;
+          });
+          pendingExports.add(pending);
+          void pending.finally(() => pendingExports.delete(pending));
+        } else if (isExportResult(exported) && !exported.ok) {
+          reportFailure(exported.error);
+        }
+      } catch (error) {
+        reportFailure(error);
       }
     }
   });
   return {
     spans: () => Object.freeze([...recorded]),
+    async flush() {
+      await enqueueTail;
+      if (options.pipeline !== undefined) await options.pipeline.flush();
+      await Promise.allSettled([...pendingExports]);
+    },
     dispose: stop,
   };
 }
 
-function optionsBridgeCount(meta: EffectMeta): number {
-  let count = 0;
-  const visit = (node: EffectMeta): void => {
-    count += 1;
-    for (const child of node.children) visit(child);
-  };
-  visit(meta);
-  return count;
-}
+export * from "./pipeline";
+export * from "./spool";

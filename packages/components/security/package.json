@@ -16,7 +16,8 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@zeta-agent/cordis": "workspace:*"
+    "@zeta-agent/cordis": "workspace:*",
+    "@zeta-agent/process": "workspace:*"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",

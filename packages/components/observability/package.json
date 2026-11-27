@@ -6,6 +6,8 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./pipeline": "./src/pipeline.ts",
+    "./spool": "./src/spool.ts",
     "./types": "./src/types.ts",
     "./package.json": "./package.json"
   },

@@ -31,7 +31,8 @@ describe("T-13 facade 信任收口：untrusted 不获得宿主执行路径", () 
         api.onInstall(function () { globalThis.__T13_FACADE_INSTALL = true; });
         `,
         { trusted: false, origin: "remote", capabilities: ["prompt:section", "events:on"] }
-      )
+      ),
+      { allowUntrustedEvaluation: true }
     );
     try {
       const agent = createAgent({
@@ -71,7 +72,8 @@ describe("T-13 facade 信任收口：untrusted 不获得宿主执行路径", () 
         api.onInstall(function () { globalThis.__T13_FACADE_INSTALL = true; });
         `,
         { trusted: false, origin: "generated", capabilities: ["prompt:section"] }
-      )
+      ),
+      { allowUntrustedEvaluation: true }
     );
     try {
       const agent = createAgent({

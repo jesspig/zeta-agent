@@ -13,8 +13,8 @@ import {
   writeSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { createNodeProcessLauncher, filterProcessEnv, type ProcessLauncher } from "@zeta-agent/process";
 import {
   assertOperation,
   assertShellEgress,
@@ -74,6 +74,8 @@ export interface LocalSafeBackendOptions {
   readonly openRaceHook?: (stage: OpenRaceStage, path: string) => void;
   /** 进程生成注入，保证取消/输出测试不依赖真实平台语义。 */
   readonly spawn?: SpawnImpl;
+  /** 统一进程 seam：shell 与插件 worker 共用同一 launcher 实现。spawn 显式提供时优先生效。 */
+  readonly launcher?: ProcessLauncher;
   readonly now?: () => number;
   /** 取消后等待进程树退出的默认宽限期；0 表示立即判定。 */
   readonly terminationGraceMs?: number;
@@ -121,12 +123,7 @@ export function buildShellEnv(
     readonly fakeCredentials?: Readonly<Record<string, string>>;
   } = {}
 ): Record<string, string> {
-  const deny = new Set([...DEFAULT_DENY_ENV, ...(options.denyEnv ?? [])]);
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) {
-    if (deny.has(key) || value === undefined) continue;
-    env[key] = value;
-  }
+  const env = filterProcessEnv(base, { deny: options.denyEnv });
   for (const [key, value] of Object.entries(options.fakeCredentials ?? {})) {
     env[key] = value;
   }
@@ -258,48 +255,47 @@ function replaceAll(text: string, from: string, to: string): string {
   return text.split(from).join(to);
 }
 
-function defaultSpawn(platform: NodePlatform): SpawnImpl {
+function spawnFromLauncher(launcher: ProcessLauncher): SpawnImpl {
   return (argv, options, sink) => {
     const [command, ...args] = argv;
     if (command === undefined) throw new Error("SHELL_ARGV_EMPTY");
-    const child = spawn(command, args, {
+    const child = launcher.launch({
+      command,
+      args,
       cwd: options.cwd,
       env: options.env,
-      detached: platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-      // 运行时间上限由 Node 透明强制（超时 killSignal）；我们仍用独立
-      // AbortController 取消整个进程树并确认终止，避免把平台差异当成成功。
-      ...(options.maxRuntimeMs !== undefined && options.maxRuntimeMs > 0
-        ? { timeout: options.maxRuntimeMs, killSignal: "SIGKILL" as const }
-        : {}),
+      detached: process.platform !== "win32",
+      timeoutMs: options.maxRuntimeMs,
+      killSignal: "SIGKILL",
+      stdio: { stdin: "ignore" },
     });
     let cancelled = false;
-    child.stdout?.on("data", (chunk: Buffer | string) => sink("stdout", String(chunk)));
-    child.stderr?.on("data", (chunk: Buffer | string) => sink("stderr", String(chunk)));
-    const exit = new Promise<number>((resolveExit) => {
-      child.on("error", () => resolveExit(-1));
-      child.on("close", (code) => resolveExit(code ?? -1));
-    });
+    if (child.stdout !== null) {
+      void (async () => {
+        for await (const chunk of child.stdout) sink("stdout", String(chunk));
+      })();
+    }
+    const stderr = child.stderr;
+    if (stderr !== null) {
+      void (async () => {
+        for await (const chunk of stderr) sink("stderr", String(chunk));
+      })();
+    }
     return {
       pid: child.pid,
       async cancel() {
         if (cancelled) return;
         cancelled = true;
-        if (platform === "win32" && child.pid !== undefined) {
-          spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-        } else if (child.pid !== undefined) {
-          try {
-            process.kill(-child.pid, "SIGTERM");
-          } catch {
-            child.kill("SIGTERM");
-          }
-        } else {
-          child.kill("SIGTERM");
-        }
+        if (child.cancel !== undefined) await child.cancel();
+        else child.kill();
       },
-      exited: exit,
+      exited: child.exited.then((code) => code ?? -1),
     };
   };
+}
+
+function defaultSpawn(_platform: NodePlatform, launcher?: ProcessLauncher): SpawnImpl {
+  return spawnFromLauncher(launcher ?? createNodeProcessLauncher());
 }
 
 /** 结构化文件/进程边界：所有文件 I/O 与进程生成都封装在此，工具层不持有宿主 I/O。 */
@@ -658,7 +654,7 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
     },
   };
 
-  const spawnImpl = options.spawn ?? defaultSpawn(platform);
+  const spawnImpl = options.spawn ?? defaultSpawn(platform, options.launcher);
   const defaultGraceMs = options.terminationGraceMs ?? 2000;
   const shell: StructuredShellBackend = {
     async start(request) {

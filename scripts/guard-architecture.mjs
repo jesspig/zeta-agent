@@ -24,6 +24,7 @@ const componentPackages = new Set([
   "@zeta-agent/capabilities",
   "@zeta-agent/loader",
   "@zeta-agent/observability",
+  "@zeta-agent/process",
   "@zeta-agent/security",
 ]);
 
