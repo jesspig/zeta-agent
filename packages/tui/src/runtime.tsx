@@ -1,4 +1,4 @@
-import { CliRenderer } from "@opentui/core";
+import { CliRenderer, CliRenderEvents } from "@opentui/core";
 import { render as openTuiRender, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { encodeControlFrame, type ControlAction } from "@zeta-agent/agent";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
@@ -869,15 +869,12 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   let push: (message: RuntimeMessage) => void = () => {};
   let editorHandle: EditorHandle | undefined;
   let destroyed = false;
-  // 原生终端尺寸变化时上报 xterm window-change；真实 resize 由宿主/PTY 触发，非测试合成标记。
-  const reportResize = (): void => {
+  // 渲染器接受真实终端尺寸变化后上报 xterm window-change；不依赖可能滞后的 stdout.columns。
+  const reportResize = (width: number, height: number): void => {
     if (destroyed) return;
-    process.stdout.write(resizeSequence({
-      width: process.stdout.columns || 80,
-      height: process.stdout.rows || 24,
-    }));
+    process.stdout.write(resizeSequence({ width, height }));
   };
-  process.on("SIGWINCH", reportResize);
+  renderer.on(CliRenderEvents.RESIZE, reportResize);
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
@@ -923,7 +920,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const cleanup = (): void => {
     if (destroyed) return;
     destroyed = true;
-    process.off("SIGWINCH", reportResize);
+    renderer.off(CliRenderEvents.RESIZE, reportResize);
     releaseUsage?.();
     releaseOsc?.();
     signals?.dispose();
