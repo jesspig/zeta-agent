@@ -337,16 +337,19 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
    * 与 confinedPath 的 realpath 校验叠加，缩小 realpath→open 之间被替换的窗口。
    */
   const assertNoSymlinkWithinAllowed = (target: string): void => {
-    const bases = allowed.map((directory) => {
+    const bases: string[] = [];
+    for (const directory of allowed) {
+      bases.push(resolve(directory));
       try {
-        return realpathSync(resolve(directory));
+        bases.push(realpathSync(resolve(directory)));
       } catch {
-        return resolve(directory);
+        // 目录可能尚未创建；词路基仍可校验。
       }
-    });
-    const stop = new Set(bases.filter((base) => isInside(target, base)));
+    }
+    const stop = new Set(bases.filter((base) => isInside(target, base) || target === base));
     let cursor = target;
     for (;;) {
+      if (stop.has(resolve(cursor))) break;
       try {
         const stat = lstatSync(cursor);
         if (stat.isSymbolicLink()) throw new Error("NOFOLLOW_VIOLATION: symbolic link/reparse point in path");
@@ -354,7 +357,6 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
         if (error instanceof Error && error.message.includes("NOFOLLOW")) throw error;
         // 中间层不存在交给后续 open/lstat 处理。
       }
-      if (stop.has(resolve(cursor))) break;
       const parent = dirname(cursor);
       if (parent === cursor) break;
       cursor = parent;
