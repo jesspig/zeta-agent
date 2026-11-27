@@ -23,7 +23,7 @@ describe("T-20 / F-T13-01 插件隔离系统沙箱如实标注", () => {
     const source = createPluginSource("sandbox-report-fixture", 'api.addSection("local fixture");', {
       trusted: false,
     });
-    const plugin = await evaluatePluginSource(source);
+    const plugin = await evaluatePluginSource(source, { allowUntrustedEvaluation: true });
     try {
       expect(plugin.report.topLevelExecution).toBe("child-vm");
       expect(plugin.report.systemSandbox.state).toBe("unsupported");

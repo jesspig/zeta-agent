@@ -28,7 +28,8 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@zeta-agent/framework": "workspace:*"
+    "@zeta-agent/framework": "workspace:*",
+    "@zeta-agent/process": "workspace:*"
   },
   "devDependencies": {
     "@zeta-agent/cordis": "workspace:*",

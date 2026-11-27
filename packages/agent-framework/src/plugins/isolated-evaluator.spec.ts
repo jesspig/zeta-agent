@@ -3,13 +3,17 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { LaunchRequest, ProcessLauncher } from "@zeta-agent/process";
 import {
   PluginEvaluationError,
   createPluginSource,
   evaluatePluginSource,
   translateIsolatedContributions,
+  type EvalChild,
+  type EvalSpawn,
   type InvocationGate,
   type IsolatedPlugin,
+  type PluginProcessLauncher,
 } from "./isolated-evaluator";
 
 const KEYS = [
@@ -36,6 +40,25 @@ function handlerId(plugin: IsolatedPlugin, kind: string): string {
 
 async function close(plugin: IsolatedPlugin | undefined): Promise<void> {
   if (plugin !== undefined && !plugin.closed) await plugin.terminate();
+}
+
+function completedEvalChild(digest: string): EvalChild {
+  return {
+    stdin: { write(_data: string) {}, end() {} },
+    stdout: (async function* () {
+      yield JSON.stringify({
+        t: "result",
+        ok: true,
+        contributions: [],
+        installRegistered: false,
+        handlerIds: [],
+        digest,
+      }) + String.fromCharCode(10);
+    })(),
+    stderr: null,
+    exited: Promise.resolve(0),
+    kill() {},
+  };
 }
 
 describe("T-13 隔离求值：顶层代码只在子进程执行", () => {
@@ -177,7 +200,8 @@ describe("T-13 隔离求值：顶层代码只在子进程执行", () => {
         api.onInstall(function () { globalThis.__T13_INSTALL_HOST = true; });
         `,
         { trusted: false }
-      )
+      ),
+      { allowUntrustedEvaluation: true }
     );
     try {
       const installResult = await plugin.invoke("install", undefined);
@@ -194,6 +218,216 @@ describe("T-13 隔离求值：顶层代码只在子进程执行", () => {
     } finally {
       await close(plugin);
       clearHostMarkers();
+    }
+  });
+});
+
+describe("F-T13-01 求值前安全门与进程启动边界", () => {
+  test("untrusted 默认拒绝且 launcher spawn=0", async () => {
+    let spawned = 0;
+    const launcher: PluginProcessLauncher = {
+      spawn() {
+        spawned += 1;
+        throw new Error("SHOULD_NOT_SPAWN");
+      },
+    };
+    const source = createPluginSource("untrusted-default", "api.addSection(\"blocked\");");
+
+    await expect(evaluatePluginSource(source, { launcher })).rejects.toThrow(
+      "PLUGIN_UNTRUSTED_EVALUATION_DENIED"
+    );
+    expect(spawned).toBe(0);
+  });
+
+  test("allowUntrustedEvaluation 显式放行不可信源码并调用 launcher", async () => {
+    const source = createPluginSource("untrusted-allowed", "api.addSection(\"allowed\");", {
+      trusted: false,
+    });
+    let spawned = 0;
+    let command: string | undefined;
+    let args: readonly string[] | undefined;
+    const launcher: PluginProcessLauncher = {
+      spawn(nextCommand, nextArgs) {
+        spawned += 1;
+        command = nextCommand;
+        args = nextArgs;
+        return completedEvalChild(source.digest);
+      },
+    };
+
+    const plugin = await evaluatePluginSource(source, {
+      launcher,
+      allowUntrustedEvaluation: true,
+    });
+    try {
+      expect(spawned).toBe(1);
+      expect(command).toBe(process.execPath);
+      expect(args?.[1]?.endsWith("eval-worker.mjs")).toBe(true);
+      expect(plugin.trusted).toBe(false);
+    } finally {
+      await close(plugin);
+    }
+  });
+
+  test("beforeEvaluate 在 launcher.spawn 前执行", async () => {
+    const source = createPluginSource("policy-order", "api.addSection(\"ok\");", { trusted: true });
+    const calls: string[] = [];
+    const launcher: PluginProcessLauncher = {
+      spawn() {
+        calls.push("spawn");
+        return completedEvalChild(source.digest);
+      },
+    };
+
+    const plugin = await evaluatePluginSource(source, {
+      launcher,
+      async beforeEvaluate(checked) {
+        await Promise.resolve();
+        expect(checked.digest).toBe(source.digest);
+        calls.push("beforeEvaluate");
+      },
+    });
+    try {
+      expect(calls).toEqual(["beforeEvaluate", "spawn"]);
+    } finally {
+      await close(plugin);
+    }
+  });
+
+  test("beforeEvaluate 抛错时失败关闭且 launcher spawn=0", async () => {
+    const source = createPluginSource("policy-denied", "api.addSection(\"blocked\");", {
+      trusted: true,
+    });
+    let spawned = 0;
+    const launcher: PluginProcessLauncher = {
+      spawn() {
+        spawned += 1;
+        throw new Error("SHOULD_NOT_SPAWN");
+      },
+    };
+
+    await expect(
+      evaluatePluginSource(source, {
+        launcher,
+        beforeEvaluate() {
+          throw new Error("POLICY_DENIED");
+        },
+      })
+    ).rejects.toThrow("POLICY_DENIED");
+    expect(spawned).toBe(0);
+  });
+
+  test("worker 默认只继承最小白名单，不继承 secret 环境", async () => {
+    const source = createPluginSource("env-default", "api.addSection(\"ok\");", { trusted: true });
+    const secretKey = "__ZETA_EVAL_SECRET__";
+    const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+    const previousSecret = process.env[secretKey];
+    const previousPath = process.env[pathKey];
+    process.env[secretKey] = "host-secret";
+    process.env[pathKey] = "minimal-path";
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const launcher: PluginProcessLauncher = {
+      spawn(_command, _args, options) {
+        capturedEnv = options.env;
+        return completedEvalChild(source.digest);
+      },
+    };
+
+    try {
+      const plugin = await evaluatePluginSource(source, { launcher });
+      try {
+        expect(capturedEnv?.PATH).toBe("minimal-path");
+        expect(capturedEnv?.[secretKey]).toBeUndefined();
+        expect(capturedEnv?.NODE_OPTIONS).toBeUndefined();
+      } finally {
+        await close(plugin);
+      }
+    } finally {
+      if (previousSecret === undefined) delete process.env[secretKey];
+      else process.env[secretKey] = previousSecret;
+      if (previousPath === undefined) delete process.env[pathKey];
+      else process.env[pathKey] = previousPath;
+    }
+  });
+
+  test("调用方显式 env 也按最小白名单过滤", async () => {
+    const source = createPluginSource("env-explicit", "api.addSection(\"ok\");", { trusted: true });
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const launcher: PluginProcessLauncher = {
+      spawn(_command, _args, options) {
+        capturedEnv = options.env;
+        return completedEvalChild(source.digest);
+      },
+    };
+
+    const plugin = await evaluatePluginSource(source, {
+      launcher,
+      env: {
+        PATH: "caller-path",
+        __ZETA_EVAL_SECRET__: "caller-secret",
+        NODE_OPTIONS: "--require=forbidden",
+      },
+    });
+    try {
+      expect(capturedEnv).toEqual({ PATH: "caller-path" });
+    } finally {
+      await close(plugin);
+    }
+  });
+
+  test("统一 processLauncher 注入生效且收到真实 worker argv", async () => {
+    const digest = "digest";
+    const requests: LaunchRequest[] = [];
+    const launcher: ProcessLauncher = {
+      name: "fake-unified-launcher",
+      confinement: "none",
+      launch(request) {
+        requests.push(request);
+        const child = completedEvalChild("digest");
+        return {
+          pid: 1,
+          stdin: child.stdin,
+          stdout: (async function* () {
+            yield Buffer.from(JSON.stringify({
+              t: "result",
+              ok: true,
+              contributions: [],
+              installRegistered: false,
+              handlerIds: [],
+              digest,
+            }) + "\n");
+          })(),
+          stderr: null,
+          exited: child.exited,
+          kill: child.kill,
+        };
+      },
+    };
+    const source = createPluginSource("unified-launcher", 'api.addSection("ok");', { trusted: true });
+    const plugin = await evaluatePluginSource(source, { processLauncher: launcher });
+    try {
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.command).toBe(process.execPath);
+      expect(requests[0]!.args[1]).toContain("eval-worker.mjs");
+      expect(requests[0]!.env?.NODE_OPTIONS).toBeUndefined();
+    } finally {
+      await close(plugin);
+    }
+  });
+
+  test("旧 spawnImpl 注入点保持兼容", async () => {
+    const source = createPluginSource("spawn-compat", "api.addSection(\"ok\");", { trusted: true });
+    let spawned = 0;
+    const spawnImpl: EvalSpawn = () => {
+      spawned += 1;
+      return completedEvalChild(source.digest);
+    };
+
+    const plugin = await evaluatePluginSource(source, { spawnImpl });
+    try {
+      expect(spawned).toBe(1);
+    } finally {
+      await close(plugin);
     }
   });
 });

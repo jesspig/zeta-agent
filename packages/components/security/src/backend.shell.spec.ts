@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { LaunchRequest, ProcessLauncher } from "@zeta-agent/process";
 import {
   buildShellEnv,
   createLocalSafeBackend,
@@ -87,6 +88,42 @@ describe("T-09 shell 控制面", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("OPERATION_UNAVAILABLE");
     await expect(backend.run({ argv: ["echo", "hi"] })).rejects.toThrow(/CRITICAL_LAYER_DEGRADED/);
+  });
+
+  test("统一 ProcessLauncher 注入由 local-full shell 复用", async () => {
+    const requests: LaunchRequest[] = [];
+    const launcher: ProcessLauncher = {
+      name: "fake-unified-launcher",
+      confinement: "none",
+      launch(request) {
+        requests.push(request);
+        return {
+          pid: 4242,
+          stdin: { write() {}, end() {} },
+          stdout: (async function* () { yield Buffer.from("seam-shell"); })(),
+          stderr: null,
+          exited: Promise.resolve(0),
+          kill() {},
+        };
+      },
+    };
+    const backend = createLocalSafeBackend({
+      name: "local-full",
+      allowedDirectories: [root],
+      launcher,
+      operations: { "shell.start": "active" },
+    });
+    const result = await backend.shell.start({ argv: ["echo", "seam"], cwd: root });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.pid).toBe(4242);
+      const exit = await result.value.exited;
+      expect(exit.stdout).toContain("seam-shell");
+    }
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.command).toBe("echo");
+    expect(requests[0]!.args).toEqual(["seam"]);
+    expect(requests[0]!.cwd).toBe(root);
   });
 
   test("结构化 shell 接口支持进程树取消契约", async () => {

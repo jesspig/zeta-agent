@@ -48,6 +48,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/framework": "workspace:*",
+        "@zeta-agent/process": "workspace:*",
       },
       "devDependencies": {
         "@zeta-agent/cordis": "workspace:*",
@@ -63,6 +64,7 @@
         "@zeta-agent/events": "workspace:*",
         "@zeta-agent/loader": "workspace:*",
         "@zeta-agent/observability": "workspace:*",
+        "@zeta-agent/process": "workspace:*",
         "@zeta-agent/security": "workspace:*",
       },
     },
@@ -98,11 +100,16 @@
         "@zeta-agent/cordis": "workspace:*",
       },
     },
+    "packages/components/process": {
+      "name": "@zeta-agent/process",
+      "version": "0.0.0",
+    },
     "packages/components/security": {
       "name": "@zeta-agent/security",
       "version": "0.0.0",
       "dependencies": {
         "@zeta-agent/cordis": "workspace:*",
+        "@zeta-agent/process": "workspace:*",
       },
     },
     "packages/deploy": {
@@ -122,6 +129,7 @@
       "dependencies": {
         "@zeta-agent/cordis": "workspace:*",
         "@zeta-agent/events": "workspace:*",
+        "@zeta-agent/loader": "workspace:*",
         "@zeta-agent/observability": "workspace:*",
       },
     },
@@ -295,6 +303,8 @@
     "@zeta-agent/loader": ["@zeta-agent/loader@workspace:packages/components/loader"],
 
     "@zeta-agent/observability": ["@zeta-agent/observability@workspace:packages/components/observability"],
+
+    "@zeta-agent/process": ["@zeta-agent/process@workspace:packages/components/process"],
 
     "@zeta-agent/security": ["@zeta-agent/security@workspace:packages/components/security"],
 

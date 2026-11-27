@@ -14,6 +14,7 @@
     "@zeta-agent/capabilities": "workspace:*",
     "@zeta-agent/loader": "workspace:*",
     "@zeta-agent/observability": "workspace:*",
+    "@zeta-agent/process": "workspace:*",
     "@zeta-agent/security": "workspace:*"
   },
   "scripts": {

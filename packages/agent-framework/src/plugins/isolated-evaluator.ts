@@ -1,8 +1,13 @@
-import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Disposer } from "@zeta-agent/framework";
+import {
+  createNodeProcessLauncher,
+  filterProcessEnv,
+  MINIMAL_ENV_ALLOWLIST,
+  type ProcessLauncher,
+} from "@zeta-agent/process";
 import type { AgentEvent } from "../runtime/agent";
 import type { AgentPlugin, PluginContribution, PluginToolParameter } from "./types";
 import {
@@ -130,9 +135,20 @@ export type EvalSpawn = (
   options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv }
 ) => EvalChild;
 
+export interface PluginProcessLauncher {
+  spawn(
+    command: string,
+    args: readonly string[],
+    options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv }
+  ): EvalChild;
+}
+
+const defaultProcessLauncher = createNodeProcessLauncher();
+
 const defaultSpawn: EvalSpawn = (command, args, options) => {
-  const child = nodeSpawn(command, [...args], {
-    stdio: ["pipe", "pipe", "pipe"],
+  const child = defaultProcessLauncher.launch({
+    command,
+    args,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.env === undefined ? {} : { env: options.env }),
   });
@@ -142,27 +158,41 @@ const defaultSpawn: EvalSpawn = (command, args, options) => {
     },
     stdin: {
       write(data: string) {
-        if (!child.stdin.destroyed) child.stdin.write(data);
+        if (child.stdin.destroyed !== true) child.stdin.write(data);
       },
       end() {
-        if (!child.stdin.destroyed) child.stdin.end();
+        if (child.stdin.destroyed !== true) child.stdin.end();
       },
     },
     stdout: child.stdout as AsyncIterable<Uint8Array>,
-    stderr: child.stderr as AsyncIterable<Uint8Array>,
-    exited: new Promise<number | null>((done) => {
-      child.once("exit", (code) => done(code));
-      child.once("error", () => done(null));
-    }),
+    stderr: child.stderr === null ? null : (child.stderr as AsyncIterable<Uint8Array>),
+    exited: child.exited,
     kill() {
       try {
-        child.kill("SIGKILL");
+        child.kill();
       } catch {
         // 已退出：视为已确认终止。
       }
     },
   };
 };
+
+const defaultPluginProcessLauncher: PluginProcessLauncher = { spawn: defaultSpawn };
+
+// worker 只依赖运行时/系统基础路径与 locale；任何凭据或运行时注入开关都不得继承。
+const PLUGIN_WORKER_ENV_KEYS = new Map(
+  MINIMAL_ENV_ALLOWLIST.map((key) => [key.toUpperCase(), key])
+);
+
+function buildPluginWorkerEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const filtered = filterProcessEnv(overrides ?? process.env, { allowlist: MINIMAL_ENV_ALLOWLIST });
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(filtered)) {
+    if (value === undefined) continue;
+    env[PLUGIN_WORKER_ENV_KEYS.get(key.toUpperCase()) ?? key] = value;
+  }
+  return env;
+}
 
 function workerPath(): string {
   const candidates = [
@@ -596,6 +626,14 @@ class IsolatedPluginImpl implements IsolatedPlugin {
 export interface EvaluateOptions {
   readonly signal?: AbortSignal;
   readonly invocationGate?: InvocationGate;
+  /** 摘要校验后的宿主策略钩子；抛错即失败关闭且不启动 worker。 */
+  readonly beforeEvaluate?: (source: PluginSource) => void | Promise<void>;
+  /** 显式批准不可信源码求值；默认关闭，仅供已审查的测试或集成路径使用。 */
+  readonly allowUntrustedEvaluation?: boolean;
+  readonly launcher?: PluginProcessLauncher;
+  /** 统一进程 seam：注入后作为默认 launcher 的实现；launcher 显式提供时优先生效。 */
+  readonly processLauncher?: ProcessLauncher;
+  /** 兼容旧注入点；新代码应使用 launcher。 */
   readonly spawnImpl?: EvalSpawn;
   readonly execPath?: string;
   readonly cwd?: string;
@@ -606,8 +644,9 @@ export interface EvaluateOptions {
 /**
  * 隔离求值入口：
  * 1. 宿主先做 SHA-256 digest 校验，不匹配立即拒绝；
- * 2. 子进程（process.execPath + 随包 worker）内用受限 vm 求值顶层代码；
- * 3. 返回只含序列化贡献的受限宿主代理；函数执行一律 IPC。
+ * 2. digest 校验后执行宿主策略钩子，untrusted 默认拒绝；
+ * 3. 子进程（process.execPath + 随包 worker）内用受限 vm 求值顶层代码，环境按白名单过滤；
+ * 4. 返回只含序列化贡献的受限宿主代理；函数执行一律 IPC。
  */
 export async function evaluatePluginSource(
   source: PluginSource,
@@ -617,16 +656,46 @@ export async function evaluatePluginSource(
   const sourceLimits = { ...DEFAULT_EVALUATE_LIMITS, ...(source.limits ?? {}) };
   // 校验在宿主进行且早于任何子进程创建：格式/长度/不匹配立即拒绝。
   verifyPluginSourceDigest(source, sourceLimits);
+  await options.beforeEvaluate?.(source);
+  if (source.trusted !== true && options.allowUntrustedEvaluation !== true) {
+    throw new Error(
+      "PLUGIN_UNTRUSTED_EVALUATION_DENIED: source.trusted must be true unless allowUntrustedEvaluation is explicitly enabled"
+    );
+  }
 
   const timeoutMs = sourceLimits.timeoutMs!;
   const invokeTimeoutMs = sourceLimits.invokeTimeoutMs!;
   const terminateGraceMs = options.terminateGraceMs ?? 200;
   const memoryFlag = `--max-old-space-size=${sourceLimits.maxOldSpaceMb!}`;
   const execPath = options.execPath ?? process.execPath;
-  const spawnImpl = options.spawnImpl ?? defaultSpawn;
-  const child = spawnImpl(execPath, [memoryFlag, workerPath()], {
+  const launcher = options.launcher ?? (
+    options.spawnImpl !== undefined
+      ? { spawn: options.spawnImpl }
+      : options.processLauncher === undefined
+        ? defaultPluginProcessLauncher
+        : {
+            spawn: (command, args, spawnOptions) => {
+              const child = options.processLauncher!.launch({
+                command,
+                args,
+                ...(spawnOptions.cwd === undefined ? {} : { cwd: spawnOptions.cwd }),
+                ...(spawnOptions.env === undefined ? {} : { env: spawnOptions.env }),
+              });
+              return {
+                get pid() { return child.pid; },
+                stdin: child.stdin,
+                stdout: child.stdout,
+                stderr: child.stderr,
+                exited: child.exited,
+                kill: () => child.kill(),
+              };
+            },
+          }
+  );
+  const child = launcher.spawn(execPath, [memoryFlag, workerPath()], {
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    ...(options.env === undefined ? {} : { env: options.env }),
+    // 显式传 env，避免 node:child_process 在缺省时继承整个 process.env。
+    env: buildPluginWorkerEnv(options.env),
   });
   void drain(child.stderr);
   const lines = linesFrom(child.stdout);
