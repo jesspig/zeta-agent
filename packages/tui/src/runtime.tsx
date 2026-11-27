@@ -1,4 +1,4 @@
-import { CliRenderer } from "@opentui/core";
+import { CliRenderer, CliRenderEvents } from "@opentui/core";
 import { render as openTuiRender, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { encodeControlFrame, type ControlAction } from "@zeta-agent/agent";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
@@ -869,15 +869,19 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   let push: (message: RuntimeMessage) => void = () => {};
   let editorHandle: EditorHandle | undefined;
   let destroyed = false;
-  // 原生终端尺寸变化时上报 xterm window-change；真实 resize 由宿主/PTY 触发，非测试合成标记。
-  const reportResize = (): void => {
+  // 原生终端与渲染器尺寸变化都上报 xterm window-change；尺寸优先取渲染器接受值，stdout 兜底。
+  const reportResize = (width?: number, height?: number): void => {
     if (destroyed) return;
     process.stdout.write(resizeSequence({
-      width: process.stdout.columns || 80,
-      height: process.stdout.rows || 24,
+      width: width || process.stdout.columns || 80,
+      height: height || process.stdout.rows || 24,
     }));
   };
-  process.on("SIGWINCH", reportResize);
+  const reportResizeFromRenderer = (): void =>
+    reportResize(renderer.terminalWidth, renderer.terminalHeight);
+  renderer.on(CliRenderEvents.RESIZE, reportResizeFromRenderer);
+  // ConPTY 在部分平台只触发 SIGWINCH，不派发 RESIZE；两条路径都使用渲染器尺寸兜底。
+  process.on("SIGWINCH", reportResizeFromRenderer);
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
@@ -923,7 +927,8 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const cleanup = (): void => {
     if (destroyed) return;
     destroyed = true;
-    process.off("SIGWINCH", reportResize);
+    renderer.off(CliRenderEvents.RESIZE, reportResizeFromRenderer);
+    process.off("SIGWINCH", reportResizeFromRenderer);
     releaseUsage?.();
     releaseOsc?.();
     signals?.dispose();
