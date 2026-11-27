@@ -333,16 +333,34 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
    * 与 confinedPath 的 realpath 校验叠加，缩小 realpath→open 之间被替换的窗口。
    */
   const assertNoSymlinkWithinAllowed = (target: string): void => {
-    const bases = allowed.map((directory) => {
+    // 原始根用于停止遍历（macOS tmpdir 的 /var 是合法符号链接祖先），规范化根用于
+    // 处理根目录自身的链接；只有配置根本身是链接时才拒绝，避免误伤系统链接祖先。
+    const rawBases = allowed.map((directory) => resolve(directory));
+    const canonicalBases = rawBases.map((directory) => {
       try {
-        return realpathSync(resolve(directory));
+        return realpathSync(directory);
       } catch {
-        return resolve(directory);
+        return directory;
       }
     });
-    const stop = new Set(bases.filter((base) => isInside(target, base)));
+    const inScope = (base: string): boolean => isInside(target, base) || target === base;
+    const stop = new Set([...rawBases, ...canonicalBases].filter(inScope));
+    const rawStop = new Set(rawBases.filter(inScope));
     let cursor = target;
     for (;;) {
+      const resolved = resolve(cursor);
+      if (stop.has(resolved)) {
+        if (rawStop.has(resolved)) {
+          try {
+            if (lstatSync(cursor).isSymbolicLink()) {
+              throw new Error("NOFOLLOW_VIOLATION: allowed root is a symbolic link/reparse point");
+            }
+          } catch (error) {
+            if (error instanceof Error && error.message.includes("NOFOLLOW")) throw error;
+          }
+        }
+        break;
+      }
       try {
         const stat = lstatSync(cursor);
         if (stat.isSymbolicLink()) throw new Error("NOFOLLOW_VIOLATION: symbolic link/reparse point in path");
@@ -350,7 +368,6 @@ export function createLocalSafeBackend(options: LocalSafeBackendOptions = {}): S
         if (error instanceof Error && error.message.includes("NOFOLLOW")) throw error;
         // 中间层不存在交给后续 open/lstat 处理。
       }
-      if (stop.has(resolve(cursor))) break;
       const parent = dirname(cursor);
       if (parent === cursor) break;
       cursor = parent;
