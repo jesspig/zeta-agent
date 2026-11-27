@@ -118,11 +118,14 @@ import {
 import { builtinToolDefinitions, type ToolDefinition, type ToolResourceLimits } from "./tools/builtins";
 import {
   createEffectBridge,
+  createFileTelemetrySpool,
   createLogger,
   createOtlpSpanExporter,
   createSpanCollector,
+  createTelemetryPipeline,
   resolveLogSink,
   type EffectBridge,
+  type ExportResult,
   type Logger,
   type LoggerOptions,
   type OtlpSpan,
@@ -550,6 +553,14 @@ export interface AgentOptions {
   readonly otlpTracesEndpoint?: string;
   /** 可注入的 span sink；优先于 otlpTracesEndpoint。 */
   readonly spanExporter?: SpanExporter;
+  /** span 遥测队列上限；包含正在持久化与投递的项目。 */
+  readonly telemetryQueueSize?: number;
+  /** 单个 OTLP trace 请求的最大 span 数。 */
+  readonly telemetryBatchSize?: number;
+  /** span 投递最大尝试次数；永久错误不会重试。 */
+  readonly telemetryMaxAttempts?: number;
+  /** 可选 JSONL span spool；启用后先持久化再投递，重启后 at-least-once 重放。 */
+  readonly telemetrySpoolPath?: string;
   readonly coreContext?: CoreContextLike;
   readonly allowedDirectories?: readonly string[];
   /** 系统提示词；缺省时注入 cwd/platform/tools 等运行环境信息。 */
@@ -1192,10 +1203,45 @@ export function createAgent(options: AgentOptions = {}): Agent {
     (options.otlpTracesEndpoint === undefined
       ? undefined
       : createOtlpSpanExporter({ endpoint: options.otlpTracesEndpoint }));
+  const spanSpool = options.telemetrySpoolPath === undefined
+    ? undefined
+    : createFileTelemetrySpool<OtlpSpan>({ path: options.telemetrySpoolPath });
+  const spanPipeline = spanExporter === undefined
+    ? undefined
+    : createTelemetryPipeline<OtlpSpan>({
+        exporter: {
+          async export(spans) {
+            const exported: unknown = spanExporter.export(spans);
+            const result: unknown = await Promise.resolve(exported);
+            if (
+              typeof result === "object" && result !== null && "ok" in result &&
+              typeof (result as { readonly ok?: unknown }).ok === "boolean"
+            ) {
+              return result as ExportResult;
+            }
+            return { ok: true };
+          },
+        },
+        maxQueueSize: options.telemetryQueueSize ?? 2_048,
+        maxBatchSize: options.telemetryBatchSize ?? 512,
+        maxAttempts: options.telemetryMaxAttempts ?? 4,
+        ...(spanSpool === undefined ? {} : { spool: spanSpool }),
+        onFailure: (failure) => fiberLogger.warn(`telemetry ${failure.reason}: ${failure.error.message}`),
+      });
+  if (spanPipeline !== undefined) {
+    void spanPipeline.start().catch((error: unknown) => {
+      fiberLogger.warn(`telemetry recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
   const spanCollector =
     observedContext === undefined
       ? undefined
-      : createSpanCollector({ bridge: effectBridge, exporter: spanExporter });
+      : createSpanCollector({
+          bridge: effectBridge,
+          ...(spanExporter === undefined ? {} : { exporter: spanExporter }),
+          ...(spanPipeline === undefined ? {} : { pipeline: spanPipeline }),
+          onExportFailure: (error) => fiberLogger.warn(`span export failed: ${error.message}`),
+        });
 
   stream.subscribe((event) => {
     const content = "message" in event ? String(event.message.content) : event.type;
@@ -2645,6 +2691,9 @@ export function createAgent(options: AgentOptions = {}): Agent {
         for (const stop of brokerRegistrations) stop();
         brokerRegistrations.length = 0;
         spanCollector?.dispose();
+        await spanCollector?.flush();
+        await spanPipeline?.shutdown();
+        await spanSpool?.close();
         if (observedContext !== undefined) await observedContext.dispose();
         await closeAuditSink();
       })();

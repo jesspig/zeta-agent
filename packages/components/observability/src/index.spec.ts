@@ -108,7 +108,7 @@ describe("T-19 observability", () => {
     expect(getActiveEffectBridge()).toBeUndefined();
   });
 
-  test("OTLP 配置失败降级本地 file sink，发送抛错也降级", () => {
+  test("OTLP 配置失败降级本地 file sink，同步及异步发送抛错也降级", async () => {
     const otlpSends: LogMessage[] = [];
     const fileWrites: LogMessage[] = [];
     const healthy = resolveLogSink({
@@ -124,7 +124,7 @@ describe("T-19 observability", () => {
 
     const invalid = resolveLogSink({
       endpoint: "not-a-url",
-      exporter: { export: (message) => otlpSends.push(message) },
+      exporter: { export: async (message) => { otlpSends.push(message); return { ok: true } as const; } },
       file: { write: (message) => fileWrites.push(message) },
     });
     expect(invalid.mode).toBe("file");
@@ -133,11 +133,12 @@ describe("T-19 observability", () => {
 
     const flaky = resolveLogSink({
       endpoint: "https://otel.example.com/v1/logs",
-      exporter: { export: () => { throw new Error("OTLP_DOWN"); } },
+      exporter: { export: async () => { throw new Error("OTLP_DOWN"); } },
       file: { write: (message) => fileWrites.push(message) },
     });
     expect(flaky.mode).toBe("otlp");
     flaky.sink(sample);
+    await Bun.sleep(0);
     expect(fileWrites).toHaveLength(2);
   });
 });
