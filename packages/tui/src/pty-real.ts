@@ -95,7 +95,6 @@ export async function runPtyScenario(
   let proc: SpawnLike | undefined;
   let entered = false;
   let exitTimer: ReturnType<typeof setTimeout> | undefined;
-  let resizeWaitTimer: ReturnType<typeof setInterval> | undefined;
   const killTimer = setTimeout(() => {
     try {
       proc?.kill();
@@ -121,29 +120,15 @@ export async function runPtyScenario(
           raw += Buffer.from(data).toString("utf8");
           if (scenario === "abnormal" || entered || !raw.includes(ALTERNATE_ENTER)) return;
           entered = true;
-          const sendExit = (): void => {
+          if (scenario === "resize") proc?.terminal?.resize(120, 40);
+          // resize 先于退出键：保证 window-change 已被子进程消费。
+          exitTimer = setTimeout(() => {
             try {
               proc?.terminal?.write(EXIT_KEY);
             } catch {
               // 已退出
             }
-          };
-          if (scenario === "resize") {
-            proc?.terminal?.resize(120, 40);
-            // 等待真实 window-change 上报后再退出；不注入合成 escape 序列。
-            resizeWaitTimer = setInterval(() => {
-              if (!raw.includes("\x1b[8;40;120t")) return;
-              if (resizeWaitTimer !== undefined) clearInterval(resizeWaitTimer);
-              if (exitTimer !== undefined) clearTimeout(exitTimer);
-              sendExit();
-            }, 10);
-            exitTimer = setTimeout(() => {
-              if (resizeWaitTimer !== undefined) clearInterval(resizeWaitTimer);
-              sendExit();
-            }, 2000);
-          } else {
-            exitTimer = setTimeout(sendExit, 80);
-          }
+          }, 80);
         },
       },
     });
@@ -161,7 +146,6 @@ export async function runPtyScenario(
     };
   } finally {
     if (exitTimer !== undefined) clearTimeout(exitTimer);
-    if (resizeWaitTimer !== undefined) clearInterval(resizeWaitTimer);
     clearTimeout(killTimer);
     try {
       proc?.terminal?.close();
