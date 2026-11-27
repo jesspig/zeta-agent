@@ -874,7 +874,10 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     if (destroyed) return;
     process.stdout.write(resizeSequence({ width, height }));
   };
+  const reportResizeFromRenderer = (): void => reportResize(renderer.terminalWidth, renderer.terminalHeight);
   renderer.on(CliRenderEvents.RESIZE, reportResize);
+  // ConPTY 在部分平台只触发 SIGWINCH，不派发 RESIZE；使用渲染器接受后的尺寸兜底。
+  process.on("SIGWINCH", reportResizeFromRenderer);
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
@@ -921,6 +924,7 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
     if (destroyed) return;
     destroyed = true;
     renderer.off(CliRenderEvents.RESIZE, reportResize);
+    process.off("SIGWINCH", reportResizeFromRenderer);
     releaseUsage?.();
     releaseOsc?.();
     signals?.dispose();
