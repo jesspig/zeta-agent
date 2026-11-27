@@ -880,8 +880,8 @@ export async function renderTui(options: RuntimeTuiOptions = {}): Promise<Runtim
   const reportResizeFromRenderer = (): void =>
     reportResize(renderer.terminalWidth, renderer.terminalHeight);
   renderer.on(CliRenderEvents.RESIZE, reportResizeFromRenderer);
-  // ConPTY 在部分平台只触发 SIGWINCH，不派发 RESIZE；两条路径都使用渲染器尺寸兜底。
-  process.on("SIGWINCH", reportResizeFromRenderer);
+  // ConPTY 在部分平台只触发 SIGWINCH，不派发 RESIZE；此时宿主 PTY 尺寸先于渲染器更新。
+  process.on("SIGWINCH", () => reportResize(process.stdout.columns, process.stdout.rows));
   // 响应式模型状态：宿主拉取 /v1/models 后经 handle.setModelOptions/setModel 刷新 UI。
   const [modelList, setModelList] = createSignal<readonly RuntimeModelOption[]>([]);
   const [currentModel, setCurrentModel] = createSignal<string | undefined>(options.model);
